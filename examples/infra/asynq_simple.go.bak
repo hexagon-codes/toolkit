@@ -1,0 +1,169 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/everydayItems/gopkg/infra/queue/asynq"
+	asq "github.com/hibiken/asynq"
+)
+
+func main() {
+	fmt.Println("=== Asynq 任务队列示例 ===\n")
+
+	// 1. 配置日志和配置提供者
+	logger := &CustomLogger{}
+	configProvider := &CustomConfig{
+		redisAddrs:     []string{"localhost:6379"},
+		redisPassword:  "",
+		concurrency:    10,
+		pollingEnabled: true,
+		redisEnabled:   true,
+	}
+
+	asynq.SetLogger(logger)
+	asynq.SetConfigProvider(configProvider)
+
+	fmt.Println("✅ 配置已设置")
+	fmt.Println("   Redis: localhost:6379")
+	fmt.Println("   Concurrency: 10\n")
+
+	// 2. 初始化管理器
+	manager, err := asynq.InitManagerFromConfig(configProvider)
+	if err != nil {
+		fmt.Printf("❌ 初始化失败: %v\n", err)
+		return
+	}
+
+	fmt.Println("✅ Manager 初始化成功\n")
+
+	// 3. 注册任务处理器
+	manager.RegisterHandler("email:send", handleEmailTask)
+	manager.RegisterHandler("report:generate", handleReportTask)
+
+	fmt.Println("✅ 任务处理器已注册")
+	fmt.Println("   - email:send")
+	fmt.Println("   - report:generate\n")
+
+	// 4. 启动 Worker
+	ctx := context.Background()
+	if err := manager.Start(ctx); err != nil {
+		fmt.Printf("❌ 启动失败: %v\n", err)
+		return
+	}
+
+	fmt.Println("✅ Worker 已启动\n")
+
+	// 5. 入队任务
+	fmt.Println("📤 入队任务...")
+
+	// 简单任务
+	task1 := asynq.NewTask("email:send").
+		Payload(map[string]string{"to": "user@example.com", "subject": "Hello"}).
+		Queue(asynq.QueueHigh).
+		MaxRetry(3)
+
+	info1, err := task1.Enqueue(ctx)
+	if err != nil {
+		fmt.Printf("❌ 入队失败: %v\n", err)
+	} else {
+		fmt.Printf("   ✅ 任务 1 已入队: ID=%s, Queue=%s\n", info1.ID, info1.Queue)
+	}
+
+	// 延迟任务
+	task2 := asynq.NewTask("report:generate").
+		Payload(map[string]interface{}{"type": "monthly", "month": "2024-01"}).
+		ProcessIn(5 * time.Second).
+		Queue(asynq.QueueDefault)
+
+	info2, err := task2.Enqueue(ctx)
+	if err != nil {
+		fmt.Printf("❌ 入队失败: %v\n", err)
+	} else {
+		fmt.Printf("   ✅ 任务 2 已入队: ID=%s, 5秒后处理\n", info2.ID)
+	}
+
+	fmt.Println("\n⏳ 等待任务处理...")
+	time.Sleep(10 * time.Second)
+
+	// 6. 停止
+	fmt.Println("\n🛑 停止 Worker...")
+	manager.Stop()
+
+	fmt.Println("\n✅ 示例完成!")
+}
+
+// =========================================
+// 任务处理器
+// =========================================
+
+func handleEmailTask(ctx context.Context, t *asq.Task) error {
+	fmt.Printf("📧 处理邮件任务: ID=%s\n", t.Type())
+	time.Sleep(1 * time.Second)
+	return nil
+}
+
+func handleReportTask(ctx context.Context, t *asq.Task) error {
+	fmt.Printf("📊 处理报告任务: ID=%s\n", t.Type())
+	time.Sleep(2 * time.Second)
+	return nil
+}
+
+// =========================================
+// 自定义实现
+// =========================================
+
+type CustomLogger struct{}
+
+func (l *CustomLogger) Log(msg string) {
+	fmt.Println("[LOG]", msg)
+}
+
+func (l *CustomLogger) LogSkip(skip int, msg string) {
+	fmt.Println("[LOG]", msg)
+}
+
+func (l *CustomLogger) Error(msg string) {
+	fmt.Println("[ERROR]", msg)
+}
+
+func (l *CustomLogger) ErrorSkip(skip int, msg string) {
+	fmt.Println("[ERROR]", msg)
+}
+
+type CustomConfig struct {
+	redisAddrs     []string
+	redisPassword  string
+	concurrency    int
+	pollingEnabled bool
+	redisEnabled   bool
+}
+
+func (c *CustomConfig) IsRedisEnabled() bool {
+	return c.redisEnabled
+}
+
+func (c *CustomConfig) GetRedisAddrs() []string {
+	return c.redisAddrs
+}
+
+func (c *CustomConfig) GetRedisPassword() string {
+	return c.redisPassword
+}
+
+func (c *CustomConfig) GetRedisUsername() string {
+	return ""
+}
+
+func (c *CustomConfig) GetConcurrency() int {
+	return c.concurrency
+}
+
+func (c *CustomConfig) GetQueuePrefix() string {
+	return ""
+}
+
+func (c *CustomConfig) IsPollingEnabled() bool {
+	return c.pollingEnabled
+}
