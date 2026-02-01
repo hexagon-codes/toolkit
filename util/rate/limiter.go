@@ -263,3 +263,58 @@ func (sw *SlidingWindow) cleanup(now time.Time) {
 		}
 	}
 }
+
+// Count 返回当前窗口内的请求数量
+func (sw *SlidingWindow) Count() int {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+
+	sw.cleanup(time.Now())
+	return len(sw.requests)
+}
+
+// Record 记录一次请求，不检查是否超限
+// 适用于只需要追踪请求数量而不需要限流的场景
+func (sw *SlidingWindow) Record() {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+
+	now := time.Now()
+	sw.cleanup(now)
+	sw.requests = append(sw.requests, now)
+}
+
+// TryAllow 尝试允许请求通过，返回是否成功和当前请求数
+// 适用于需要同时获取限流结果和当前状态的场景
+func (sw *SlidingWindow) TryAllow() (allowed bool, count int) {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+
+	now := time.Now()
+	sw.cleanup(now)
+
+	count = len(sw.requests)
+	if count < sw.capacity {
+		sw.requests = append(sw.requests, now)
+		return true, count + 1
+	}
+
+	return false, count
+}
+
+// Reset 重置滑动窗口
+func (sw *SlidingWindow) Reset() {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	sw.requests = sw.requests[:0]
+}
+
+// Capacity 返回窗口容量
+func (sw *SlidingWindow) Capacity() int {
+	return sw.capacity
+}
+
+// Window 返回窗口大小
+func (sw *SlidingWindow) Window() time.Duration {
+	return sw.window
+}
