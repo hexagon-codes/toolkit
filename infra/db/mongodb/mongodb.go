@@ -28,19 +28,36 @@ type Client struct {
 
 // Global singleton.
 var (
-	instance *Client
-	once     sync.Once
-	initErr  error
-	mu       sync.RWMutex
+	instance    *Client
+	initialized atomic.Bool // 使用 atomic.Bool 替代 sync.Once，支持安全重置
+	initErr     error
+	mu          sync.RWMutex
 )
 
 // Init initializes the global MongoDB client singleton.
 // It is safe to call multiple times; only the first call takes effect.
 // Returns any error from the initial connection attempt.
 func Init(ctx context.Context, cfg *Config, opts ...Option) error {
-	once.Do(func() {
-		instance, initErr = New(ctx, cfg, opts...)
-	})
+	// 快速路径：已初始化则直接返回
+	if initialized.Load() {
+		mu.RLock()
+		err := initErr
+		mu.RUnlock()
+		return err
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// double check：获取锁后再次检查
+	if initialized.Load() {
+		return initErr
+	}
+
+	instance, initErr = New(ctx, cfg, opts...)
+	if initErr == nil {
+		initialized.Store(true)
+	}
 	return initErr
 }
 
@@ -224,6 +241,7 @@ func Close() error {
 
 // Reset resets the singleton, allowing re-initialization.
 // This is primarily useful for testing.
+// 此函数是线程安全的，使用 atomic.Bool 确保与 Init() 不会竞态
 func Reset() {
 	mu.Lock()
 	defer mu.Unlock()
@@ -232,7 +250,7 @@ func Reset() {
 		_ = instance.Close()
 		instance = nil
 	}
-	once = sync.Once{}
+	initialized.Store(false) // 原子操作，安全重置初始化状态
 	initErr = nil
 }
 

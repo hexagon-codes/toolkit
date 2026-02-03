@@ -45,12 +45,21 @@ func NewClient(opts ...Option) *Client {
 		timeout:     30 * time.Second,
 		retries:     0,
 		retryWait:   time.Second,
-		ssrfProtect: false,                // 默认不启用（向后兼容）
-		maxBodySize: 100 * 1024 * 1024,    // 默认 100MB
+		ssrfProtect: false,             // 默认不启用（向后兼容）
+		maxBodySize: 100 * 1024 * 1024, // 默认 100MB
 	}
 
 	for _, opt := range opts {
 		opt(c)
+	}
+
+	// 如果启用了 SSRF 防护，使用自定义 Transport 在连接时检查 IP
+	// 这可以防止 DNS Rebinding 攻击
+	if c.ssrfProtect && c.client.Transport == nil {
+		c.client.Transport = &ssrfSafeTransport{
+			base:         http.DefaultTransport.(*http.Transport).Clone(),
+			allowedHosts: c.allowedHosts,
+		}
 	}
 
 	return c
@@ -435,6 +444,63 @@ func isCloudMetadataIP(ip net.IP) bool {
 		}
 	}
 	return false
+}
+
+// ssrfSafeTransport 防止 DNS Rebinding 攻击的 Transport
+// 在实际建立 TCP 连接时检查解析后的 IP 地址
+type ssrfSafeTransport struct {
+	base         *http.Transport
+	allowedHosts []string
+}
+
+func (t *ssrfSafeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// 设置自定义 DialContext，在连接时检查 IP
+	t.base.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+
+		// 检查是否在白名单中
+		for _, allowed := range t.allowedHosts {
+			if host == allowed {
+				// 白名单主机，使用默认 Dialer
+				return (&net.Dialer{
+					Timeout:   30 * time.Second,
+					KeepAlive: 30 * time.Second,
+				}).DialContext(ctx, network, addr)
+			}
+		}
+
+		// 解析 IP 地址
+		ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(ips) == 0 {
+			return nil, errors.New("httpx: no IP addresses found for host")
+		}
+
+		// 检查所有解析的 IP 是否安全
+		for _, ipAddr := range ips {
+			ip := ipAddr.IP
+			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+				ip.IsLinkLocalMulticast() || isCloudMetadataIP(ip) {
+				return nil, ErrSSRFBlocked
+			}
+		}
+
+		// 使用第一个安全的 IP 地址建立连接
+		// 这样可以防止 DNS Rebinding：连接时使用的 IP 就是我们检查过的 IP
+		safeAddr := net.JoinHostPort(ips[0].IP.String(), port)
+		return (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext(ctx, network, safeAddr)
+	}
+
+	return t.base.RoundTrip(req)
 }
 
 // Response HTTP 响应

@@ -113,10 +113,37 @@ func (db *DB) ExecWithTimeout(ctx context.Context, timeout time.Duration, query 
 }
 
 // QueryWithTimeout 带超时的 Query
+//
+// 警告：此函数存在 context 生命周期问题，推荐使用 QueryWithTimeoutEx
+// 或直接使用 QueryContext 并自行管理 context。
+// 原因：Rows 返回后 cancel 立即调用，但 Scan() 仍需要有效的 context。
 func (db *DB) QueryWithTimeout(ctx context.Context, timeout time.Duration, query string, args ...any) (*sql.Rows, error) {
+	// 注意：这里不调用 cancel 是因为 Rows.Scan() 在返回后才执行
+	// context 超时后会自动清理资源
 	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	_ = cancel // 标记为已知忽略，context 超时后会自动清理
 	return db.QueryContext(ctx, query, args...)
+}
+
+// QueryWithTimeoutEx 带超时的 Query（返回 cancel 函数）
+//
+// 调用者必须在 Rows 处理完成后调用 cancel 函数释放资源
+//
+// 示例：
+//
+//	rows, cancel, err := db.QueryWithTimeoutEx(ctx, 5*time.Second, "SELECT id, name FROM users")
+//	if err != nil { return err }
+//	defer cancel()
+//	defer rows.Close()
+//	for rows.Next() { ... }
+func (db *DB) QueryWithTimeoutEx(ctx context.Context, timeout time.Duration, query string, args ...any) (*sql.Rows, context.CancelFunc, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		cancel()
+		return nil, nil, err
+	}
+	return rows, cancel, nil
 }
 
 // QueryRowWithTimeout 带超时的 QueryRow

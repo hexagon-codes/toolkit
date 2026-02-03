@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -241,6 +242,8 @@ func (c *Client) IsClosed() bool {
 }
 
 // Info returns cluster information.
+//
+// 注意：调用者必须关闭返回的 Response.Body，推荐使用 InfoParsed 替代
 func (c *Client) Info(ctx context.Context) (*esapi.Response, error) {
 	if c.closed.Load() {
 		return nil, ErrAlreadyClosed
@@ -248,10 +251,73 @@ func (c *Client) Info(ctx context.Context) (*esapi.Response, error) {
 	return c.client.Info(c.client.Info.WithContext(ctx))
 }
 
+// ClusterInfo 集群信息结构体
+type ClusterInfo struct {
+	Name        string `json:"name"`
+	ClusterName string `json:"cluster_name"`
+	ClusterUUID string `json:"cluster_uuid"`
+	Version     struct {
+		Number string `json:"number"`
+	} `json:"version"`
+}
+
+// InfoParsed 返回解析后的集群信息（推荐使用，无需手动关闭 Body）
+func (c *Client) InfoParsed(ctx context.Context) (*ClusterInfo, error) {
+	res, err := c.Info(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+
+	if res.IsError() {
+		return nil, fmt.Errorf("elasticsearch: info request failed: %s", res.Status())
+	}
+
+	var info ClusterInfo
+	if err := json.NewDecoder(res.Body).Decode(&info); err != nil {
+		return nil, fmt.Errorf("elasticsearch: failed to decode info response: %w", err)
+	}
+	return &info, nil
+}
+
 // Health returns cluster health.
+//
+// 注意：调用者必须关闭返回的 Response.Body，推荐使用 HealthParsed 替代
 func (c *Client) Health(ctx context.Context) (*esapi.Response, error) {
 	if c.closed.Load() {
 		return nil, ErrAlreadyClosed
 	}
 	return c.client.Cluster.Health(c.client.Cluster.Health.WithContext(ctx))
+}
+
+// ClusterHealth 集群健康状态结构体
+type ClusterHealth struct {
+	ClusterName         string `json:"cluster_name"`
+	Status              string `json:"status"` // green, yellow, red
+	NumberOfNodes       int    `json:"number_of_nodes"`
+	NumberOfDataNodes   int    `json:"number_of_data_nodes"`
+	ActivePrimaryShards int    `json:"active_primary_shards"`
+	ActiveShards        int    `json:"active_shards"`
+	RelocatingShards    int    `json:"relocating_shards"`
+	InitializingShards  int    `json:"initializing_shards"`
+	UnassignedShards    int    `json:"unassigned_shards"`
+}
+
+// HealthParsed 返回解析后的集群健康状态（推荐使用，无需手动关闭 Body）
+func (c *Client) HealthParsed(ctx context.Context) (*ClusterHealth, error) {
+	res, err := c.Health(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+
+	if res.IsError() {
+		return nil, fmt.Errorf("elasticsearch: health request failed: %s", res.Status())
+	}
+
+	var health ClusterHealth
+	if err := json.NewDecoder(res.Body).Decode(&health); err != nil {
+		return nil, fmt.Errorf("elasticsearch: failed to decode health response: %w", err)
+	}
+	return &health, nil
 }

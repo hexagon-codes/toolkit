@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"unsafe"
 )
 
 // Set 泛型 HashSet 实现
@@ -527,33 +528,40 @@ func (ss *SyncSet[T]) All(predicate func(T) bool) bool {
 }
 
 // Union 并集（线程安全）
+// 使用地址排序确保固定的加锁顺序，防止 ABBA 死锁
 func (ss *SyncSet[T]) Union(other *SyncSet[T]) *SyncSet[T] {
-	ss.mu.RLock()
-	other.mu.RLock()
-	defer ss.mu.RUnlock()
-	defer other.mu.RUnlock()
+	// 按地址排序加锁，防止死锁
+	first, second := orderByAddr(ss, other)
+	first.mu.RLock()
+	second.mu.RLock()
+	defer first.mu.RUnlock()
+	defer second.mu.RUnlock()
 	return &SyncSet[T]{
 		s: ss.s.Union(other.s),
 	}
 }
 
 // Intersection 交集（线程安全）
+// 使用地址排序确保固定的加锁顺序，防止 ABBA 死锁
 func (ss *SyncSet[T]) Intersection(other *SyncSet[T]) *SyncSet[T] {
-	ss.mu.RLock()
-	other.mu.RLock()
-	defer ss.mu.RUnlock()
-	defer other.mu.RUnlock()
+	first, second := orderByAddr(ss, other)
+	first.mu.RLock()
+	second.mu.RLock()
+	defer first.mu.RUnlock()
+	defer second.mu.RUnlock()
 	return &SyncSet[T]{
 		s: ss.s.Intersection(other.s),
 	}
 }
 
 // Difference 差集（线程安全）
+// 使用地址排序确保固定的加锁顺序，防止 ABBA 死锁
 func (ss *SyncSet[T]) Difference(other *SyncSet[T]) *SyncSet[T] {
-	ss.mu.RLock()
-	other.mu.RLock()
-	defer ss.mu.RUnlock()
-	defer other.mu.RUnlock()
+	first, second := orderByAddr(ss, other)
+	first.mu.RLock()
+	second.mu.RLock()
+	defer first.mu.RUnlock()
+	defer second.mu.RUnlock()
 	return &SyncSet[T]{
 		s: ss.s.Difference(other.s),
 	}
@@ -564,4 +572,14 @@ func (ss *SyncSet[T]) String() string {
 	ss.mu.RLock()
 	defer ss.mu.RUnlock()
 	return "Sync" + ss.s.String()
+}
+
+// orderByAddr 按地址排序两个 SyncSet，确保固定的加锁顺序
+// 用于防止多个 goroutine 同时操作两个 SyncSet 时发生 ABBA 死锁
+func orderByAddr[T comparable](a, b *SyncSet[T]) (*SyncSet[T], *SyncSet[T]) {
+	// 使用 uintptr 比较地址，确保一致的排序
+	if uintptr(unsafe.Pointer(a)) < uintptr(unsafe.Pointer(b)) {
+		return a, b
+	}
+	return b, a
 }

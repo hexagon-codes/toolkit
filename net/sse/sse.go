@@ -350,6 +350,17 @@ func (s *Stream) readLoop() {
 				case s.events <- event:
 				case <-s.done:
 					return
+				default:
+					// 事件通道已满，丢弃最旧的事件以防止阻塞
+					// 这是一个权衡：防止 goroutine 泄漏比丢失事件更重要
+					select {
+					case <-s.events: // 丢弃一个旧事件
+						s.events <- event // 写入新事件
+					case <-s.done:
+						return
+					default:
+						// 如果还是失败，跳过这个事件
+					}
 				}
 			}
 		}

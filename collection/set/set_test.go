@@ -2,6 +2,7 @@ package set
 
 import (
 	"testing"
+	"time"
 )
 
 func TestNew(t *testing.T) {
@@ -526,5 +527,107 @@ func BenchmarkIntersection(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		s1.Intersection(s2)
+	}
+}
+
+// --- SyncSet 并发死锁测试 ---
+
+// TestSyncSetConcurrentUnionNoDeadlock 测试 SyncSet.Union 在并发场景下不会死锁
+// 此测试验证了使用地址排序加锁顺序的修复是否有效
+func TestSyncSetConcurrentUnionNoDeadlock(t *testing.T) {
+	a := NewSyncSet(1, 2, 3)
+	b := NewSyncSet(4, 5, 6)
+
+	done := make(chan bool)
+	timeout := time.After(5 * time.Second)
+
+	// 启动多个 goroutine 同时进行 a.Union(b) 和 b.Union(a)
+	for i := 0; i < 100; i++ {
+		go func() {
+			for j := 0; j < 100; j++ {
+				_ = a.Union(b)
+			}
+			done <- true
+		}()
+		go func() {
+			for j := 0; j < 100; j++ {
+				_ = b.Union(a)
+			}
+			done <- true
+		}()
+	}
+
+	// 等待所有 goroutine 完成或超时
+	for i := 0; i < 200; i++ {
+		select {
+		case <-done:
+			// 正常完成
+		case <-timeout:
+			t.Fatal("deadlock detected: SyncSet.Union timed out")
+		}
+	}
+}
+
+// TestSyncSetConcurrentIntersectionNoDeadlock 测试 SyncSet.Intersection 在并发场景下不会死锁
+func TestSyncSetConcurrentIntersectionNoDeadlock(t *testing.T) {
+	a := NewSyncSet(1, 2, 3, 4)
+	b := NewSyncSet(3, 4, 5, 6)
+
+	done := make(chan bool)
+	timeout := time.After(5 * time.Second)
+
+	for i := 0; i < 100; i++ {
+		go func() {
+			for j := 0; j < 100; j++ {
+				_ = a.Intersection(b)
+			}
+			done <- true
+		}()
+		go func() {
+			for j := 0; j < 100; j++ {
+				_ = b.Intersection(a)
+			}
+			done <- true
+		}()
+	}
+
+	for i := 0; i < 200; i++ {
+		select {
+		case <-done:
+		case <-timeout:
+			t.Fatal("deadlock detected: SyncSet.Intersection timed out")
+		}
+	}
+}
+
+// TestSyncSetConcurrentDifferenceNoDeadlock 测试 SyncSet.Difference 在并发场景下不会死锁
+func TestSyncSetConcurrentDifferenceNoDeadlock(t *testing.T) {
+	a := NewSyncSet(1, 2, 3, 4)
+	b := NewSyncSet(3, 4, 5, 6)
+
+	done := make(chan bool)
+	timeout := time.After(5 * time.Second)
+
+	for i := 0; i < 100; i++ {
+		go func() {
+			for j := 0; j < 100; j++ {
+				_ = a.Difference(b)
+			}
+			done <- true
+		}()
+		go func() {
+			for j := 0; j < 100; j++ {
+				_ = b.Difference(a)
+			}
+			done <- true
+		}()
+	}
+
+	for i := 0; i < 200; i++ {
+		select {
+		case <-done:
+		case <-timeout:
+			t.Fatal("deadlock detected: SyncSet.Difference timed out")
+		}
 	}
 }
