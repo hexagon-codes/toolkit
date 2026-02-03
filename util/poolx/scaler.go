@@ -101,6 +101,11 @@ func (s *AutoScaler) Start() {
 		return // Already running
 	}
 
+	// 重新创建 stopCh 以支持重启
+	s.mu.Lock()
+	s.stopCh = make(chan struct{})
+	s.mu.Unlock()
+
 	go s.scalingLoop()
 }
 

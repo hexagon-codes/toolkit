@@ -26,10 +26,6 @@ var (
 	ErrCorrupt = errors.New("cache: corrupt payload")
 )
 
-// errCacheMiss 缓存未命中（包内使用）
-// 用于区分"key 不存在"和"loader 返回 NotFound"
-var _ = errors.New("cache: miss") // 保留用于将来扩展
-
 // Cache 业务代码依赖的抽象（Service/Repo 只依赖它，不依赖 Redis 实现）
 type Cache interface {
 	GetOrLoad(

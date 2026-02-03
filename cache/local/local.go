@@ -217,6 +217,9 @@ type Cache struct {
 	cleanupInterval time.Duration
 	stopCleanup     chan struct{}
 	stopped         atomic.Bool // 防止双重关闭
+
+	// 版本号：Clear() 时递增，用于防止 singleflight 竞态写入旧数据
+	generation uint64
 }
 
 // DefaultCleanupInterval 默认清理间隔
@@ -272,6 +275,9 @@ func (c *Cache) GetOrLoad(
 		c.onError(ctx, "local_get", fullKey, err)
 	}
 
+	// 记录当前版本号，用于防止 Clear() 竞态
+	gen := c.getGeneration()
+
 	// 2) singleflight 防击穿
 	v, err, _ := c.sf.Do(fullKey, func() (any, error) {
 		// double check
@@ -283,7 +289,7 @@ func (c *Cache) GetOrLoad(
 		if lerr != nil {
 			if c.isNotFound(lerr) {
 				negTTL := c.negativeTTL()
-				c.setItem(fullKey, packNotFound(), jitterTTL(negTTL, c.opts.Jitter))
+				c.setItemWithGen(fullKey, packNotFound(), jitterTTL(negTTL, c.opts.Jitter), gen, true)
 			}
 			return nil, lerr
 		}
@@ -295,7 +301,7 @@ func (c *Cache) GetOrLoad(
 		packed3 := packFound(raw)
 
 		if ttl > 0 {
-			c.setItem(fullKey, packed3, jitterTTL(ttl, c.opts.Jitter))
+			c.setItemWithGen(fullKey, packed3, jitterTTL(ttl, c.opts.Jitter), gen, true)
 		}
 		return packed3, nil
 	})
@@ -366,6 +372,12 @@ func (c *Cache) getItem(fullKey string) ([]byte, bool, error) {
 }
 
 func (c *Cache) setItem(fullKey string, packed []byte, ttl time.Duration) {
+	c.setItemWithGen(fullKey, packed, ttl, 0, false)
+}
+
+// setItemWithGen 带版本号检查的写入方法
+// checkGen=true 时，只有 generation 匹配才写入（用于防止 Clear() 竞态）
+func (c *Cache) setItemWithGen(fullKey string, packed []byte, ttl time.Duration, expectedGen uint64, checkGen bool) {
 	if ttl <= 0 {
 		return
 	}
@@ -379,12 +391,24 @@ func (c *Cache) setItem(fullKey string, packed []byte, ttl time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// 版本号检查：如果 Clear() 在 singleflight 期间被调用，放弃写入
+	if checkGen && c.generation != expectedGen {
+		return
+	}
+
 	c.items[fullKey] = localItem{
 		packed:     cp,
 		expireAt:   exp,
 		accessedAt: now, // LRU: 初始化访问时间
 	}
 	c.evictIfNeededLocked(now)
+}
+
+// getGeneration 获取当前版本号（用于 singleflight 竞态保护）
+func (c *Cache) getGeneration() uint64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.generation
 }
 
 func (c *Cache) evictIfNeededLocked(now time.Time) {
@@ -519,4 +543,90 @@ func (c *Cache) Len() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return len(c.items)
+}
+
+// Clear 清空所有缓存条目（不停止后台清理 goroutine）
+// 同时递增版本号，使正在进行的 singleflight 请求不会写入旧数据
+func (c *Cache) Clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.items = make(map[string]localItem)
+	c.generation++ // 递增版本号，使进行中的 singleflight 写入失效
+}
+
+// loadResult 用于 singleflight 返回值，携带缓存命中信息
+type loadResult struct {
+	packed    []byte
+	fromCache bool // true 表示来自缓存（double check 命中），false 表示来自 loader
+}
+
+// GetOrLoadEx 与 GetOrLoad 相同，但额外返回是否命中本地缓存
+// cacheHit=true 表示数据来自本地缓存，cacheHit=false 表示数据来自 loader
+// 注意：singleflight 场景下，所有等待者都会获得相同的 cacheHit 值
+func (c *Cache) GetOrLoadEx(
+	ctx context.Context,
+	key string,
+	ttl time.Duration,
+	dest any,
+	loader func(ctx context.Context) (any, error),
+) (cacheHit bool, err error) {
+	if key == "" {
+		return false, ErrInvalidKey
+	}
+	if loader == nil {
+		return false, ErrInvalidLoader
+	}
+	if err := ensureDestPtr(dest); err != nil {
+		return false, err
+	}
+
+	fullKey := joinPrefix(c.opts.Prefix, key)
+
+	// 1) 先读本地缓存
+	if packed, ok, err := c.getItem(fullKey); err == nil && ok {
+		return true, c.unmarshalPacked(packed, dest)
+	} else if err != nil {
+		c.onError(ctx, "local_get", fullKey, err)
+	}
+
+	// 记录当前版本号，用于防止 Clear() 竞态
+	gen := c.getGeneration()
+
+	// 2) singleflight 防击穿，返回值携带来源信息
+	v, err, _ := c.sf.Do(fullKey, func() (any, error) {
+		// double check
+		if packed2, ok2, _ := c.getItem(fullKey); ok2 {
+			return loadResult{packed: packed2, fromCache: true}, nil
+		}
+
+		val, lerr := loader(ctx)
+		if lerr != nil {
+			if c.isNotFound(lerr) {
+				negTTL := c.negativeTTL()
+				c.setItemWithGen(fullKey, packNotFound(), jitterTTL(negTTL, c.opts.Jitter), gen, true)
+			}
+			return nil, lerr
+		}
+
+		raw, merr := c.opts.Codec.Marshal(val)
+		if merr != nil {
+			return nil, merr
+		}
+		packed3 := packFound(raw)
+
+		if ttl > 0 {
+			c.setItemWithGen(fullKey, packed3, jitterTTL(ttl, c.opts.Jitter), gen, true)
+		}
+		return loadResult{packed: packed3, fromCache: false}, nil
+	})
+	if err != nil {
+		return false, err
+	}
+
+	// 解析 singleflight 返回值
+	result, ok := v.(loadResult)
+	if !ok {
+		return false, ErrCorrupt
+	}
+	return result.fromCache, c.unmarshalPacked(result.packed, dest)
 }

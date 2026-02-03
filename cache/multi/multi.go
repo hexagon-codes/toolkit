@@ -2,7 +2,9 @@ package multi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"reflect"
 	"sync"
 	"time"
 )
@@ -379,10 +381,42 @@ func (c *Cache) onError(ctx context.Context, layer, op, key string, err error) {
 	}
 }
 
-// copyValue 将 src 的值复制到 dst（简化版，实际使用中可能需要更复杂的逻辑）
+// copyValue 将 src 的值复制到 dst
+// 使用 JSON 序列化/反序列化确保深拷贝
 func copyValue(src, dst any) error {
-	// 这里假设 src 和 dst 类型兼容
-	// 实际实现中，可以使用 reflection 或序列化/反序列化
-	// 为了简化，这里直接返回 nil（在实际使用中，GetOrLoad 已经填充了 dest）
-	return nil
+	if src == nil {
+		return nil
+	}
+
+	// 使用 reflect 进行类型检查和赋值
+	srcVal := reflect.ValueOf(src)
+	dstVal := reflect.ValueOf(dst)
+
+	// dst 必须是指针
+	if dstVal.Kind() != reflect.Ptr || dstVal.IsNil() {
+		return ErrInvalidDest
+	}
+
+	dstElem := dstVal.Elem()
+
+	// 如果 src 是指针，获取其元素
+	if srcVal.Kind() == reflect.Ptr {
+		if srcVal.IsNil() {
+			return nil
+		}
+		srcVal = srcVal.Elem()
+	}
+
+	// 类型兼容性检查
+	if srcVal.Type().AssignableTo(dstElem.Type()) {
+		dstElem.Set(srcVal)
+		return nil
+	}
+
+	// 如果类型不直接兼容，尝试通过 JSON 序列化
+	data, err := json.Marshal(src)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, dst)
 }

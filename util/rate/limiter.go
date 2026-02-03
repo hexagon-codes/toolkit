@@ -275,12 +275,27 @@ func (sw *SlidingWindow) Count() int {
 
 // Record 记录一次请求，不检查是否超限
 // 适用于只需要追踪请求数量而不需要限流的场景
+// 注意：为防止内存无限增长，当记录数超过容量的 2 倍时会自动清理最旧的记录
 func (sw *SlidingWindow) Record() {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 
 	now := time.Now()
 	sw.cleanup(now)
+
+	// 防止内存无限增长：如果超过容量的 2 倍，移除最旧的记录
+	maxSize := sw.capacity * 2
+	if maxSize < 100 {
+		maxSize = 100 // 最小保留 100 条
+	}
+	if len(sw.requests) >= maxSize {
+		// 移除最旧的一半记录
+		removeCount := len(sw.requests) / 2
+		newRequests := make([]time.Time, len(sw.requests)-removeCount, sw.capacity)
+		copy(newRequests, sw.requests[removeCount:])
+		sw.requests = newRequests
+	}
+
 	sw.requests = append(sw.requests, now)
 }
 

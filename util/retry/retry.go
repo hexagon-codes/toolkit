@@ -28,7 +28,7 @@ type Config struct {
 	JitterType   JitterType // 抖动类型
 
 	// HTTP 感知
-	RetryAfterAware bool // 是否感知 Retry-After 头
+	RetryAfterAware bool  // 是否感知 Retry-After 头
 	LastError       error // 最后一次错误（内部使用）
 }
 

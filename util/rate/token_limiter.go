@@ -55,17 +55,23 @@ func (l *TokenRateLimiter) Allow() bool {
 }
 
 // AllowN 检查是否允许消耗 n 个 token 的请求
+// 使用两阶段检查确保原子性：先检查两个桶是否都有足够配额，再统一消费
 func (l *TokenRateLimiter) AllowN(tokens int) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	// 检查请求数
-	if !l.requestBucket.Allow() {
+	// 第一阶段：检查两个桶是否都有足够配额（不消费）
+	if !l.requestBucket.tryAllowN(1) {
+		return false
+	}
+	if !l.tokenBucket.tryAllowN(tokens) {
 		return false
 	}
 
-	// 检查 token 数
-	return l.tokenBucket.AllowN(tokens)
+	// 第二阶段：两个桶都有足够配额，统一消费
+	l.requestBucket.consumeN(1)
+	l.tokenBucket.consumeN(tokens)
+	return true
 }
 
 // Wait 等待直到允许 1 个请求

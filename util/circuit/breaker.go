@@ -114,12 +114,12 @@ func defaultConfig() Config {
 type Breaker struct {
 	config Config
 
-	state          atomic.Int32
-	failures       atomic.Int32
-	successes      atomic.Int32
-	halfOpenCount  atomic.Int32
-	lastFailureAt  atomic.Int64
-	openedAt       atomic.Int64
+	state         atomic.Int32
+	failures      atomic.Int32
+	successes     atomic.Int32
+	halfOpenCount atomic.Int32
+	lastFailureAt atomic.Int64
+	openedAt      atomic.Int64
 
 	mu             sync.Mutex
 	stateListeners []func(from, to State)
@@ -188,18 +188,33 @@ func (b *Breaker) Failure() {
 // beforeExecute 执行前检查
 func (b *Breaker) beforeExecute() error {
 	now := b.config.Now()
-	state := b.State()
 
-	switch state {
-	case StateClosed:
-		return nil
+	for {
+		state := b.State()
 
-	case StateOpen:
-		// 检查是否可以进入半开状态
-		openedAt := time.Unix(0, b.openedAt.Load())
-		if now.Sub(openedAt) >= b.config.Timeout {
-			b.transitionTo(StateHalfOpen)
-			// 转换后增加计数（第一个请求，使用 CAS 保证原子性）
+		switch state {
+		case StateClosed:
+			return nil
+
+		case StateOpen:
+			// 检查是否可以进入半开状态
+			openedAt := time.Unix(0, b.openedAt.Load())
+			if now.Sub(openedAt) >= b.config.Timeout {
+				// 使用 CAS 确保只有一个 goroutine 成功转换状态
+				if b.state.CompareAndSwap(int32(StateOpen), int32(StateHalfOpen)) {
+					// 成功转换，重置计数器
+					b.successes.Store(0)
+					b.halfOpenCount.Store(0)
+					// 通知监听器
+					b.notifyStateChange(StateOpen, StateHalfOpen)
+				}
+				// 转换成功或已被其他 goroutine 转换，重新检查状态
+				continue
+			}
+			return ErrCircuitOpen
+
+		case StateHalfOpen:
+			// 限制半开状态下的并发请求（使用 CAS 保证原子性）
 			for {
 				current := b.halfOpenCount.Load()
 				if current >= int32(b.config.HalfOpenMaxRequests) {
@@ -208,25 +223,12 @@ func (b *Breaker) beforeExecute() error {
 				if b.halfOpenCount.CompareAndSwap(current, current+1) {
 					return nil
 				}
+				// CAS 失败，重试
 			}
-		}
-		return ErrCircuitOpen
 
-	case StateHalfOpen:
-		// 限制半开状态下的并发请求（使用 CAS 保证原子性）
-		for {
-			current := b.halfOpenCount.Load()
-			if current >= int32(b.config.HalfOpenMaxRequests) {
-				return ErrTooManyRequests
-			}
-			if b.halfOpenCount.CompareAndSwap(current, current+1) {
-				return nil
-			}
-			// CAS 失败，重试
+		default:
+			return ErrCircuitOpen
 		}
-
-	default:
-		return ErrCircuitOpen
 	}
 }
 
@@ -264,40 +266,54 @@ func (b *Breaker) afterExecute(err error) {
 	}
 }
 
-// transitionTo 状态转换
+// transitionTo 状态转换（使用 CAS 保证原子性）
 func (b *Breaker) transitionTo(to State) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	for {
+		from := State(b.state.Load())
+		if from == to {
+			return
+		}
 
-	from := State(b.state.Load())
-	if from == to {
+		// 使用 CAS 确保状态转换的原子性
+		if !b.state.CompareAndSwap(int32(from), int32(to)) {
+			// CAS 失败，状态已被其他 goroutine 改变，重试
+			continue
+		}
+
+		// CAS 成功，更新相关状态
+		switch to {
+		case StateClosed:
+			b.failures.Store(0)
+			b.successes.Store(0)
+			b.halfOpenCount.Store(0)
+		case StateOpen:
+			b.openedAt.Store(b.config.Now().UnixNano())
+			b.successes.Store(0)
+			b.halfOpenCount.Store(0)
+		case StateHalfOpen:
+			b.successes.Store(0)
+			b.halfOpenCount.Store(0)
+		}
+
+		// 通知监听器
+		b.notifyStateChange(from, to)
 		return
 	}
+}
 
-	switch to {
-	case StateClosed:
-		b.failures.Store(0)
-		b.successes.Store(0)
-		b.halfOpenCount.Store(0)
-	case StateOpen:
-		b.openedAt.Store(b.config.Now().UnixNano())
-		b.successes.Store(0)
-		b.halfOpenCount.Store(0)
-	case StateHalfOpen:
-		b.successes.Store(0)
-		b.halfOpenCount.Store(0)
-	}
+// notifyStateChange 通知状态变更监听器（异步执行，带 panic 保护）
+func (b *Breaker) notifyStateChange(from, to State) {
+	b.mu.Lock()
+	listeners := make([]func(from, to State), len(b.stateListeners))
+	copy(listeners, b.stateListeners)
+	b.mu.Unlock()
 
-	b.state.Store(int32(to))
-
-	// 通知监听器（异步执行，带 panic 保护）
-	for _, listener := range b.stateListeners {
+	for _, listener := range listeners {
 		listener := listener // 避免闭包问题
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
 					// 监听器 panic 不应影响熔断器正常工作
-					// 可以在这里添加日志记录
 				}
 			}()
 			listener(from, to)

@@ -1400,9 +1400,18 @@ func (p *Pool) SubmitWait(fn func()) error {
 }
 
 // SubmitWithContext submits a task with context support
+// 注意：如果 context 被取消，任务可能已经被提交到队列中。
+// 建议在任务函数内部检查 context 状态以支持取消。
 func (p *Pool) SubmitWithContext(ctx context.Context, fn func()) error {
 	if p.state.Load() == stateClosed {
 		return ErrPoolClosed
+	}
+
+	// 检查 context 是否已取消
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
 	}
 
 	// Try non-blocking first
@@ -1411,15 +1420,25 @@ func (p *Pool) SubmitWithContext(ctx context.Context, fn func()) error {
 	}
 
 	// Block with context cancellation
+	// 使用带缓冲的 channel 避免 goroutine 泄漏
 	done := make(chan error, 1)
 	go func() {
-		done <- p.Submit(fn)
+		err := p.Submit(fn)
+		// 使用 select 避免阻塞，即使没人接收
+		select {
+		case done <- err:
+		default:
+			// context 已取消，没人等待结果
+			// 任务可能已提交，这是预期行为
+		}
 	}()
 
 	select {
 	case err := <-done:
 		return err
 	case <-ctx.Done():
+		// 注意：此时后台 goroutine 可能仍在等待 Submit
+		// 但由于 done channel 有缓冲，goroutine 最终会退出
 		return ctx.Err()
 	}
 }

@@ -1,6 +1,7 @@
 package conv
 
 import (
+	"math"
 	"strconv"
 )
 
@@ -46,6 +47,10 @@ func Int64(any any) int64 {
 	case int64:
 		return value
 	case uint:
+		// 防止溢出：大于 math.MaxInt64 时返回 0
+		if uint64(value) > math.MaxInt64 {
+			return 0
+		}
 		return int64(value)
 	case uint8:
 		return int64(value)
@@ -54,6 +59,10 @@ func Int64(any any) int64 {
 	case uint32:
 		return int64(value)
 	case uint64:
+		// 防止溢出：大于 math.MaxInt64 时返回 0
+		if value > math.MaxInt64 {
+			return 0
+		}
 		return int64(value)
 	case float32:
 		return int64(value)

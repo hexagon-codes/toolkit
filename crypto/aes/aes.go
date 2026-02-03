@@ -90,14 +90,15 @@ func DecryptGCMString(ciphertext, key string) (string, error) {
 	return string(plaintext), nil
 }
 
-// --- CBC 模式 ---
+// --- CBC 模式（不推荐使用） ---
 
 // EncryptCBC 使用 AES-CBC 加密
 // key: 16/24/32 字节
 // 返回: iv + ciphertext
 //
-// 警告: CBC 模式不提供消息认证，易受填充预言攻击
-// 推荐使用 EncryptGCM 替代，除非有特殊的兼容性需求
+// Deprecated: CBC 模式不提供消息认证，易受填充预言攻击（Padding Oracle Attack）。
+// 强烈推荐使用 EncryptGCM 替代。仅当需要与旧系统兼容时才使用此函数。
+// 如果必须使用 CBC，请确保在应用层添加 HMAC 消息认证。
 func EncryptCBC(plaintext, key []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -120,6 +121,9 @@ func EncryptCBC(plaintext, key []byte) ([]byte, error) {
 }
 
 // DecryptCBC 使用 AES-CBC 解密
+//
+// Deprecated: CBC 模式不提供消息认证，易受填充预言攻击。
+// 推荐使用 DecryptGCM 替代。
 func DecryptCBC(ciphertext, key []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -151,6 +155,8 @@ func DecryptCBC(ciphertext, key []byte) ([]byte, error) {
 }
 
 // EncryptCBCString 加密字符串，返回 Base64
+//
+// Deprecated: 使用 EncryptGCMString 替代。
 func EncryptCBCString(plaintext, key string) (string, error) {
 	ciphertext, err := EncryptCBC([]byte(plaintext), []byte(key))
 	if err != nil {
@@ -160,6 +166,8 @@ func EncryptCBCString(plaintext, key string) (string, error) {
 }
 
 // DecryptCBCString 解密 Base64 字符串
+//
+// Deprecated: 使用 DecryptGCMString 替代。
 func DecryptCBCString(ciphertext, key string) (string, error) {
 	data, err := base64.StdEncoding.DecodeString(ciphertext)
 	if err != nil {
@@ -172,12 +180,12 @@ func DecryptCBCString(ciphertext, key string) (string, error) {
 	return string(plaintext), nil
 }
 
-// --- CTR 模式（流加密） ---
+// --- CTR 模式（流加密，不推荐使用） ---
 
 // EncryptCTR 使用 AES-CTR 加密
 //
-// 警告: CTR 模式不提供消息认证，可能遭受位翻转攻击
-// 推荐使用 EncryptGCM 替代，除非有特殊的兼容性需求
+// Deprecated: CTR 模式不提供消息认证，可能遭受位翻转攻击（Bit-flipping Attack）。
+// 推荐使用 EncryptGCM 替代，除非有特殊的兼容性需求。
 func EncryptCTR(plaintext, key []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -197,6 +205,8 @@ func EncryptCTR(plaintext, key []byte) ([]byte, error) {
 }
 
 // DecryptCTR 使用 AES-CTR 解密
+//
+// Deprecated: 使用 DecryptGCM 替代。
 func DecryptCTR(ciphertext, key []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -254,8 +264,16 @@ func GenerateKeyBase64(size int) (string, error) {
 
 // ClearBytes 安全清除字节切片内容
 // 用于清除密钥等敏感数据，防止内存残留
-// 注意：Go 的 GC 可能已经复制了数据，此函数只能尽力而为
+//
+// 注意事项：
+//   - Go 的 GC 可能已经复制了数据到其他位置，此函数只能尽力而为
+//   - 建议在使用完密钥后立即调用此函数
+//   - 对于极高安全要求的场景，考虑使用专门的安全内存库
+//
+//go:noinline
 func ClearBytes(b []byte) {
+	// 使用显式循环而非 copy/memset 确保每个字节都被清零
+	// go:noinline 指令防止编译器内联此函数，从而保留清零操作
 	for i := range b {
 		b[i] = 0
 	}
