@@ -22,8 +22,24 @@ import (
 //	user := User{Name: "Alice"}
 //	copied := reflectx.DeepCopy(user)  // 独立副本
 func DeepCopy[T any](src T) T {
+	// 使用 &src 间接获取 reflect.Value，避免 reflect.ValueOf(nil interface) 返回无效值
+	v := reflect.ValueOf(&src).Elem()
+	if !v.IsValid() {
+		var zero T
+		return zero
+	}
+	// 当 T 为接口类型且值为 nil 时（如 var x any = nil），直接返回零值
+	if v.Kind() == reflect.Interface && v.IsNil() {
+		var zero T
+		return zero
+	}
 	visited := make(map[uintptr]reflect.Value)
-	return deepCopyValue(reflect.ValueOf(src), visited).Interface().(T)
+	result := deepCopyValue(v, visited)
+	if !result.IsValid() {
+		var zero T
+		return zero
+	}
+	return result.Interface().(T)
 }
 
 // deepCopyValue 递归深拷贝 reflect.Value

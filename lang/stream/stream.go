@@ -2,7 +2,6 @@ package stream
 
 import (
 	"sort"
-	"sync"
 )
 
 // Stream 表示一个元素序列，支持链式操作
@@ -204,33 +203,41 @@ func (s Stream[T]) Distinct() Stream[T] {
 			if len(src) == 0 {
 				return nil
 			}
-			seen := make(map[any]bool)
+
+			// 先检测类型是否可比较（只检查一次），避免每个元素都 defer/recover
+			comparable := isComparable(src[0])
+
+			if !comparable {
+				// 不可比较的类型无法去重，直接返回副本
+				result := make([]T, len(src))
+				copy(result, src)
+				return result
+			}
+
+			seen := make(map[any]bool, len(src))
 			result := make([]T, 0, len(src))
 			for _, v := range src {
 				key := any(v)
-				// 尝试将元素作为 map key，如果元素不可比较会 panic
-				// 使用 defer+recover 捕获 panic，不可比较的元素直接保留
-				isDuplicate := func() (dup bool) {
-					defer func() {
-						if r := recover(); r != nil {
-							// 不可比较的类型，无法去重，标记为非重复
-							dup = false
-						}
-					}()
-					if seen[key] {
-						return true
-					}
+				if !seen[key] {
 					seen[key] = true
-					return false
-				}()
-
-				if !isDuplicate {
 					result = append(result, v)
 				}
 			}
 			return result
 		},
 	}
+}
+
+// isComparable 检测值是否可以作为 map key（仅调用一次）
+func isComparable(v any) (ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			ok = false
+		}
+	}()
+	m := make(map[any]bool)
+	m[v] = true
+	return true
 }
 
 // Sorted 排序元素
@@ -281,7 +288,10 @@ func (s Stream[T]) Limit(n int) Stream[T] {
 			if n >= len(src) {
 				return src
 			}
-			return src[:n]
+			// 返回副本，避免共享底层数组
+			result := make([]T, n)
+			copy(result, src[:n])
+			return result
 		},
 	}
 }
@@ -308,7 +318,10 @@ func (s Stream[T]) Skip(n int) Stream[T] {
 			if n >= len(src) {
 				return nil
 			}
-			return src[n:]
+			// 返回副本，避免共享底层数组
+			result := make([]T, len(src)-n)
+			copy(result, src[n:])
+			return result
 		},
 	}
 }
@@ -735,16 +748,13 @@ func (s Stream[T]) IsEmpty() bool {
 //	s := stream.Concat(stream.Of(1, 2), stream.Of(3, 4))
 //	// [1, 2, 3, 4]
 func Concat[T any](streams ...Stream[T]) Stream[T] {
-	var once sync.Once
-	var cached []T
 	return Stream[T]{
 		source: func() []T {
-			once.Do(func() {
-				for _, s := range streams {
-					cached = append(cached, s.source()...)
-				}
-			})
-			return cached
+			var result []T
+			for _, s := range streams {
+				result = append(result, s.source()...)
+			}
+			return result
 		},
 	}
 }

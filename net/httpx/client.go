@@ -56,10 +56,10 @@ func NewClient(opts ...Option) *Client {
 	// 如果启用了 SSRF 防护，使用自定义 Transport 在连接时检查 IP
 	// 这可以防止 DNS Rebinding 攻击
 	if c.ssrfProtect && c.client.Transport == nil {
-		c.client.Transport = &ssrfSafeTransport{
-			base:         http.DefaultTransport.(*http.Transport).Clone(),
-			allowedHosts: c.allowedHosts,
-		}
+		c.client.Transport = newSSRFSafeTransport(
+			http.DefaultTransport.(*http.Transport),
+			c.allowedHosts,
+		)
 	}
 
 	return c
@@ -414,6 +414,8 @@ func (c *Client) isHostAllowed(host, port string) bool {
 //   - "example.com:8080" - 精确匹配主机名和端口
 //   - "*.example.com" - 通配符匹配子域名
 //   - "*.example.com:443" - 通配符匹配子域名和指定端口
+//   - "::1" - IPv6 地址精确匹配
+//   - "[::1]:8080" - IPv6 地址带端口匹配
 func isHostInAllowedList(host, port string, allowedHosts []string) bool {
 	// 规范化主机名（大小写不敏感）
 	lowerHost := strings.ToLower(host)
@@ -421,15 +423,7 @@ func isHostInAllowedList(host, port string, allowedHosts []string) bool {
 	for _, allowed := range allowedHosts {
 		allowed = strings.ToLower(allowed)
 
-		// 分离白名单中的主机和端口
-		allowedHost, allowedPort := allowed, ""
-		if idx := strings.LastIndex(allowed, ":"); idx != -1 {
-			// 检查是否是端口（不是 IPv6 地址）
-			if !strings.Contains(allowed[idx:], "]") {
-				allowedHost = allowed[:idx]
-				allowedPort = allowed[idx+1:]
-			}
-		}
+		allowedHost, allowedPort := splitHostPort(allowed)
 
 		// 如果白名单指定了端口，必须匹配
 		if allowedPort != "" && allowedPort != port {
@@ -449,6 +443,39 @@ func isHostInAllowedList(host, port string, allowedHosts []string) bool {
 		}
 	}
 	return false
+}
+
+// splitHostPort 分离白名单条目中的主机和端口
+// 正确处理 IPv6 地址：
+//   - "example.com" -> ("example.com", "")
+//   - "example.com:8080" -> ("example.com", "8080")
+//   - "::1" -> ("::1", "")
+//   - "[::1]:8080" -> ("::1", "8080")
+//   - "2001:db8::1" -> ("2001:db8::1", "")
+func splitHostPort(hostport string) (host, port string) {
+	// 标准 [IPv6]:port 格式
+	if strings.HasPrefix(hostport, "[") {
+		if idx := strings.LastIndex(hostport, "]"); idx != -1 {
+			host = hostport[1:idx]
+			// "]" 后面可能有 ":port"
+			rest := hostport[idx+1:]
+			if strings.HasPrefix(rest, ":") {
+				port = rest[1:]
+			}
+			return host, port
+		}
+	}
+
+	// 如果包含多个冒号，视为纯 IPv6 地址（无端口）
+	if strings.Count(hostport, ":") > 1 {
+		return hostport, ""
+	}
+
+	// 普通 host 或 host:port
+	if idx := strings.LastIndex(hostport, ":"); idx != -1 {
+		return hostport[:idx], hostport[idx+1:]
+	}
+	return hostport, ""
 }
 
 // isPrivateOrInternalHost 检查主机是否为私有或内部地址
@@ -508,17 +535,17 @@ func isCloudMetadataIP(ip net.IP) bool {
 }
 
 // ssrfSafeTransport 防止 DNS Rebinding 攻击的 Transport
-// 在实际建立 TCP 连接时检查解析后的 IP 地址
+// 在初始化时设置 DialContext，连接时检查解析后的 IP 地址
+// DialContext 不捕获请求级状态，可安全复用 Transport 连接池
 type ssrfSafeTransport struct {
-	base         *http.Transport
-	allowedHosts []string
+	transport *http.Transport
 }
 
-func (t *ssrfSafeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	// 克隆 Transport 避免并发修改问题
-	transport := t.base.Clone()
-
-	// 设置自定义 DialContext，在连接时检查 IP
+// newSSRFSafeTransport 创建 SSRF 安全的 Transport
+// 在初始化时一次性设置 DialContext，避免每次 RoundTrip 克隆 Transport
+func newSSRFSafeTransport(base *http.Transport, allowedHosts []string) *ssrfSafeTransport {
+	// 克隆一次，设置好 DialContext 后持续复用
+	transport := base.Clone()
 	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(addr)
 		if err != nil {
@@ -526,7 +553,7 @@ func (t *ssrfSafeTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		}
 
 		// 检查是否在白名单中（支持通配符和端口）
-		if isHostInAllowedList(host, port, t.allowedHosts) {
+		if isHostInAllowedList(host, port, allowedHosts) {
 			// 白名单主机，使用默认 Dialer
 			return (&net.Dialer{
 				Timeout:   30 * time.Second,
@@ -583,7 +610,11 @@ func (t *ssrfSafeTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		return conn, nil
 	}
 
-	return transport.RoundTrip(req)
+	return &ssrfSafeTransport{transport: transport}
+}
+
+func (t *ssrfSafeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return t.transport.RoundTrip(req)
 }
 
 // Response HTTP 响应

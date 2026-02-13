@@ -8,6 +8,7 @@
 package httpx
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -226,10 +227,14 @@ func (p *Pool) Post(ctx context.Context, url, contentType string, body io.Reader
 func (p *Pool) updateResponseTime(duration time.Duration) {
 	ns := duration.Nanoseconds()
 
-	// 更新平均响应时间（简化的指数移动平均）
-	oldAvg := p.stats.AvgResponseTime.Load()
-	newAvg := (oldAvg*9 + ns) / 10
-	p.stats.AvgResponseTime.Store(newAvg)
+	// 更新平均响应时间（指数移动平均，使用 CAS 保证原子性）
+	for {
+		oldAvg := p.stats.AvgResponseTime.Load()
+		newAvg := (oldAvg*9 + ns) / 10
+		if p.stats.AvgResponseTime.CompareAndSwap(oldAvg, newAvg) {
+			break
+		}
+	}
 
 	// 更新最大响应时间
 	for {
@@ -478,19 +483,42 @@ func NewRetryPool(pool *Pool, config ...RetryConfig) *RetryPool {
 }
 
 // Do 执行带重试的请求
+//
+// 注意：对于带 Body 的请求（POST/PUT 等），会在首次发送前缓存 Body 内容，
+// 以便后续重试能够重放请求体。如果 Body 非常大，请考虑内存影响。
 func (rp *RetryPool) Do(req *http.Request) (*http.Response, error) {
+	// 缓存请求体以支持重试重放
+	var bodyBytes []byte
+	if req.Body != nil && req.Body != http.NoBody {
+		var err error
+		bodyBytes, err = io.ReadAll(req.Body)
+		_ = req.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("retry pool: failed to read request body: %w", err)
+		}
+		// 恢复 Body 供首次使用
+		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		req.GetBody = func() (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(bodyBytes)), nil
+		}
+	}
+
 	var lastErr error
 	var lastResp *http.Response
 	wait := rp.config.RetryWait
 
 	for attempt := 0; attempt <= rp.config.MaxRetries; attempt++ {
-		// 如果不是第一次尝试，等待
+		// 如果不是第一次尝试，等待并重置 Body
 		if attempt > 0 {
 			time.Sleep(wait)
 			// 指数退避
 			wait *= 2
 			if wait > rp.config.MaxRetryWait {
 				wait = rp.config.MaxRetryWait
+			}
+			// 重置 Body 以支持重放
+			if bodyBytes != nil {
+				req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			}
 		}
 
@@ -502,18 +530,18 @@ func (rp *RetryPool) Do(req *http.Request) (*http.Response, error) {
 		}
 
 		lastErr = err
-		lastResp = resp
 
-		// 关闭响应体以释放连接
+		// 关闭响应体以释放连接（重试前必须清理）
 		if resp != nil && resp.Body != nil {
 			_, _ = io.Copy(io.Discard, resp.Body)
 			_ = resp.Body.Close()
 		}
+		// 不保留 lastResp 引用：Body 已关闭，对调用者无用
+		lastResp = nil
 	}
 
-	if lastResp != nil {
-		return lastResp, lastErr
-	}
+	// 所有重试均失败
+	_ = lastResp // lastResp 始终为 nil
 	return nil, fmt.Errorf("max retries exceeded: %w", lastErr)
 }
 

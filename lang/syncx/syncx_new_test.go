@@ -156,14 +156,22 @@ func TestOnce_Do(t *testing.T) {
 func TestOnce_Value(t *testing.T) {
 	var o Once[string]
 
-	if o.Value() != "" {
+	val, ok := o.Value()
+	if ok {
+		t.Error("expected not initialized before Do")
+	}
+	if val != "" {
 		t.Error("expected empty string before initialization")
 	}
 
 	o.Do(func() string { return "hello" })
 
-	if o.Value() != "hello" {
-		t.Errorf("expected 'hello', got %s", o.Value())
+	val, ok = o.Value()
+	if !ok {
+		t.Error("expected initialized after Do")
+	}
+	if val != "hello" {
+		t.Errorf("expected 'hello', got %s", val)
 	}
 }
 
@@ -260,7 +268,10 @@ func TestOnceErr_WithError(t *testing.T) {
 		t.Errorf("expected 0, error; got %d, %v", v, err)
 	}
 
-	v, err = o.Value()
+	v, err, ok := o.Value()
+	if !ok {
+		t.Error("expected initialized after Do")
+	}
 	if v != 0 || err != expectedErr {
 		t.Errorf("expected cached 0, error; got %d, %v", v, err)
 	}

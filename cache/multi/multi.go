@@ -194,7 +194,8 @@ func (c *Cache) GetOrLoad(
 			var temp any = dest // 用于接收下一层的数据
 			err := nextLayer.Layer.GetOrLoad(ctx, key, nextLayer.TTL, dest, func(ctx context.Context) (any, error) {
 				// 递归查询更深层或 loader
-				return c.loadFromNextLayers(ctx, key, dest, i+1, loader)
+				// 注意：startIndex 必须是 i+2，因为 nextLayer（i+1）已经在当前 GetOrLoad 中查询过了
+				return c.loadFromNextLayers(ctx, key, dest, i+2, loader)
 			})
 
 			if err != nil {
@@ -292,12 +293,12 @@ func (c *Cache) loadFromNextLayers(
 const backfillTimeout = 5 * time.Second
 
 // backfillAll 回填到所有层（异步执行，不阻塞主流程）
-func (c *Cache) backfillAll(_ context.Context, key string, value any) {
+func (c *Cache) backfillAll(ctx context.Context, key string, value any) {
 	// 异步执行回填，不阻塞主流程
 	go func() {
-		// 使用独立的 context，不继承原始请求的取消信号
-		// 这样即使原始请求被取消，回填操作仍能完成，确保缓存一致性
-		backfillCtx, cancel := context.WithTimeout(context.Background(), backfillTimeout)
+		// 使用 WithoutCancel 脱离原始请求的取消信号，但保留 trace/value 等上下文信息
+		// 这样即使原始请求被取消，回填操作仍能完成，且链路追踪不会丢失
+		backfillCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), backfillTimeout)
 		defer cancel() // 确保 cancel 总是被调用
 
 		var wg sync.WaitGroup
@@ -322,11 +323,11 @@ func (c *Cache) backfillAll(_ context.Context, key string, value any) {
 }
 
 // backfillRange 回填到指定范围的层（异步执行，不阻塞主流程）
-func (c *Cache) backfillRange(_ context.Context, key string, value any, start, end int) {
+func (c *Cache) backfillRange(ctx context.Context, key string, value any, start, end int) {
 	// 异步执行回填，不阻塞主流程
 	go func() {
-		// 使用独立的 context，不继承原始请求的取消信号
-		backfillCtx, cancel := context.WithTimeout(context.Background(), backfillTimeout)
+		// 使用 WithoutCancel 脱离原始请求的取消信号，但保留 trace/value 等上下文信息
+		backfillCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), backfillTimeout)
 		defer cancel() // 确保 cancel 总是被调用
 
 		var wg sync.WaitGroup

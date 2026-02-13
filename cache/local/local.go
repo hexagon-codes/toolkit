@@ -13,10 +13,6 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-// fastRand 用于 TTL 抖动的快速随机数生成器
-// Go 1.22+ 的 math/rand/v2 是线程安全的
-var fastRand = rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), uint64(time.Now().UnixNano()>>32)))
-
 var (
 	// 负缓存命中（表示"确实不存在"），用于防穿透。
 	ErrNotFound = errors.New("cache: not found")
@@ -161,9 +157,9 @@ func jitterTTL(ttl time.Duration, jitter float64) time.Duration {
 		return ttl
 	}
 
-	// 使用 math/rand/v2 生成随机数（Go 1.22+ 线程安全，性能更好）
-	// 比 crypto/rand 快 10-100 倍，缓存 TTL 抖动不需要密码学安全性
-	delta := time.Duration(fastRand.Int64N(int64(maxDelta) + 1))
+	// 使用 math/rand/v2 全局函数生成随机数（线程安全）
+	// 注意：rand.New() 创建的实例不是线程安全的，必须使用包级函数
+	delta := time.Duration(rand.Int64N(int64(maxDelta) + 1))
 	return ttl + delta
 }
 

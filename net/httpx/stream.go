@@ -152,6 +152,11 @@ func (s *StreamResponse) ReadSSE() (*SSEEvent, error) {
 		return nil, ErrStreamClosed
 	}
 
+	return s.readSSELocked()
+}
+
+// readSSELocked 内部方法：读取下一个 SSE 事件，调用者必须持有 mu 锁
+func (s *StreamResponse) readSSELocked() (*SSEEvent, error) {
 	event := &SSEEvent{}
 	var dataLines []string
 
@@ -198,7 +203,14 @@ func (s *StreamResponse) ReadSSE() (*SSEEvent, error) {
 
 // ReadJSON 读取下一个 JSON 数据（从 SSE data 字段）
 func (s *StreamResponse) ReadJSON(v any) error {
-	event, err := s.ReadSSE()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return ErrStreamClosed
+	}
+
+	event, err := s.readSSELocked()
 	if err != nil {
 		return err
 	}

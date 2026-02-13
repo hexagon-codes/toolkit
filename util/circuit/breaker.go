@@ -150,43 +150,51 @@ func (b *Breaker) State() State {
 
 // Execute 执行函数
 func (b *Breaker) Execute(fn func() (any, error)) (any, error) {
-	if err := b.beforeExecute(); err != nil {
+	wasHalfOpen, err := b.beforeExecute()
+	if err != nil {
 		return nil, err
 	}
 
 	result, err := fn()
-	b.afterExecute(err)
+	b.afterExecute(err, wasHalfOpen)
 	return result, err
 }
 
 // ExecuteContext 执行带上下文的函数
 func (b *Breaker) ExecuteContext(ctx context.Context, fn func(context.Context) (any, error)) (any, error) {
-	if err := b.beforeExecute(); err != nil {
+	wasHalfOpen, err := b.beforeExecute()
+	if err != nil {
 		return nil, err
 	}
 
 	result, err := fn(ctx)
-	b.afterExecute(err)
+	b.afterExecute(err, wasHalfOpen)
 	return result, err
 }
 
 // Allow 检查是否允许请求通过
+//
+// 注意：对于手动 API（Allow + Success/Failure），半开状态的 halfOpenCount
+// 跟踪依赖当前状态判断，在极端并发场景下可能不够精确。
+// 建议优先使用 Execute/ExecuteContext 以获得精确的状态追踪。
 func (b *Breaker) Allow() error {
-	return b.beforeExecute()
+	_, err := b.beforeExecute()
+	return err
 }
 
 // Success 报告成功
 func (b *Breaker) Success() {
-	b.afterExecute(nil)
+	b.afterExecute(nil, false)
 }
 
 // Failure 报告失败
 func (b *Breaker) Failure() {
-	b.afterExecute(errors.New("manual failure"))
+	b.afterExecute(errors.New("manual failure"), false)
 }
 
 // beforeExecute 执行前检查
-func (b *Breaker) beforeExecute() error {
+// 返回 wasHalfOpen 标识请求是否在半开状态下被允许（已递增 halfOpenCount）
+func (b *Breaker) beforeExecute() (wasHalfOpen bool, _ error) {
 	now := b.config.Now()
 
 	for {
@@ -194,7 +202,7 @@ func (b *Breaker) beforeExecute() error {
 
 		switch state {
 		case StateClosed:
-			return nil
+			return false, nil
 
 		case StateOpen:
 			// 检查是否可以进入半开状态
@@ -211,30 +219,50 @@ func (b *Breaker) beforeExecute() error {
 				// 转换成功或已被其他 goroutine 转换，重新检查状态
 				continue
 			}
-			return ErrCircuitOpen
+			return false, ErrCircuitOpen
 
 		case StateHalfOpen:
 			// 限制半开状态下的并发请求（使用 CAS 保证原子性）
 			for {
 				current := b.halfOpenCount.Load()
 				if current >= int32(b.config.HalfOpenMaxRequests) {
-					return ErrTooManyRequests
+					return false, ErrTooManyRequests
 				}
 				if b.halfOpenCount.CompareAndSwap(current, current+1) {
-					return nil
+					return true, nil
 				}
 				// CAS 失败，重试
 			}
 
 		default:
-			return ErrCircuitOpen
+			return false, ErrCircuitOpen
 		}
 	}
 }
 
 // afterExecute 执行后处理
-func (b *Breaker) afterExecute(err error) {
+// wasHalfOpen 标识该请求是否在半开状态下被 beforeExecute 允许（已递增 halfOpenCount）
+// 通过此标记确保 halfOpenCount 的递增/递减严格配对，避免状态转换导致的计数泄漏
+func (b *Breaker) afterExecute(err error, wasHalfOpen bool) {
 	isFailure := b.config.IsFailure(err)
+
+	if wasHalfOpen {
+		// 请求在半开状态被允许，无论当前状态如何都要递减 halfOpenCount
+		b.halfOpenCount.Add(-1)
+		if isFailure {
+			// 失败，回到打开状态
+			b.transitionTo(StateOpen)
+		} else {
+			successes := b.successes.Add(1)
+			if successes >= int32(b.config.SuccessThreshold) {
+				// 足够多的成功，恢复到关闭状态
+				b.transitionTo(StateClosed)
+			}
+		}
+		return
+	}
+
+	// 非半开请求（或手动 API），使用当前状态判断
 	now := b.config.Now()
 	state := b.State()
 
@@ -252,14 +280,13 @@ func (b *Breaker) afterExecute(err error) {
 		}
 
 	case StateHalfOpen:
+		// 手动 API（Allow + Success/Failure）走到这里
 		b.halfOpenCount.Add(-1)
 		if isFailure {
-			// 失败，回到打开状态
 			b.transitionTo(StateOpen)
 		} else {
 			successes := b.successes.Add(1)
 			if successes >= int32(b.config.SuccessThreshold) {
-				// 足够多的成功，恢复到关闭状态
 				b.transitionTo(StateClosed)
 			}
 		}
@@ -309,7 +336,6 @@ func (b *Breaker) notifyStateChange(from, to State) {
 	b.mu.Unlock()
 
 	for _, listener := range listeners {
-		listener := listener // 避免闭包问题
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {

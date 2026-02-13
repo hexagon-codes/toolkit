@@ -40,10 +40,16 @@ func (o *Once[T]) Do(fn func() T) T {
 //
 // 返回:
 //   - T: 值
+//   - bool: 是否已初始化
 //
-// 注意: 建议先调用 Do 确保值已初始化
-func (o *Once[T]) Value() T {
-	return o.value
+// 注意: 此方法是并发安全的。通过 atomic.Bool 提供的 memory barrier 确保
+// 在 initialized 为 true 时，value 字段对所有 goroutine 可见。
+func (o *Once[T]) Value() (T, bool) {
+	if o.initialized.Load() {
+		return o.value, true
+	}
+	var zero T
+	return zero, false
 }
 
 // OnceValue 创建一个只执行一次的函数
@@ -153,8 +159,15 @@ func (o *OnceErr[T]) Do(fn func() (T, error)) (T, error) {
 // 返回:
 //   - T: 值
 //   - error: 错误
-func (o *OnceErr[T]) Value() (T, error) {
-	return o.value, o.err
+//   - bool: 是否已初始化
+//
+// 注意: 此方法是并发安全的。
+func (o *OnceErr[T]) Value() (T, error, bool) {
+	if o.initialized.Load() {
+		return o.value, o.err, true
+	}
+	var zero T
+	return zero, nil, false
 }
 
 // IsInitialized 检查是否已初始化
