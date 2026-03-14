@@ -3,7 +3,6 @@ package poolx
 import (
 	"runtime"
 	"sync/atomic"
-	"unsafe"
 )
 
 // ============================================================================
@@ -25,6 +24,9 @@ type counterShard struct {
 	_     CacheLinePad
 }
 
+// shardCounter 全局原子计数器，用于分配 shard 索引
+var shardCounter atomic.Uint64
+
 // ShardedCounter is a high-performance counter that distributes updates
 // across multiple shards to reduce contention in high-concurrency scenarios.
 type ShardedCounter struct {
@@ -36,14 +38,9 @@ func NewShardedCounter() *ShardedCounter {
 	return &ShardedCounter{}
 }
 
-// getShard returns the shard for the current goroutine.
-// Uses a simple hash based on the goroutine ID (approximated by stack address).
+// getShard 使用全局原子计数器选择 shard，避免栈地址可能导致的分布不均。
 func (c *ShardedCounter) getShard() *counterShard {
-	// Use runtime.fastrand for better distribution
-	// This is cheaper than getting actual goroutine ID
-	var x [1]byte
-	ptr := uintptr(unsafe_pointer(&x[0]))
-	idx := (ptr >> 12) & shardMask // Use bits from stack address
+	idx := shardCounter.Add(1) & shardMask
 	return &c.shards[idx]
 }
 
@@ -109,11 +106,9 @@ func NewShardedCounter32() *ShardedCounter32 {
 	return &ShardedCounter32{}
 }
 
-// getShard returns the shard for the current goroutine
+// getShard 使用全局原子计数器选择 shard，避免栈地址可能导致的分布不均。
 func (c *ShardedCounter32) getShard() *counterShard32 {
-	var x [1]byte
-	ptr := uintptr(unsafe_pointer(&x[0]))
-	idx := (ptr >> 12) & shardMask
+	idx := shardCounter.Add(1) & shardMask
 	return &c.shards[idx]
 }
 
@@ -190,9 +185,7 @@ func NewFastCounter() *FastCounter {
 
 // Add atomically adds delta to the counter
 func (c *FastCounter) Add(delta int64) {
-	var x [1]byte
-	ptr := uint64(uintptr(unsafe_pointer(&x[0])))
-	idx := (ptr >> 12) & c.mask
+	idx := shardCounter.Add(1) & c.mask
 	c.shards[idx].value.Add(delta)
 }
 
@@ -212,12 +205,3 @@ func (c *FastCounter) Reset() {
 	}
 }
 
-// ============================================================================
-// unsafe_pointer helper
-// ============================================================================
-
-//go:nosplit
-//go:nocheckptr
-func unsafe_pointer(p *byte) unsafe.Pointer {
-	return unsafe.Pointer(p)
-}

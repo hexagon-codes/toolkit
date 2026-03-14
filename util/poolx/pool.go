@@ -379,19 +379,24 @@ func (s *workerStack) retrieveExpiry(duration time.Duration) []*worker {
 		}
 	}
 
-	// Compact the array
-	newItems := make([]*worker, s.cap)
-	newHead := 0
+	// 原地紧缩，避免在持有 spinlock 时分配内存
+	writeIdx := 0
 	for i := 0; i < s.len; i++ {
 		idx := (s.head - s.len + i + s.cap) % s.cap
 		if s.items[idx] != nil {
-			newItems[newHead] = s.items[idx]
-			newHead++
+			if writeIdx != idx {
+				s.items[writeIdx] = s.items[idx]
+				s.items[idx] = nil
+			}
+			writeIdx++
 		}
 	}
-	s.items = newItems
-	s.len = newHead
-	s.head = newHead
+	// 清除尾部残留引用
+	for i := writeIdx; i < s.cap; i++ {
+		s.items[i] = nil
+	}
+	s.len = writeIdx
+	s.head = writeIdx
 
 	return s.expiry
 }
@@ -1403,9 +1408,8 @@ func (p *Pool) SubmitWait(fn func()) error {
 	return nil
 }
 
-// SubmitWithContext submits a task with context support
-// 注意：如果 context 被取消，任务可能已经被提交到队列中。
-// 建议在任务函数内部检查 context 状态以支持取消。
+// SubmitWithContext submits a task with context support.
+// 直接在当前 goroutine 等待，避免启动额外 goroutine 导致泄漏。
 func (p *Pool) SubmitWithContext(ctx context.Context, fn func()) error {
 	if p.state.Load() == stateClosed {
 		return ErrPoolClosed
@@ -1418,32 +1422,46 @@ func (p *Pool) SubmitWithContext(ctx context.Context, fn func()) error {
 	default:
 	}
 
-	// Try non-blocking first
+	// 快速路径：尝试非阻塞提交
 	if p.TrySubmit(fn) {
 		return nil
 	}
 
-	// Block with context cancellation
-	// 使用带缓冲的 channel 避免 goroutine 泄漏
-	done := make(chan error, 1)
-	go func() {
-		err := p.Submit(fn)
-		// 使用 select 避免阻塞，即使没人接收
+	// 直接在当前 goroutine 等待，避免启动额外 goroutine
+	p.lock.Lock()
+	for {
 		select {
-		case done <- err:
+		case <-ctx.Done():
+			p.lock.Unlock()
+			return ctx.Err()
 		default:
-			// context 已取消，没人等待结果
-			// 任务可能已提交，这是预期行为
 		}
-	}()
 
-	select {
-	case err := <-done:
-		return err
-	case <-ctx.Done():
-		// 注意：此时后台 goroutine 可能仍在等待 Submit
-		// 但由于 done channel 有缓冲，goroutine 最终会退出
-		return ctx.Err()
+		if p.state.Load() == stateClosed {
+			p.lock.Unlock()
+			return ErrPoolClosed
+		}
+
+		// 尝试获取 worker
+		if w := p.workers.pop(); w != nil {
+			p.metrics.IdleWorkers.Add(-1)
+			p.lock.Unlock()
+			p.metrics.SubmittedTasks.Add(1)
+			t := acquireTaskFast(fn)
+			w.taskCh <- t
+			return nil
+		}
+
+		if w := p.createWorker(); w != nil {
+			p.lock.Unlock()
+			w.run()
+			p.metrics.SubmittedTasks.Add(1)
+			t := acquireTaskFast(fn)
+			w.taskCh <- t
+			return nil
+		}
+
+		p.cond.Wait()
 	}
 }
 
@@ -1499,6 +1517,8 @@ func (p *Pool) Uptime() time.Duration {
 
 // OnHook registers a hook callback
 func (p *Pool) OnHook(hookType HookType, fn HookFunc) {
+	p.lock.Lock()
+	defer p.lock.Unlock()
 	if p.hooks == nil {
 		p.hooks = NewHooks()
 	}
@@ -1766,6 +1786,8 @@ func SetCap(cap int32) {
 // SetPanicHandler sets the panic handler for the default pool
 func SetPanicHandler(handler func(any)) {
 	initDefaultPool()
+	defaultPool.lock.Lock()
+	defer defaultPool.lock.Unlock()
 	defaultPool.config.PanicHandler = handler
 }
 

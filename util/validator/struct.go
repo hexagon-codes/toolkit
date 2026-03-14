@@ -3,7 +3,6 @@ package validator
 import (
 	"fmt"
 	"reflect"
-	"regexp"
 	"strconv"
 	"strings"
 )
@@ -181,14 +180,13 @@ func (v *Validator) registerDefaultRules() {
 		return checkRange(value, minVal, maxVal)
 	}
 
-	// regexp - 正则匹配
+	// regexp - 正则匹配（使用缓存的 Match 函数提高性能）
 	v.rules["regexp"] = func(value any, param string) bool {
 		str, ok := value.(string)
 		if !ok {
 			return false
 		}
-		matched, _ := regexp.MatchString(param, str)
-		return matched
+		return Match(str, param)
 	}
 
 	// oneof - 枚举值

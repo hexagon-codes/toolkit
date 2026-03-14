@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -199,8 +200,17 @@ func NewClient(url string, opts ...ClientOption) *Client {
 	}
 
 	if c.config.HTTPClient == nil {
+		// SSE 是长连接流式响应，不应设置整体请求超时（http.Client.Timeout）
+		// 连接超时通过 Transport 层控制
 		c.config.HTTPClient = &http.Client{
-			Timeout: c.config.Timeout,
+			Timeout: 0,
+			Transport: &http.Transport{
+				DialContext: (&net.Dialer{
+					Timeout:   c.config.Timeout,
+					KeepAlive: 30 * time.Second,
+				}).DialContext,
+				TLSHandshakeTimeout: c.config.Timeout,
+			},
 		}
 	}
 

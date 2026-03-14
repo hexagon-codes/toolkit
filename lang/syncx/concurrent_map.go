@@ -8,7 +8,8 @@ import (
 //
 // 基于 sync.Map 封装，提供类型安全的泛型接口
 type ConcurrentMap[K comparable, V any] struct {
-	m sync.Map
+	m  sync.Map
+	mu sync.Mutex // 保护 Update 操作的原子性
 }
 
 // NewConcurrentMap 创建一个新的 ConcurrentMap
@@ -298,24 +299,21 @@ func (m *ConcurrentMap[K, V]) GetOrCompute(key K, compute func() V) V {
 // 返回:
 //   - bool: 键是否存在
 //
-// 注意: 使用 CAS 循环保证原子性，fn 可能被多次调用
+// 注意: 使用 mutex 保护 Load+Store 操作的原子性，支持不可比较的值类型（如 slice/map/function）
 //
 // 示例:
 //
 //	m.Update("count", func(v int) int { return v + 1 })
 func (m *ConcurrentMap[K, V]) Update(key K, fn func(V) V) bool {
-	for {
-		value, ok := m.Load(key)
-		if !ok {
-			return false
-		}
-		newValue := fn(value)
-		// 使用 CompareAndSwap 保证原子性
-		if m.m.CompareAndSwap(key, value, newValue) {
-			return true
-		}
-		// CAS 失败，重试
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	value, ok := m.Load(key)
+	if !ok {
+		return false
 	}
+	newValue := fn(value)
+	m.Store(key, newValue)
+	return true
 }
 
 // ForEach 遍历所有键值对（Range 的别名，始终遍历完全）

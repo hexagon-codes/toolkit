@@ -421,7 +421,10 @@ func (s Stream[T]) DropWhile(predicate func(T) bool) Stream[T] {
 			if i >= len(src) {
 				return nil
 			}
-			return src[i:]
+			// 复制结果，避免返回原始切片的子切片引用
+			result := make([]T, len(src)-i)
+			copy(result, src[i:])
+			return result
 		},
 	}
 }

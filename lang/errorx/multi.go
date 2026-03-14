@@ -320,10 +320,13 @@ func Walk(err error, fn func(error) bool) {
 		// 获取错误对象的指针地址用于去重
 		// 使用 interface 的数据指针作为唯一标识
 		ptr := errorPtr(item.err)
-		if _, ok := visited[ptr]; ok {
-			continue
+		// ptr == 0 表示值类型 error，不做去重缓存，每次都遍历
+		if ptr != 0 {
+			if _, ok := visited[ptr]; ok {
+				continue
+			}
+			visited[ptr] = struct{}{}
 		}
-		visited[ptr] = struct{}{}
 
 		// 调用处理函数
 		if !fn(item.err) {
@@ -365,10 +368,9 @@ func errorPtr(err error) uintptr {
 			return v.Pointer()
 		}
 	}
-	// 对于非指针类型，使用 reflect.Value 的地址作为标识
-	// 注意：这对于值类型可能不够精确，但至少能防止 panic
+	// 对于值类型（非指针），返回 0（不缓存），让每个值类型 error 都被遍历
 	// 结合深度限制，可以有效防止无限循环
-	return uintptr(v.Kind())
+	return 0
 }
 
 // CollectErrors 从多个操作收集错误

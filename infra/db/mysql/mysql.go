@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -118,10 +119,8 @@ func (db *DB) ExecWithTimeout(ctx context.Context, timeout time.Duration, query 
 // 或直接使用 QueryContext 并自行管理 context。
 // 原因：Rows 返回后 cancel 立即调用，但 Scan() 仍需要有效的 context。
 func (db *DB) QueryWithTimeout(ctx context.Context, timeout time.Duration, query string, args ...any) (*sql.Rows, error) {
-	// 注意：这里不调用 cancel 是因为 Rows.Scan() 在返回后才执行
-	// context 超时后会自动清理资源
 	ctx, cancel := context.WithTimeout(ctx, timeout)
-	_ = cancel // 标记为已知忽略，context 超时后会自动清理
+	defer cancel()
 	return db.QueryContext(ctx, query, args...)
 }
 
@@ -151,10 +150,8 @@ func (db *DB) QueryWithTimeoutEx(ctx context.Context, timeout time.Duration, que
 // 警告：此函数存在 context 生命周期问题，推荐使用 QueryRowWithTimeoutEx
 // 或直接使用 QueryRowContext 并自行管理 context
 func (db *DB) QueryRowWithTimeout(ctx context.Context, timeout time.Duration, query string, args ...any) *sql.Row {
-	// 创建带超时的 context，超时后会自动取消
-	// 注意：这里不调用 cancel 是因为 Row.Scan() 在返回后才执行
 	ctx, cancel := context.WithTimeout(ctx, timeout)
-	_ = cancel // 标记为已知忽略，context 超时后会自动清理
+	defer cancel()
 	return db.QueryRowContext(ctx, query, args...)
 }
 
@@ -210,10 +207,24 @@ func (db *DB) Close() error {
 }
 
 // maskDSN 隐藏 DSN 中的敏感信息
+// 解析 DSN 中 @ 前的 user:password 部分，仅遮蔽 password
 func maskDSN(dsn string) string {
-	// 简单实现：只显示前10个字符
-	if len(dsn) <= 10 {
+	// MySQL DSN 格式: user:password@tcp(host:port)/dbname?params
+	atIdx := strings.Index(dsn, "@")
+	if atIdx < 0 {
+		// 没有 @ 符号，无法解析，安全起见全部遮蔽
 		return "***"
 	}
-	return dsn[:10] + "..."
+
+	userPass := dsn[:atIdx]
+	rest := dsn[atIdx:] // 包含 @
+
+	colonIdx := strings.Index(userPass, ":")
+	if colonIdx < 0 {
+		// 没有密码部分，直接返回
+		return userPass + rest
+	}
+
+	// 保留用户名，遮蔽密码
+	return userPass[:colonIdx] + ":***" + rest
 }

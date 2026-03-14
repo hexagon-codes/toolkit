@@ -428,17 +428,27 @@ func (sl *SyncList[T]) ToSlice() []T {
 }
 
 // ForEach 遍历所有元素（线程安全）
+// 先在锁内复制数据到临时切片，释放锁后再遍历调用回调，避免死锁风险
 func (sl *SyncList[T]) ForEach(fn func(T)) {
 	sl.mu.RLock()
-	defer sl.mu.RUnlock()
-	sl.l.ForEach(fn)
+	items := sl.l.ToSlice()
+	sl.mu.RUnlock()
+
+	for _, v := range items {
+		fn(v)
+	}
 }
 
 // ForEachReverse 反向遍历所有元素（线程安全）
+// 先在锁内复制数据到临时切片，释放锁后再遍历调用回调，避免死锁风险
 func (sl *SyncList[T]) ForEachReverse(fn func(T)) {
 	sl.mu.RLock()
-	defer sl.mu.RUnlock()
-	sl.l.ForEachReverse(fn)
+	items := sl.l.ToSlice()
+	sl.mu.RUnlock()
+
+	for i := len(items) - 1; i >= 0; i-- {
+		fn(items[i])
+	}
 }
 
 // Find 查找第一个满足条件的元素值（线程安全）

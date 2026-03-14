@@ -6,11 +6,13 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 )
 
 var (
-	defaultLogger *Logger
-	once          sync.Once
+	// defaultLoggerPtr 使用 atomic.Pointer 确保并发安全
+	defaultLoggerPtr atomic.Pointer[Logger]
+	once             sync.Once
 )
 
 // Logger 日志记录器
@@ -84,7 +86,7 @@ func Init(cfg *Config) error {
 		return err
 	}
 
-	defaultLogger = logger
+	defaultLoggerPtr.Store(logger)
 	slog.SetDefault(logger.slog)
 	return nil
 }
@@ -157,18 +159,23 @@ func parseLevel(level string) slog.Level {
 
 // Default 获取默认日志记录器
 func Default() *Logger {
+	if l := defaultLoggerPtr.Load(); l != nil {
+		return l
+	}
+	// 使用 once 确保只初始化一次默认 logger
 	once.Do(func() {
-		if defaultLogger == nil {
-			defaultLogger, _ = New(DefaultConfig())
-			slog.SetDefault(defaultLogger.slog)
+		if defaultLoggerPtr.Load() == nil {
+			l, _ := New(DefaultConfig())
+			defaultLoggerPtr.Store(l)
+			slog.SetDefault(l.slog)
 		}
 	})
-	return defaultLogger
+	return defaultLoggerPtr.Load()
 }
 
 // SetDefault 设置默认日志记录器
 func SetDefault(l *Logger) {
-	defaultLogger = l
+	defaultLoggerPtr.Store(l)
 	slog.SetDefault(l.slog)
 }
 

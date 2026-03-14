@@ -2,7 +2,6 @@ package redis
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/bytedance/gopkg/util/gopool"
@@ -71,34 +70,39 @@ func (c *StableCache) GetOrLoad(
 		// 缓存命中
 		found, payload, uerr := unpack(data)
 		if uerr != nil {
+			// 数据损坏：删除损坏的 key，继续走 singleflight 加载新数据
 			c.onError(ctx, "stable_unpack", fullKey, uerr)
-			return uerr
+			c.asyncDel(ctx, fullKey)
+		} else {
+			if !found {
+				// 负缓存命中
+				return ErrNotFound
+			}
+			return c.opts.Codec.Unmarshal(payload, dest)
 		}
-		if !found {
-			// 负缓存命中
-			return ErrNotFound
-		}
-		return c.opts.Codec.Unmarshal(payload, dest)
-	}
-
-	if err != redis.Nil {
-		// Redis 错误，降级到直接加载
+	} else if err != redis.Nil {
+		// Redis 网络错误，降级到直接加载
 		c.onError(ctx, "stable_get", fullKey, err)
 		return c.loadAndFill(ctx, loader, dest)
 	}
 
 	// 2. 缓存未命中，使用 singleflight 防击穿
 	packed, err, _ := c.sf.Do(fullKey, func() (interface{}, error) {
+		// 使用独立 context，确保发起者取消不影响其他等待者
+		sfCtx := context.WithoutCancel(ctx)
+
 		// 双重检查（带超时）
-		checkCtx, checkCancel := withTimeout(ctx, c.opts.ReadTimeout)
+		checkCtx, checkCancel := withTimeout(sfCtx, c.opts.ReadTimeout)
 		defer checkCancel()
 		data2, err2 := c.client.Get(checkCtx, fullKey).Bytes()
 		if err2 == nil {
 			return data2, nil
 		}
 
-		// 执行加载
-		val, lerr := loader(ctx)
+		// 执行加载（带超时保护，防止 loader 无限阻塞）
+		loaderCtx, loaderCancel := withTimeout(sfCtx, 10*time.Second)
+		defer loaderCancel()
+		val, lerr := loader(loaderCtx)
 		if lerr != nil {
 			if c.isNotFound(lerr) {
 				// 缓存空值（负缓存）
@@ -197,6 +201,19 @@ func (c *StableCache) Set(ctx context.Context, key string, value any, ttl time.D
 	return err
 }
 
+// asyncDel 异步删除损坏的缓存 key（自愈机制）
+func (c *StableCache) asyncDel(ctx context.Context, key string) {
+	gopool.Go(func() {
+		delCtx, cancel := withTimeout(context.Background(), c.opts.WriteTimeout)
+		defer cancel()
+
+		err := c.client.Del(delCtx, key).Err()
+		if err != nil {
+			c.onError(ctx, "stable_del_corrupt", key, err)
+		}
+	})
+}
+
 func (c *StableCache) asyncSet(ctx context.Context, key string, data []byte, ttl time.Duration) {
 	gopool.Go(func() {
 		writeCtx, cancel := withTimeout(context.Background(), c.opts.WriteTimeout)
@@ -210,25 +227,11 @@ func (c *StableCache) asyncSet(ctx context.Context, key string, data []byte, ttl
 }
 
 func (c *StableCache) loadAndFill(ctx context.Context, loader func(ctx context.Context) (any, error), dest any) error {
-	val, err := loader(ctx)
-	if err != nil {
-		return err
-	}
-	if dest != nil {
-		raw, _ := c.opts.Codec.Marshal(val)
-		return c.opts.Codec.Unmarshal(raw, dest)
-	}
-	return nil
+	return loadAndFillCommon(ctx, c.opts.Codec, loader, dest)
 }
 
 func (c *StableCache) isNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	if c.opts.IsNotFound != nil && c.opts.IsNotFound(err) {
-		return true
-	}
-	return errors.Is(err, ErrNotFound)
+	return isNotFoundCommon(err, c.opts.IsNotFound)
 }
 
 func (c *StableCache) onError(ctx context.Context, op, key string, err error) {

@@ -194,7 +194,7 @@ func InUTC(t time.Time) time.Time {
 //	now := timex.NowShanghai()
 //	fmt.Println(now.Format("2006-01-02 15:04:05"))
 func NowShanghai() time.Time {
-	return time.Now().In(Shanghai())
+	return Now().In(Shanghai())
 }
 
 // NowBeijing 返回北京时区的当前时间
@@ -202,7 +202,7 @@ func NowShanghai() time.Time {
 // 返回:
 //   - time.Time: 北京时区的当前时间
 func NowBeijing() time.Time {
-	return time.Now().In(Beijing())
+	return Now().In(Beijing())
 }
 
 // NowTokyo 返回东京时区的当前时间
@@ -210,7 +210,7 @@ func NowBeijing() time.Time {
 // 返回:
 //   - time.Time: 东京时区的当前时间
 func NowTokyo() time.Time {
-	return time.Now().In(Tokyo())
+	return Now().In(Tokyo())
 }
 
 // NowNewYork 返回纽约时区的当前时间
@@ -218,7 +218,7 @@ func NowTokyo() time.Time {
 // 返回:
 //   - time.Time: 纽约时区的当前时间
 func NowNewYork() time.Time {
-	return time.Now().In(NewYork())
+	return Now().In(NewYork())
 }
 
 // NowLondon 返回伦敦时区的当前时间
@@ -226,7 +226,7 @@ func NowNewYork() time.Time {
 // 返回:
 //   - time.Time: 伦敦时区的当前时间
 func NowLondon() time.Time {
-	return time.Now().In(London())
+	return Now().In(London())
 }
 
 // NowUTC 返回 UTC 时区的当前时间
@@ -234,7 +234,7 @@ func NowLondon() time.Time {
 // 返回:
 //   - time.Time: UTC 时区的当前时间
 func NowUTC() time.Time {
-	return time.Now().In(UTC())
+	return Now().In(UTC())
 }
 
 // ParseInShanghai 在上海时区解析时间字符串

@@ -3,6 +3,7 @@ package conv
 import (
 	"math"
 	"strconv"
+	"strings"
 )
 
 // Int 将任意类型转换为 int
@@ -248,11 +249,19 @@ func Uint64(any any) uint64 {
 	case uint64:
 		return value
 	case float32:
+		// 检查 NaN 和 Inf
+		if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
+			return 0
+		}
 		if value < 0 {
 			return 0
 		}
 		return uint64(value)
 	case float64:
+		// 检查 NaN 和 Inf
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			return 0
+		}
 		if value < 0 {
 			return 0
 		}
@@ -315,13 +324,28 @@ func Bool(any any) bool {
 	case float32, float64:
 		return Float64(value) != 0
 	case string:
-		v, _ := strconv.ParseBool(value)
-		return v
+		return parseBoolExtended(value)
 	case []byte:
-		v, _ := strconv.ParseBool(string(value))
-		return v
+		return parseBoolExtended(string(value))
 	default:
-		v, _ := strconv.ParseBool(String(any))
+		return parseBoolExtended(String(any))
+	}
+}
+
+// parseBoolExtended 扩展的布尔值解析
+// 除了 strconv.ParseBool 支持的值外，还支持 "yes"/"no"/"on"/"off"（不区分大小写）
+func parseBoolExtended(s string) bool {
+	v, err := strconv.ParseBool(s)
+	if err == nil {
 		return v
+	}
+	// strconv.ParseBool 不支持的扩展值
+	switch strings.ToLower(s) {
+	case "yes", "on":
+		return true
+	case "no", "off":
+		return false
+	default:
+		return false
 	}
 }

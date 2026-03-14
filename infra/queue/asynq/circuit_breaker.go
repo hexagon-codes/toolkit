@@ -75,6 +75,7 @@ type CircuitBreaker struct {
 	failureCount      int
 	successCount      int
 	lastFailureTime   time.Time
+	lastUsedTime      time.Time // 最后一次使用时间，用于清理空闲熔断器
 	halfOpenRequests  int
 	consecutiveErrors int
 }
@@ -92,6 +93,7 @@ func NewCircuitBreaker(name string, config CircuitBreakerConfig) *CircuitBreaker
 func (cb *CircuitBreaker) Allow() error {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
+	cb.lastUsedTime = time.Now()
 	switch cb.state {
 	case StateClosed:
 		return nil
@@ -319,6 +321,25 @@ func (m *ChannelCircuitBreakerManager) GetBreaker(channelID int) *CircuitBreaker
 	return breaker
 }
 
+// CleanupIdle 清理长时间未使用的熔断器
+// maxAge 为最大空闲时间，超过该时间未使用的熔断器将被移除
+func (m *ChannelCircuitBreakerManager) CleanupIdle(maxAge time.Duration) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	removed := 0
+	for id, breaker := range m.breakers {
+		breaker.mu.RLock()
+		lastUsed := breaker.lastUsedTime
+		breaker.mu.RUnlock()
+		if now.Sub(lastUsed) > maxAge {
+			delete(m.breakers, id)
+			removed++
+		}
+	}
+	return removed
+}
+
 // Allow 检查渠道是否允许请求
 func (m *ChannelCircuitBreakerManager) Allow(channelID int) error {
 	breaker := m.GetBreaker(channelID)
@@ -425,6 +446,25 @@ func (m *PlatformCircuitBreakerManager) GetBreaker(platform string) *CircuitBrea
 	breaker := NewCircuitBreaker(name, m.config)
 	m.breakers[platform] = breaker
 	return breaker
+}
+
+// CleanupIdle 清理长时间未使用的熔断器
+// maxAge 为最大空闲时间，超过该时间未使用的熔断器将被移除
+func (m *PlatformCircuitBreakerManager) CleanupIdle(maxAge time.Duration) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	removed := 0
+	for platform, breaker := range m.breakers {
+		breaker.mu.RLock()
+		lastUsed := breaker.lastUsedTime
+		breaker.mu.RUnlock()
+		if now.Sub(lastUsed) > maxAge {
+			delete(m.breakers, platform)
+			removed++
+		}
+	}
+	return removed
 }
 
 // Allow 检查平台是否允许请求

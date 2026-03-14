@@ -226,19 +226,24 @@ func (s *WorkerStack) RetrieveExpiry(duration time.Duration) []WorkerInterface {
 		}
 	}
 
-	// Compact the array
-	newItems := make([]WorkerInterface, s.cap)
-	newHead := 0
+	// 原地紧缩，避免在持有 spinlock 时分配内存
+	writeIdx := 0
 	for i := 0; i < s.len; i++ {
 		idx := (s.head - s.len + i + s.cap) % s.cap
 		if s.items[idx] != nil {
-			newItems[newHead] = s.items[idx]
-			newHead++
+			if writeIdx != idx {
+				s.items[writeIdx] = s.items[idx]
+				s.items[idx] = nil
+			}
+			writeIdx++
 		}
 	}
-	s.items = newItems
-	s.len = newHead
-	s.head = newHead
+	// 清除尾部残留引用
+	for i := writeIdx; i < s.cap; i++ {
+		s.items[i] = nil
+	}
+	s.len = writeIdx
+	s.head = writeIdx
 
 	return s.expiry
 }

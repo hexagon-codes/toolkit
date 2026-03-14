@@ -235,8 +235,13 @@ type Cache struct {
 	generation uint64
 }
 
-// DefaultCleanupInterval 默认清理间隔
-const DefaultCleanupInterval = time.Minute
+const (
+	// DefaultCleanupInterval 默认清理间隔
+	DefaultCleanupInterval = time.Minute
+
+	// DefaultMaxEntries 当 maxEntries <= 0 时的默认上限，防止 OOM
+	DefaultMaxEntries = 10000
+)
 
 // NewCache 创建本地缓存
 // cleanupInterval 为 0 时使用默认值（1分钟），传入负值则禁用定期清理
@@ -245,7 +250,13 @@ func NewCache(maxEntries int, opts ...Option) *Cache {
 }
 
 // NewCacheWithCleanup 创建本地缓存（可指定清理间隔）
+//
+// 注意：maxEntries <= 0 时会使用默认上限（DefaultMaxEntries = 10000），防止 OOM。
+// 如需更大容量，请显式传入正整数。
 func NewCacheWithCleanup(maxEntries int, cleanupInterval time.Duration, opts ...Option) *Cache {
+	if maxEntries <= 0 {
+		maxEntries = DefaultMaxEntries
+	}
 	c := &Cache{
 		items:           make(map[string]*localItem),
 		opts:            applyOptions(opts...),
@@ -448,7 +459,10 @@ func (c *Cache) evictIfNeededLocked(now time.Time) {
 	}
 
 	// 2) LRU 驱逐：删除最久未访问的条目
-	// 优化：一次性收集所有需要删除的 key，避免多次遍历
+	// 性能特征：使用选择排序找最小的 needDel 个元素，时间复杂度 O(n*needDel)。
+	// 当 maxEntries 较大（>10万）且频繁触发驱逐时性能可能下降，
+	// 可考虑引入 container/heap 或双向链表优化为 O(n*log(n))。
+	// 对于常见的万级缓存场景，当前实现足够高效。
 	needDel := len(c.items) - c.maxEntries
 	if needDel <= 0 {
 		return

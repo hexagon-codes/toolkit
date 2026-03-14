@@ -1,5 +1,7 @@
 package optional
 
+import "reflect"
+
 // Option 表示一个可能存在也可能不存在的值
 type Option[T any] struct {
 	value   T
@@ -446,8 +448,8 @@ func (o Option[T]) Contains(value T) bool {
 	if !o.present {
 		return false
 	}
-	// 使用 any 进行比较
-	return any(o.value) == any(value)
+	// 使用 reflect.DeepEqual 进行比较，避免不可比较类型（如 slice/map）导致 panic
+	return reflect.DeepEqual(o.value, value)
 }
 
 // String 返回 Option 的字符串表示

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"log"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -93,6 +94,9 @@ func New(ctx context.Context, cfg *Config, opts ...Option) (*Client, error) {
 
 	// TLS
 	if cfg.TLS {
+		if cfg.InsecureSkipVerify {
+			log.Printf("[WARNING] clickhouse: InsecureSkipVerify 已启用，TLS 证书验证被跳过，不建议在生产环境使用")
+		}
 		chOpts.TLS = &tls.Config{
 			InsecureSkipVerify: cfg.InsecureSkipVerify,
 		}

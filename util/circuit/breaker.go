@@ -114,15 +114,26 @@ func defaultConfig() Config {
 type Breaker struct {
 	config Config
 
-	state         atomic.Int32
-	failures      atomic.Int32
-	successes     atomic.Int32
-	halfOpenCount atomic.Int32
-	lastFailureAt atomic.Int64
-	openedAt      atomic.Int64
+	state           atomic.Int32
+	failures        atomic.Int32
+	successes       atomic.Int32
+	halfOpenCount   atomic.Int32
+	pendingHalfOpen atomic.Int32 // 手动 API（Allow）的半开请求计数，用于 Success/Failure 正确递减
+	lastFailureAt   atomic.Int64
+	openedAt        atomic.Int64
 
 	mu             sync.Mutex
 	stateListeners []func(from, to State)
+
+	// notifyCh 用于保序通知状态变更，单一 goroutine 消费确保顺序
+	notifyCh   chan stateChangeEvent
+	notifyOnce sync.Once
+}
+
+// stateChangeEvent 状态变更事件
+type stateChangeEvent struct {
+	from, to  State
+	listeners []func(from, to State)
 }
 
 // New 创建熔断器
@@ -174,22 +185,42 @@ func (b *Breaker) ExecuteContext(ctx context.Context, fn func(context.Context) (
 
 // Allow 检查是否允许请求通过
 //
-// 注意：对于手动 API（Allow + Success/Failure），半开状态的 halfOpenCount
-// 跟踪依赖当前状态判断，在极端并发场景下可能不够精确。
-// 建议优先使用 Execute/ExecuteContext 以获得精确的状态追踪。
+// 返回值：allowed 为 true 时表示请求在半开状态下被允许（已递增 halfOpenCount），
+// 调用者应在完成请求后调用 Success() 或 Failure() 以确保 halfOpenCount 正确递减。
 func (b *Breaker) Allow() error {
-	_, err := b.beforeExecute()
-	return err
+	wasHalfOpen, err := b.beforeExecute()
+	if err != nil {
+		return err
+	}
+	if wasHalfOpen {
+		b.pendingHalfOpen.Add(1)
+	}
+	return nil
 }
 
 // Success 报告成功
 func (b *Breaker) Success() {
-	b.afterExecute(nil, false)
+	wasHalfOpen := b.consumePendingHalfOpen()
+	b.afterExecute(nil, wasHalfOpen)
 }
 
 // Failure 报告失败
 func (b *Breaker) Failure() {
-	b.afterExecute(errors.New("manual failure"), false)
+	wasHalfOpen := b.consumePendingHalfOpen()
+	b.afterExecute(errors.New("manual failure"), wasHalfOpen)
+}
+
+// consumePendingHalfOpen 消费一个待处理的半开请求标记
+func (b *Breaker) consumePendingHalfOpen() bool {
+	for {
+		current := b.pendingHalfOpen.Load()
+		if current <= 0 {
+			return false
+		}
+		if b.pendingHalfOpen.CompareAndSwap(current, current-1) {
+			return true
+		}
+	}
 }
 
 // beforeExecute 执行前检查
@@ -294,6 +325,8 @@ func (b *Breaker) afterExecute(err error, wasHalfOpen bool) {
 }
 
 // transitionTo 状态转换（使用 CAS 保证原子性）
+// CAS 失败时检查新的当前状态，如果不再是预期的 from 状态则放弃转换，
+// 避免意外的状态跳转（如其他 goroutine 已将状态推进到更新的状态）
 func (b *Breaker) transitionTo(to State) {
 	for {
 		from := State(b.state.Load())
@@ -303,7 +336,13 @@ func (b *Breaker) transitionTo(to State) {
 
 		// 使用 CAS 确保状态转换的原子性
 		if !b.state.CompareAndSwap(int32(from), int32(to)) {
-			// CAS 失败，状态已被其他 goroutine 改变，重试
+			// CAS 失败，检查当前状态是否仍是预期的 from 状态
+			// 如果当前状态已改变（被其他 goroutine 转换），放弃本次转换
+			currentState := State(b.state.Load())
+			if currentState != from {
+				return
+			}
+			// 当前状态仍是 from，重试 CAS
 			continue
 		}
 
@@ -328,22 +367,45 @@ func (b *Breaker) transitionTo(to State) {
 	}
 }
 
-// notifyStateChange 通知状态变更监听器（异步执行，带 panic 保护）
+// startNotifier 启动有序通知 goroutine（只启动一次）
+func (b *Breaker) startNotifier() {
+	b.notifyOnce.Do(func() {
+		b.notifyCh = make(chan stateChangeEvent, 64)
+		go func() {
+			for event := range b.notifyCh {
+				for _, listener := range event.listeners {
+					func() {
+						defer func() {
+							if r := recover(); r != nil {
+								// 监听器 panic 不应影响熔断器正常工作
+							}
+						}()
+						listener(event.from, event.to)
+					}()
+				}
+			}
+		}()
+	})
+}
+
+// notifyStateChange 通知状态变更监听器（异步有序执行，通过单一 goroutine + channel 保序）
 func (b *Breaker) notifyStateChange(from, to State) {
 	b.mu.Lock()
 	listeners := make([]func(from, to State), len(b.stateListeners))
 	copy(listeners, b.stateListeners)
 	b.mu.Unlock()
 
-	for _, listener := range listeners {
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					// 监听器 panic 不应影响熔断器正常工作
-				}
-			}()
-			listener(from, to)
-		}()
+	if len(listeners) == 0 {
+		return
+	}
+
+	b.startNotifier()
+
+	// 非阻塞发送，避免在极端情况下阻塞熔断器
+	select {
+	case b.notifyCh <- stateChangeEvent{from: from, to: to, listeners: listeners}:
+	default:
+		// channel 满时丢弃通知，避免阻塞熔断器核心逻辑
 	}
 }
 

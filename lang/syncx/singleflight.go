@@ -79,6 +79,10 @@ func (g *Singleflight) Do(key string, fn func() (any, error)) (any, error) {
 	if c, ok := g.m[key]; ok {
 		g.mu.Unlock()
 		c.wg.Wait()
+		// 如果执行者发生了 panic，等待者也应该 re-panic
+		if pe, ok := c.err.(*panicError); ok {
+			panic(pe.value)
+		}
 		return c.val, c.err
 	}
 	c := new(call)

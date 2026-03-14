@@ -3,13 +3,16 @@ package multi
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// mockLayer 模拟缓存层
+// mockLayer 模拟缓存层（线程安全）
 type mockLayer struct {
+	mu          sync.Mutex
 	data        map[string]any
 	callCount   int
 	shouldErr   bool
@@ -23,14 +26,17 @@ func newMockLayer() *mockLayer {
 }
 
 func (m *mockLayer) GetOrLoad(ctx context.Context, key string, ttl time.Duration, dest any, loader func(ctx context.Context) (any, error)) error {
+	m.mu.Lock()
 	m.callCount++
 
 	if m.shouldErr {
+		m.mu.Unlock()
 		return m.errToReturn
 	}
 
 	// 检查缓存
 	if val, ok := m.data[key]; ok {
+		m.mu.Unlock()
 		// 模拟数据复制
 		if ptr, ok := dest.(*string); ok {
 			if str, ok := val.(string); ok {
@@ -43,6 +49,7 @@ func (m *mockLayer) GetOrLoad(ctx context.Context, key string, ttl time.Duration
 		}
 		return nil
 	}
+	m.mu.Unlock()
 
 	// 缓存未命中，调用 loader
 	val, err := loader(ctx)
@@ -51,7 +58,9 @@ func (m *mockLayer) GetOrLoad(ctx context.Context, key string, ttl time.Duration
 	}
 
 	// 写入缓存
+	m.mu.Lock()
 	m.data[key] = val
+	m.mu.Unlock()
 
 	// 模拟数据复制
 	if ptr, ok := dest.(*string); ok {
@@ -68,6 +77,9 @@ func (m *mockLayer) GetOrLoad(ctx context.Context, key string, ttl time.Duration
 }
 
 func (m *mockLayer) Del(ctx context.Context, keys ...string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	if m.shouldErr {
 		return m.errToReturn
 	}
@@ -76,6 +88,14 @@ func (m *mockLayer) Del(ctx context.Context, keys ...string) error {
 		delete(m.data, key)
 	}
 	return nil
+}
+
+// hasKey 线程安全地检查 key 是否存在
+func (m *mockLayer) hasKey(key string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.data[key]
+	return ok
 }
 
 func TestNewCache(t *testing.T) {
@@ -168,6 +188,9 @@ func TestCache_GetOrLoad_SingleLayer(t *testing.T) {
 	if loadCount != 1 {
 		t.Errorf("expected loadCount=1, got %d", loadCount)
 	}
+
+	// 等待回填完成
+	time.Sleep(100 * time.Millisecond)
 
 	// 第二次加载（应该命中缓存）
 	var dest2 string
@@ -622,6 +645,9 @@ func TestCache_IntValues(t *testing.T) {
 		t.Errorf("expected 42, got %d", dest)
 	}
 
+	// 等待回填完成
+	time.Sleep(100 * time.Millisecond)
+
 	// Second call should hit cache
 	var dest2 int
 	err = cache.GetOrLoad(ctx, "int_key", &dest2, func(ctx context.Context) (any, error) {
@@ -681,7 +707,7 @@ func TestCache_ThreeLayer_MiddleLayerHit(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Now local should have the value backfilled
-	if _, exists := layer1.data["key1"]; !exists {
+	if !layer1.hasKey("key1") {
 		t.Error("expected local layer to have backfilled data")
 	}
 }
@@ -762,13 +788,13 @@ func TestCache_ThreeLayer_AllMiss_LoaderSuccess(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// All layers should have data now
-	if _, exists := layer1.data["key1"]; !exists {
+	if !layer1.hasKey("key1") {
 		t.Error("expected layer1 to have data")
 	}
-	if _, exists := layer2.data["key1"]; !exists {
+	if !layer2.hasKey("key1") {
 		t.Error("expected layer2 to have data")
 	}
-	if _, exists := layer3.data["key1"]; !exists {
+	if !layer3.hasKey("key1") {
 		t.Error("expected layer3 to have data")
 	}
 }
@@ -887,10 +913,15 @@ func TestCache_ThreeLayer_WithSkipBackfill(t *testing.T) {
 	// Wait to ensure any backfill would have happened
 	time.Sleep(100 * time.Millisecond)
 
-	// Layer1 will have data because GetOrLoad naturally caches
-	// This is expected - SkipBackfill only affects explicit backfill calls
-	if _, exists := layer1.data["key1"]; !exists {
-		t.Error("layer1 should have data from normal cache flow")
+	// SkipBackfill=true 时，不进行回填，所有层都不应有数据
+	if layer1.hasKey("key1") {
+		t.Error("layer1 should not have data when SkipBackfill=true")
+	}
+	if layer2.hasKey("key1") {
+		t.Error("layer2 should not have data when SkipBackfill=true")
+	}
+	if layer3.hasKey("key1") {
+		t.Error("layer3 should not have data when SkipBackfill=true")
 	}
 }
 
@@ -1017,5 +1048,74 @@ func TestCache_Del_ThreeLayers(t *testing.T) {
 	}
 	if _, exists := layer3.data["key1"]; exists {
 		t.Error("layer3 should not have key1")
+	}
+}
+
+func TestNewCache_NilLayer_Panics(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic for nil Layer")
+		}
+	}()
+
+	NewCache([]LayerConfig{
+		{Layer: nil, TTL: time.Minute, Name: "bad"},
+	})
+}
+
+func TestCache_GetOrLoad_NonPointerDest(t *testing.T) {
+	cache := NewCache([]LayerConfig{
+		{Layer: newMockLayer(), TTL: time.Minute, Name: "test"},
+	})
+
+	ctx := context.Background()
+	// dest 不是指针
+	err := cache.GetOrLoad(ctx, "key", "not_a_pointer", func(ctx context.Context) (any, error) {
+		return "value", nil
+	})
+	if !errors.Is(err, ErrInvalidDest) {
+		t.Errorf("expected ErrInvalidDest for non-pointer dest, got: %v", err)
+	}
+}
+
+func TestCache_GetOrLoad_LoaderCalledExactlyOnce(t *testing.T) {
+	// 验证 P0 修复：loader 在所有层都未命中时只被调用一次
+	layers := make([]*mockLayer, 5)
+	configs := make([]LayerConfig, 5)
+	for i := range layers {
+		layers[i] = newMockLayer()
+		configs[i] = LayerConfig{Layer: layers[i], TTL: time.Minute, Name: fmt.Sprintf("layer%d", i)}
+	}
+
+	cache := NewCache(configs)
+
+	ctx := context.Background()
+	var dest string
+	loaderCallCount := 0
+
+	err := cache.GetOrLoad(ctx, "key1", &dest, func(ctx context.Context) (any, error) {
+		loaderCallCount++
+		return "loaded", nil
+	})
+
+	if err != nil {
+		t.Fatalf("GetOrLoad failed: %v", err)
+	}
+	if dest != "loaded" {
+		t.Errorf("expected 'loaded', got '%s'", dest)
+	}
+	if loaderCallCount != 1 {
+		t.Errorf("expected loader called exactly once, got %d", loaderCallCount)
+	}
+
+	// 等待回填完成
+	time.Sleep(100 * time.Millisecond)
+
+	// 所有层都应有数据
+	for i, layer := range layers {
+		if !layer.hasKey("key1") {
+			t.Errorf("expected layer%d to have data after backfill", i)
+		}
 	}
 }

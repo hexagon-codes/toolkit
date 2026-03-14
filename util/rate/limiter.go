@@ -167,7 +167,8 @@ func (lb *LeakyBucket) leak() {
 		if lb.water < 0 {
 			lb.water = 0
 		}
-		lb.lastLeakTime = now
+		// 只推进已消耗的时间，保留余量避免精度丢失
+		lb.lastLeakTime = lb.lastLeakTime.Add(time.Duration(leaked) * lb.rate)
 	}
 }
 

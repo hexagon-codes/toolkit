@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -311,7 +312,13 @@ func (r *Request) execute() (*Response, error) {
 
 	for attempt := 0; attempt <= r.client.retries; attempt++ {
 		if attempt > 0 {
-			time.Sleep(r.client.retryWait)
+			// 等待重试间隔，同时监听 context 取消
+			select {
+			case <-time.After(r.client.retryWait):
+				// 继续重试
+			case <-r.ctx.Done():
+				return nil, r.ctx.Err()
+			}
 			// 重试时重置 body reader
 			if r.bodyData != nil {
 				r.body = bytes.NewReader(r.bodyData)
@@ -647,37 +654,51 @@ func (r *Response) IsError() bool {
 
 // 便捷方法
 
+// 包级单例 Client，避免每次创建新实例
+var (
+	defaultClient     *Client
+	defaultClientOnce sync.Once
+)
+
+// getDefaultClient 获取包级单例 Client
+func getDefaultClient() *Client {
+	defaultClientOnce.Do(func() {
+		defaultClient = NewClient()
+	})
+	return defaultClient
+}
+
 // Get 发送 GET 请求
 func Get(url string) (*Response, error) {
-	return NewClient().R().Get(url)
+	return getDefaultClient().R().Get(url)
 }
 
 // GetWithContext 发送带上下文的 GET 请求
 func GetWithContext(ctx context.Context, url string) (*Response, error) {
-	return NewClient().R().SetContext(ctx).Get(url)
+	return getDefaultClient().R().SetContext(ctx).Get(url)
 }
 
 // Post 发送 POST 请求
 func Post(url string, body any) (*Response, error) {
-	return NewClient().R().SetJSONBody(body).Post(url)
+	return getDefaultClient().R().SetJSONBody(body).Post(url)
 }
 
 // PostWithContext 发送带上下文的 POST 请求
 func PostWithContext(ctx context.Context, url string, body any) (*Response, error) {
-	return NewClient().R().SetContext(ctx).SetJSONBody(body).Post(url)
+	return getDefaultClient().R().SetContext(ctx).SetJSONBody(body).Post(url)
 }
 
 // PostForm 发送表单 POST 请求
 func PostForm(url string, data map[string]string) (*Response, error) {
-	return NewClient().R().SetFormBody(data).Post(url)
+	return getDefaultClient().R().SetFormBody(data).Post(url)
 }
 
 // Put 发送 PUT 请求
 func Put(url string, body any) (*Response, error) {
-	return NewClient().R().SetJSONBody(body).Put(url)
+	return getDefaultClient().R().SetJSONBody(body).Put(url)
 }
 
 // Delete 发送 DELETE 请求
 func Delete(url string) (*Response, error) {
-	return NewClient().R().Delete(url)
+	return getDefaultClient().R().Delete(url)
 }

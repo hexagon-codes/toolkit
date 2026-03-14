@@ -2,6 +2,7 @@ package encoding
 
 import (
 	"net/url"
+	"sort"
 	"strings"
 )
 
@@ -25,15 +26,22 @@ func URLPathDecode(s string) (string, error) {
 	return url.PathUnescape(s)
 }
 
-// BuildQuery 从 map 构建查询字符串
+// BuildQuery 从 map 构建查询字符串（按 key 排序，保证输出确定性）
 func BuildQuery(params map[string]string) string {
 	if len(params) == 0 {
 		return ""
 	}
 
-	var parts []string
-	for k, v := range params {
-		parts = append(parts, url.QueryEscape(k)+"="+url.QueryEscape(v))
+	// 先对 key 排序，保证输出顺序确定
+	keys := make([]string, 0, len(params))
+	for k := range params {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	parts := make([]string, 0, len(params))
+	for _, k := range keys {
+		parts = append(parts, url.QueryEscape(k)+"="+url.QueryEscape(params[k]))
 	}
 
 	return strings.Join(parts, "&")

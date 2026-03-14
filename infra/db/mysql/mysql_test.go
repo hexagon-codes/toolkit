@@ -149,19 +149,24 @@ func TestMaskDSN(t *testing.T) {
 		expected string
 	}{
 		{
-			name:     "长 DSN",
+			name:     "标准 DSN",
 			dsn:      "user:password@tcp(localhost:3306)/db",
-			expected: "user:passw...",
+			expected: "user:***@tcp(localhost:3306)/db",
 		},
 		{
-			name:     "短 DSN",
+			name:     "无 @ 符号",
 			dsn:      "short",
 			expected: "***",
 		},
 		{
-			name:     "恰好10字符",
-			dsn:      "1234567890",
-			expected: "***",
+			name:     "无密码",
+			dsn:      "user@tcp(localhost:3306)/db",
+			expected: "user@tcp(localhost:3306)/db",
+		},
+		{
+			name:     "空密码",
+			dsn:      "user:@tcp(localhost:3306)/db",
+			expected: "user:***@tcp(localhost:3306)/db",
 		},
 	}
 

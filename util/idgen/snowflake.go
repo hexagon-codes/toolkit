@@ -43,16 +43,25 @@ type Snowflake struct {
 
 var (
 	defaultSnowflake *Snowflake
-	once             sync.Once
+	initMu           sync.Mutex
 )
 
 // InitSnowflake 初始化默认 Snowflake 生成器
+// 如果之前初始化失败，允许重新初始化；如果已初始化成功，则不再重复初始化
 func InitSnowflake(workerID int64) error {
-	var err error
-	once.Do(func() {
-		defaultSnowflake, err = NewSnowflake(workerID)
-	})
-	return err
+	initMu.Lock()
+	defer initMu.Unlock()
+
+	if defaultSnowflake != nil {
+		return nil
+	}
+
+	sf, err := NewSnowflake(workerID)
+	if err != nil {
+		return err
+	}
+	defaultSnowflake = sf
+	return nil
 }
 
 // NewSnowflake 创建 Snowflake 生成器

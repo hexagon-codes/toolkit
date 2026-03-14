@@ -102,6 +102,9 @@ func Do(fn func() error, opts ...Option) error {
 		opt(config)
 	}
 
+	// 当用户设置了 Multiplier 但没有显式设置 DelayFunc 时，自动使用指数退避
+	applyDefaultBackoff(config)
+
 	var lastErr error
 	for attempt := 1; attempt <= config.MaxAttempts; attempt++ {
 		err := fn()
@@ -148,13 +151,14 @@ func calculateDelay(attempt int, config *Config) time.Duration {
 	// 计算基础延迟
 	var delay time.Duration
 	if config.DelayFunc != nil {
+		// 用户显式设置了 DelayFunc，由 DelayFunc 自行控制 jitter
+		// 避免对已包含 jitter 的函数（如 ExponentialBackoffWithJitter）重复 addJitter
 		delay = config.DelayFunc(attempt, config)
 	} else {
 		delay = config.Delay
+		// 只对默认延迟添加抖动
+		delay = addJitter(delay, config)
 	}
-
-	// 添加抖动
-	delay = addJitter(delay, config)
 
 	// 确保不超过最大延迟
 	if delay > config.MaxDelay {
@@ -170,6 +174,9 @@ func DoWithContext(ctx context.Context, fn func() error, opts ...Option) error {
 	for _, opt := range opts {
 		opt(config)
 	}
+
+	// 当用户设置了 Multiplier 但没有显式设置 DelayFunc 时，自动使用指数退避
+	applyDefaultBackoff(config)
 
 	var lastErr error
 	for attempt := 1; attempt <= config.MaxAttempts; attempt++ {
@@ -217,6 +224,13 @@ func DoWithContext(ctx context.Context, fn func() error, opts ...Option) error {
 	}
 
 	return fmt.Errorf("%w: %v", ErrMaxAttemptsReached, lastErr)
+}
+
+// applyDefaultBackoff 当用户设置了 Multiplier 但没有显式设置 DelayFunc 时，自动使用指数退避
+func applyDefaultBackoff(config *Config) {
+	if config.Multiplier > 0 && config.DelayFunc == nil {
+		config.DelayFunc = ExponentialBackoff
+	}
 }
 
 // DelayTypeFunc 延迟函数类型

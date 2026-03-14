@@ -10,9 +10,9 @@ import (
 )
 
 var (
-	// 全局实例（单例模式）
+	// 全局实例（使用 mutex + 双重检查替代 sync.Once，允许初始化失败后重试）
 	globalClient redis.UniversalClient
-	globalOnce   sync.Once
+	globalMu     sync.Mutex
 )
 
 // Client Redis 客户端封装
@@ -22,20 +22,23 @@ type Client struct {
 }
 
 // Init 初始化全局 Redis 客户端
+// 使用 mutex + 双重检查替代 sync.Once，初始化失败后可重试
 func Init(config *Config) (*Client, error) {
-	var err error
-	globalOnce.Do(func() {
-		var client redis.UniversalClient
-		client, err = newUniversalClient(config)
-		if err != nil {
-			return
-		}
-		globalClient = client
-	})
+	globalMu.Lock()
+	defer globalMu.Unlock()
 
+	if globalClient != nil {
+		return &Client{
+			UniversalClient: globalClient,
+			config:          config,
+		}, nil
+	}
+
+	client, err := newUniversalClient(config)
 	if err != nil {
 		return nil, err
 	}
+	globalClient = client
 
 	return &Client{
 		UniversalClient: globalClient,

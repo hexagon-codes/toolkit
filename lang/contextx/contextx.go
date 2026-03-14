@@ -327,8 +327,10 @@ func AfterFunc(ctx context.Context, fn func()) func() bool {
 
 // WaitGroupContext 带 context 支持的 WaitGroup
 type WaitGroupContext struct {
-	wg  sync.WaitGroup
-	ctx context.Context
+	wg   sync.WaitGroup
+	ctx  context.Context
+	mu   sync.Mutex
+	errs []error
 }
 
 // NewWaitGroupContext 创建带 context 的 WaitGroup
@@ -341,7 +343,11 @@ func (w *WaitGroupContext) Go(fn func(ctx context.Context) error) {
 	w.wg.Add(1)
 	go func() {
 		defer w.wg.Done()
-		fn(w.ctx)
+		if err := fn(w.ctx); err != nil {
+			w.mu.Lock()
+			w.errs = append(w.errs, err)
+			w.mu.Unlock()
+		}
 	}()
 }
 
@@ -355,10 +361,52 @@ func (w *WaitGroupContext) Wait() error {
 
 	select {
 	case <-done:
-		return nil
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		if len(w.errs) == 0 {
+			return nil
+		}
+		if len(w.errs) == 1 {
+			return w.errs[0]
+		}
+		// 多个错误时合并为一个错误信息
+		return multiWaitError(w.errs)
 	case <-w.ctx.Done():
 		return w.ctx.Err()
 	}
+}
+
+// multiWaitError 合并多个错误
+type waitErrors struct {
+	errs []error
+}
+
+func (e *waitErrors) Error() string {
+	msgs := make([]string, len(e.errs))
+	for i, err := range e.errs {
+		msgs[i] = err.Error()
+	}
+	return "multiple errors: " + joinStrings(msgs, "; ")
+}
+
+func (e *waitErrors) Unwrap() []error {
+	return e.errs
+}
+
+func multiWaitError(errs []error) error {
+	return &waitErrors{errs: errs}
+}
+
+// joinStrings 拼接字符串切片
+func joinStrings(ss []string, sep string) string {
+	if len(ss) == 0 {
+		return ""
+	}
+	result := ss[0]
+	for _, s := range ss[1:] {
+		result += sep + s
+	}
+	return result
 }
 
 // --- Pool ---
@@ -383,13 +431,15 @@ func NewPool(ctx context.Context, size int) *Pool {
 
 // Go 在池中启动任务
 func (p *Pool) Go(fn func(ctx context.Context) error) {
+	p.wg.Add(1)
+
 	select {
 	case <-p.ctx.Done():
+		p.wg.Done()
 		return
 	case p.sem <- struct{}{}:
 	}
 
-	p.wg.Add(1)
 	go func() {
 		defer func() {
 			<-p.sem

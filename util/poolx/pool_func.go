@@ -331,25 +331,16 @@ func (p *PoolWithFunc) InvokeWithTimeout(arg any, timeout time.Duration) error {
 		return ErrPoolClosed
 	}
 
-	// Try non-blocking first
+	// 快速路径：尝试非阻塞获取 worker
 	if w := p.retrieveWorker(); w != nil {
 		p.metrics.SubmittedTasks.Add(1)
 		w.argCh <- arg
 		return nil
 	}
 
-	// Use timeout
-	done := make(chan error, 1)
-	go func() {
-		done <- p.Invoke(arg)
-	}()
-
-	select {
-	case err := <-done:
-		return err
-	case <-time.After(timeout):
-		return ErrTimeout
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return p.invokeWithContext(ctx, arg)
 }
 
 // InvokeWithContext submits an argument with context cancellation support.
@@ -358,22 +349,47 @@ func (p *PoolWithFunc) InvokeWithContext(ctx context.Context, arg any) error {
 		return ErrPoolClosed
 	}
 
-	// Try non-blocking first
+	// 快速路径：尝试非阻塞获取 worker
 	if p.TryInvoke(arg) {
 		return nil
 	}
 
-	// Wait with context
-	done := make(chan error, 1)
-	go func() {
-		done <- p.Invoke(arg)
-	}()
+	return p.invokeWithContext(ctx, arg)
+}
 
-	select {
-	case err := <-done:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
+// invokeWithContext 直接在当前 goroutine 等待，避免启动额外 goroutine 导致泄漏。
+func (p *PoolWithFunc) invokeWithContext(ctx context.Context, arg any) error {
+	p.lock.Lock()
+	for {
+		select {
+		case <-ctx.Done():
+			p.lock.Unlock()
+			return ctx.Err()
+		default:
+		}
+
+		if p.state.Load() == stateClosed {
+			p.lock.Unlock()
+			return ErrPoolClosed
+		}
+
+		if w := p.workers.pop(); w != nil {
+			p.metrics.IdleWorkers.Add(-1)
+			p.lock.Unlock()
+			p.metrics.SubmittedTasks.Add(1)
+			w.argCh <- arg
+			return nil
+		}
+
+		if w := p.createWorker(); w != nil {
+			p.lock.Unlock()
+			w.run()
+			p.metrics.SubmittedTasks.Add(1)
+			w.argCh <- arg
+			return nil
+		}
+
+		p.cond.Wait()
 	}
 }
 
@@ -451,6 +467,8 @@ func (p *PoolWithFunc) Tune(newCap int32) {
 
 // OnHook registers a hook callback.
 func (p *PoolWithFunc) OnHook(hookType HookType, fn HookFunc) {
+	p.lock.Lock()
+	defer p.lock.Unlock()
 	if p.hooks == nil {
 		p.hooks = NewHooks()
 	}
@@ -685,19 +703,24 @@ func (s *workerFuncStack) retrieveExpiry(duration time.Duration) []*workerFunc {
 		}
 	}
 
-	// Compact
-	newItems := make([]*workerFunc, s.cap)
-	newHead := 0
+	// 原地紧缩，避免在持有 spinlock 时分配内存
+	writeIdx := 0
 	for i := 0; i < s.len; i++ {
 		idx := (s.head - s.len + i + s.cap) % s.cap
 		if s.items[idx] != nil {
-			newItems[newHead] = s.items[idx]
-			newHead++
+			if writeIdx != idx {
+				s.items[writeIdx] = s.items[idx]
+				s.items[idx] = nil
+			}
+			writeIdx++
 		}
 	}
-	s.items = newItems
-	s.len = newHead
-	s.head = newHead
+	// 清除尾部残留引用
+	for i := writeIdx; i < s.cap; i++ {
+		s.items[i] = nil
+	}
+	s.len = writeIdx
+	s.head = writeIdx
 
 	return s.expiry
 }

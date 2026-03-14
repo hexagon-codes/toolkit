@@ -64,7 +64,9 @@ func (l *Lazy[T]) IsInitialized() bool {
 
 // Reset 重置状态（非线程安全）
 //
-// 警告: 此方法不是线程安全的，只能在确定没有并发访问时使用
+// 警告: 此方法不是线程安全的，严禁在存在并发 Get 调用时使用。
+// 如果在并发环境中调用 Reset，可能导致数据竞争和未定义行为。
+// 仅应在测试或确定无并发访问的初始化/清理阶段使用。
 func (l *Lazy[T]) Reset() {
 	l.once = sync.Once{}
 	var zero T

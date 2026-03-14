@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -674,16 +675,20 @@ func setField(field reflect.Value, value string) error {
 
 // --- 全局配置 ---
 
-var globalConfig = New()
+var globalConfigPtr atomic.Pointer[Config]
+
+func init() {
+	globalConfigPtr.Store(New())
+}
 
 // Global 获取全局配置
 func Global() *Config {
-	return globalConfig
+	return globalConfigPtr.Load()
 }
 
 // SetGlobal 设置全局配置
 func SetGlobal(c *Config) {
-	globalConfig = c
+	globalConfigPtr.Store(c)
 }
 
 // LoadGlobal 加载全局配置
@@ -692,51 +697,51 @@ func LoadGlobal(path string) error {
 	if err != nil {
 		return err
 	}
-	globalConfig = c
+	globalConfigPtr.Store(c)
 	return nil
 }
 
 // Get 从全局配置获取值
 func Get(key string) (any, bool) {
-	return globalConfig.Get(key)
+	return Global().Get(key)
 }
 
 // GetString 从全局配置获取字符串
 func GetString(key string) string {
-	return globalConfig.GetString(key)
+	return Global().GetString(key)
 }
 
 // GetStringDefault 从全局配置获取字符串，带默认值
 func GetStringDefault(key, defaultValue string) string {
-	return globalConfig.GetStringDefault(key, defaultValue)
+	return Global().GetStringDefault(key, defaultValue)
 }
 
 // GetInt 从全局配置获取整数
 func GetInt(key string) int {
-	return globalConfig.GetInt(key)
+	return Global().GetInt(key)
 }
 
 // GetIntDefault 从全局配置获取整数，带默认值
 func GetIntDefault(key string, defaultValue int) int {
-	return globalConfig.GetIntDefault(key, defaultValue)
+	return Global().GetIntDefault(key, defaultValue)
 }
 
 // GetBool 从全局配置获取布尔值
 func GetBool(key string) bool {
-	return globalConfig.GetBool(key)
+	return Global().GetBool(key)
 }
 
 // GetDuration 从全局配置获取时间间隔
 func GetDuration(key string) time.Duration {
-	return globalConfig.GetDuration(key)
+	return Global().GetDuration(key)
 }
 
 // Set 设置全局配置项
 func Set(key string, value any) {
-	globalConfig.Set(key, value)
+	Global().Set(key, value)
 }
 
 // Has 判断全局配置项是否存在
 func Has(key string) bool {
-	return globalConfig.Has(key)
+	return Global().Has(key)
 }

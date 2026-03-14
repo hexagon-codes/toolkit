@@ -510,7 +510,12 @@ func (rp *RetryPool) Do(req *http.Request) (*http.Response, error) {
 	for attempt := 0; attempt <= rp.config.MaxRetries; attempt++ {
 		// 如果不是第一次尝试，等待并重置 Body
 		if attempt > 0 {
-			time.Sleep(wait)
+			// 等待重试间隔，同时监听 context 取消
+			select {
+			case <-time.After(wait):
+			case <-req.Context().Done():
+				return nil, req.Context().Err()
+			}
 			// 指数退避
 			wait *= 2
 			if wait > rp.config.MaxRetryWait {

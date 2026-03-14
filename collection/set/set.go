@@ -384,13 +384,6 @@ func Difference[T comparable](sets ...*Set[T]) *Set[T] {
 	return result
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // --- 线程安全版本 ---
 
 // SyncSet 线程安全的 HashSet
@@ -498,10 +491,15 @@ func (ss *SyncSet[T]) Pop() (T, bool) {
 }
 
 // ForEach 遍历所有元素（线程安全）
+// 先在锁内复制数据到临时切片，释放锁后再遍历调用回调，避免死锁风险
 func (ss *SyncSet[T]) ForEach(fn func(T)) {
 	ss.mu.RLock()
-	defer ss.mu.RUnlock()
-	ss.s.ForEach(fn)
+	items := ss.s.ToSlice()
+	ss.mu.RUnlock()
+
+	for _, v := range items {
+		fn(v)
+	}
 }
 
 // Filter 过滤元素（线程安全）

@@ -313,7 +313,7 @@ func (m *Manager) Enqueue(ctx context.Context, task *asynq.Task, opts ...asynq.O
 
 // EnqueueTask 入队任务（简化版）
 func (m *Manager) EnqueueTask(ctx context.Context, taskType string, payload []byte, opts ...asynq.Option) (*asynq.TaskInfo, error) {
-	task := asynq.NewTask(taskType, payload, opts...)
+	task := asynq.NewTask(taskType, payload)
 	return m.client.EnqueueContext(ctx, task, opts...)
 }
 

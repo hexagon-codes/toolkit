@@ -2,8 +2,10 @@ package asynq
 
 import (
 	"context"
-	"github.com/redis/go-redis/v9"
+	"sync/atomic"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 // =========================================
@@ -55,48 +57,56 @@ type RedisClient interface {
 }
 
 // =========================================
-// 全局实例（通过依赖注入设置）
+// 全局实例（通过依赖注入设置，使用 atomic.Value 保证并发安全）
 // =========================================
 var (
-	globalLogger         Logger
-	globalConfigProvider ConfigProvider
-	globalRedisClient    RedisClient
+	atomicLogger         atomic.Value // 存储 Logger
+	atomicConfigProvider atomic.Value // 存储 ConfigProvider
+	atomicRedisClient    atomic.Value // 存储 RedisClient
 )
+
+// redisClientHolder 包装 RedisClient 用于 atomic.Value（需要固定类型）
+type redisClientHolder struct {
+	client RedisClient
+}
 
 // SetLogger 设置全局日志实例
 func SetLogger(logger Logger) {
-	globalLogger = logger
+	atomicLogger.Store(logger)
 }
 
 // SetConfigProvider 设置全局配置提供者
 func SetConfigProvider(provider ConfigProvider) {
-	globalConfigProvider = provider
+	atomicConfigProvider.Store(provider)
 }
 
 // SetRedisClient 设置全局 Redis 客户端
 func SetRedisClient(client RedisClient) {
-	globalRedisClient = client
+	atomicRedisClient.Store(&redisClientHolder{client: client})
 }
 
 // GetLogger 获取全局日志实例
 func GetLogger() Logger {
-	if globalLogger == nil {
-		return &StdLogger{} // 默认实现
+	if v := atomicLogger.Load(); v != nil {
+		return v.(Logger)
 	}
-	return globalLogger
+	return &StdLogger{} // 默认实现
 }
 
 // GetConfigProvider 获取全局配置提供者
 func GetConfigProvider() ConfigProvider {
-	if globalConfigProvider == nil {
-		return &DefaultConfigProvider{} // 默认实现
+	if v := atomicConfigProvider.Load(); v != nil {
+		return v.(ConfigProvider)
 	}
-	return globalConfigProvider
+	return &DefaultConfigProvider{} // 默认实现
 }
 
 // GetRedisClient 获取全局 Redis 客户端
 func GetRedisClient() RedisClient {
-	return globalRedisClient
+	if v := atomicRedisClient.Load(); v != nil {
+		return v.(*redisClientHolder).client
+	}
+	return nil
 }
 
 // =========================================

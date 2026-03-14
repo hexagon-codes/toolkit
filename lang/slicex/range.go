@@ -12,11 +12,14 @@ import "github.com/everyday-items/toolkit/lang/mathx"
 // 返回:
 //   - []T: 数字范围切片
 //
+// 注意: 无符号整数类型（uint, uint8, uint16, uint32, uint64, uintptr）不支持负步长，
+// 因为无符号类型无法表示负数，负步长条件永远不会生效。请对无符号类型仅使用正步长。
+//
 // 示例:
 //
 //	slicex.Range(0, 5, 1)   // [0, 1, 2, 3, 4]
 //	slicex.Range(0, 10, 2)  // [0, 2, 4, 6, 8]
-//	slicex.Range(5, 0, -1)  // [5, 4, 3, 2, 1]
+//	slicex.Range(5, 0, -1)  // [5, 4, 3, 2, 1]（仅适用于有符号类型）
 func Range[T mathx.Signed | ~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64 | ~uintptr](start, end, step T) []T {
 	if step == 0 {
 		return nil

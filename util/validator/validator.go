@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode"
 )
 
@@ -21,6 +22,12 @@ var (
 // regexpCache 正则表达式缓存
 // 用于缓存 Match 函数中动态编译的正则表达式
 var regexpCache sync.Map
+
+// regexpCacheCount 正则缓存当前大小（近似值，用于限制缓存大小）
+var regexpCacheCount atomic.Int64
+
+// maxRegexpCacheSize 正则缓存最大条目数
+const maxRegexpCacheSize = 1024
 
 // Email 验证邮箱格式
 func Email(email string) bool {
@@ -196,11 +203,21 @@ func Match(str, pattern string) bool {
 	// 编译正则表达式
 	re, err := regexp.Compile(pattern)
 	if err != nil {
-		// 缓存无效正则表达式的标记，避免重复编译
-		regexpCache.Store(pattern, regexpError{})
+		// 缓存无效正则表达式的标记，避免重复编译（仅在未超限时缓存）
+		if regexpCacheCount.Load() < maxRegexpCacheSize {
+			if _, loaded := regexpCache.LoadOrStore(pattern, regexpError{}); !loaded {
+				regexpCacheCount.Add(1)
+			}
+		}
 		return false
 	}
-	regexpCache.Store(pattern, re)
+
+	// 超过缓存大小限制时不缓存新模式，直接使用编译结果
+	if regexpCacheCount.Load() < maxRegexpCacheSize {
+		if _, loaded := regexpCache.LoadOrStore(pattern, re); !loaded {
+			regexpCacheCount.Add(1)
+		}
+	}
 	return re.MatchString(str)
 }
 

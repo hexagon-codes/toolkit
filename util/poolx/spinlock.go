@@ -3,6 +3,7 @@ package poolx
 import (
 	"runtime"
 	"sync/atomic"
+	"time"
 )
 
 // ============================================================================
@@ -87,11 +88,11 @@ func (s *Spinlock) lockSlow() {
 			continue
 		}
 
-		// Reset and try again with fresh backoff
+		// 耗尽 spin+yield 后，短暂阻塞让出 CPU，避免纯自旋导致 CPU 饥饿
+		time.Sleep(time.Microsecond)
 		spinCount = 0
 		yieldCount = 0
 		backoff = spinBackoffBase
-		runtime.Gosched()
 	}
 }
 

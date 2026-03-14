@@ -136,6 +136,7 @@ func AppendString(path, content string) error {
 }
 
 // Copy 复制文件
+// 保留源文件权限，并检查 Close 错误
 func Copy(src, dst string) error {
 	sourceFile, err := os.Open(src)
 	if err != nil {
@@ -143,13 +144,24 @@ func Copy(src, dst string) error {
 	}
 	defer sourceFile.Close()
 
-	destFile, err := os.Create(dst)
+	// 获取源文件权限
+	srcInfo, err := sourceFile.Stat()
 	if err != nil {
 		return err
 	}
-	defer destFile.Close()
+
+	destFile, err := os.OpenFile(dst, os.O_RDWR|os.O_CREATE|os.O_TRUNC, srcInfo.Mode())
+	if err != nil {
+		return err
+	}
 
 	_, err = io.Copy(destFile, sourceFile)
+	// 先检查 Close 错误，确保数据刷盘
+	if closeErr := destFile.Close(); closeErr != nil {
+		if err == nil {
+			err = closeErr
+		}
+	}
 	return err
 }
 

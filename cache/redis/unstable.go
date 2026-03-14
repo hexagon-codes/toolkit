@@ -2,7 +2,6 @@ package redis
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -263,33 +262,38 @@ func (c *UnstableCache) getOrLoadInternal(
 		// 缓存命中
 		found, payload, uerr := unpack(data)
 		if uerr != nil {
+			// 数据损坏：删除损坏的 key，继续走 singleflight 加载新数据
 			c.onError(ctx, "unstable_unpack", fullKey, uerr)
-			return uerr
+			c.asyncDel(ctx, fullKey)
+		} else {
+			if !found {
+				return ErrNotFound
+			}
+			return c.opts.Codec.Unmarshal(payload, dest)
 		}
-		if !found {
-			return ErrNotFound
-		}
-		return c.opts.Codec.Unmarshal(payload, dest)
-	}
-
-	if err != redis.Nil {
-		// Redis 错误，降级
+	} else if err != redis.Nil {
+		// Redis 网络错误，降级
 		c.onError(ctx, "unstable_get", fullKey, err)
 		return c.loadAndFill(ctx, loader, dest)
 	}
 
 	// 2. 缓存未命中，singleflight 加载
 	packed, err, _ := c.sf.Do(fullKey, func() (interface{}, error) {
+		// 使用独立 context，确保发起者取消不影响其他等待者
+		sfCtx := context.WithoutCancel(ctx)
+
 		// 双重检查（带超时）
-		checkCtx, checkCancel := withTimeout(ctx, c.opts.ReadTimeout)
+		checkCtx, checkCancel := withTimeout(sfCtx, c.opts.ReadTimeout)
 		defer checkCancel()
 		data2, err2 := c.client.Get(checkCtx, fullKey).Bytes()
 		if err2 == nil {
 			return data2, nil
 		}
 
-		// 加载数据
-		val, lerr := loader(ctx)
+		// 加载数据（带超时保护，防止 loader 无限阻塞）
+		loaderCtx, loaderCancel := withTimeout(sfCtx, 10*time.Second)
+		defer loaderCancel()
+		val, lerr := loader(loaderCtx)
 		if lerr != nil {
 			if c.isNotFound(lerr) {
 				// 负缓存
@@ -339,9 +343,27 @@ func (c *UnstableCache) loadVersion() {
 	if err == nil {
 		atomic.StoreInt64(&c.version, val)
 	} else if err == redis.Nil {
-		// 初始化版本号
-		c.client.Set(ctx, c.versionKey, 1, 0)
-		atomic.StoreInt64(&c.version, 1)
+		// 初始化版本号，使用 SetNX 避免多实例并发覆盖
+		set, sErr := c.client.SetNX(ctx, c.versionKey, 1, 0).Result()
+		if sErr != nil {
+			c.onError(ctx, "unstable_init_version", c.versionKey, sErr)
+		}
+		if set {
+			atomic.StoreInt64(&c.version, 1)
+		} else {
+			// 其他实例已初始化，重新读取
+			val2, err2 := c.client.Get(ctx, c.versionKey).Int64()
+			if err2 == nil {
+				atomic.StoreInt64(&c.version, val2)
+			} else {
+				// 兜底设置为 1
+				c.onError(ctx, "unstable_reload_version", c.versionKey, err2)
+				atomic.StoreInt64(&c.version, 1)
+			}
+		}
+	} else {
+		// 非 redis.Nil 的网络错误，记录日志，不静默忽略
+		c.onError(ctx, "unstable_load_version", c.versionKey, err)
 	}
 }
 
@@ -352,7 +374,7 @@ func (c *UnstableCache) getVersion() int64 {
 // refreshVersionIfNeeded 如果需要，从 Redis 重新加载版本号
 // 使用 singleflight 确保同一时刻只有一个 goroutine 执行刷新
 func (c *UnstableCache) refreshVersionIfNeeded(ctx context.Context) {
-	now := time.Now().UnixNano()
+	now := c.opts.Now().UnixNano()
 	lastCheck := atomic.LoadInt64(&c.lastVersionCheck)
 
 	// 1秒内不重复检查
@@ -363,7 +385,7 @@ func (c *UnstableCache) refreshVersionIfNeeded(ctx context.Context) {
 	// 使用 singleflight 确保只有一个 goroutine 执行刷新
 	_, _, _ = c.versionSf.Do("refresh", func() (any, error) {
 		// 双重检查：进入 singleflight 后再次检查时间
-		now2 := time.Now().UnixNano()
+		now2 := c.opts.Now().UnixNano()
 		lastCheck2 := atomic.LoadInt64(&c.lastVersionCheck)
 		if now2-lastCheck2 < int64(time.Second) {
 			return nil, nil
@@ -387,6 +409,19 @@ func (c *UnstableCache) refreshVersionIfNeeded(ctx context.Context) {
 	})
 }
 
+// asyncDel 异步删除损坏的缓存 key（自愈机制）
+func (c *UnstableCache) asyncDel(ctx context.Context, key string) {
+	gopool.Go(func() {
+		delCtx, cancel := withTimeout(context.Background(), c.opts.WriteTimeout)
+		defer cancel()
+
+		err := c.client.Del(delCtx, key).Err()
+		if err != nil {
+			c.onError(ctx, "unstable_del_corrupt", key, err)
+		}
+	})
+}
+
 func (c *UnstableCache) asyncSet(ctx context.Context, key string, data []byte, ttl time.Duration) {
 	gopool.Go(func() {
 		writeCtx, cancel := withTimeout(context.Background(), c.opts.WriteTimeout)
@@ -400,25 +435,11 @@ func (c *UnstableCache) asyncSet(ctx context.Context, key string, data []byte, t
 }
 
 func (c *UnstableCache) loadAndFill(ctx context.Context, loader func(ctx context.Context) (any, error), dest any) error {
-	val, err := loader(ctx)
-	if err != nil {
-		return err
-	}
-	if dest != nil {
-		raw, _ := c.opts.Codec.Marshal(val)
-		return c.opts.Codec.Unmarshal(raw, dest)
-	}
-	return nil
+	return loadAndFillCommon(ctx, c.opts.Codec, loader, dest)
 }
 
 func (c *UnstableCache) isNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	if c.opts.IsNotFound != nil && c.opts.IsNotFound(err) {
-		return true
-	}
-	return errors.Is(err, ErrNotFound)
+	return isNotFoundCommon(err, c.opts.IsNotFound)
 }
 
 func (c *UnstableCache) onError(ctx context.Context, op, key string, err error) {

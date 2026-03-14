@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"sync"
 	"time"
@@ -24,6 +25,9 @@ var (
 
 	// ErrNoLayers 没有配置任何缓存层
 	ErrNoLayers = errors.New("multi-cache: no cache layers configured")
+
+	// ErrNilLayer 缓存层实例为 nil
+	ErrNilLayer = errors.New("multi-cache: layer instance is nil")
 )
 
 // Layer 缓存层接口（本地缓存和 Redis 缓存都实现了这个接口）
@@ -126,6 +130,8 @@ func WithSkipBackfill(skip bool) Option {
 //   - layers: 缓存层配置（按优先级从高到低排列，如 local -> redis）
 //   - opts: 可选配置
 //
+// 如果 layers 中包含 nil Layer，会 panic。
+//
 // 示例：
 //
 //	cache := multi.NewCache(
@@ -133,6 +139,12 @@ func WithSkipBackfill(skip bool) Option {
 //	    multi.LayerConfig{Layer: redisCache, TTL: 60 * time.Minute, Name: "redis"},
 //	)
 func NewCache(layers []LayerConfig, opts ...Option) *Cache {
+	// 校验 layers 中是否包含 nil Layer
+	for i, l := range layers {
+		if l.Layer == nil {
+			panic(fmt.Sprintf("multi-cache: layer[%d] (%s) has nil Layer instance", i, l.Name))
+		}
+	}
 	return &Cache{
 		layers: layers,
 		opts:   applyOptions(opts...),
@@ -142,12 +154,9 @@ func NewCache(layers []LayerConfig, opts ...Option) *Cache {
 // GetOrLoad 获取或加载数据（自动处理多层缓存）
 //
 // 工作流程：
-// 1. 从第一层（如 local）开始查询
-// 2. 命中则直接返回
-// 3. 未命中则查询下一层（如 redis）
-// 4. 找到数据后回填到前面的层
-// 5. 所有层都未命中，调用 loader 从数据源加载
-// 6. 加载成功后写入所有层
+// 1. 逐层查询缓存，命中则直接返回并回填前面的层
+// 2. 所有层都未命中，调用 loader 从数据源加载（只调用一次）
+// 3. 加载成功后回填到所有层
 //
 // 参数：
 //   - ctx: 上下文
@@ -176,60 +185,34 @@ func (c *Cache) GetOrLoad(
 	if dest == nil {
 		return ErrInvalidDest
 	}
+	// dest 必须是非 nil 的指针
+	dv := reflect.ValueOf(dest)
+	if dv.Kind() != reflect.Ptr || dv.IsNil() {
+		return ErrInvalidDest
+	}
 	if len(c.layers) == 0 {
 		return ErrNoLayers
 	}
 
-	// 逐层查询
+	// 1. 逐层查询（不嵌套 loader，使用 dummy loader 仅读取缓存）
 	for i, layer := range c.layers {
 		err := layer.Layer.GetOrLoad(ctx, key, layer.TTL, dest, func(ctx context.Context) (any, error) {
-			// 这一层未命中，尝试下一层
-			if i == len(c.layers)-1 {
-				// 最后一层了，调用 loader
-				return loader(ctx)
-			}
-
-			// 查询下一层
-			nextLayer := c.layers[i+1]
-			var temp any = dest // 用于接收下一层的数据
-			err := nextLayer.Layer.GetOrLoad(ctx, key, nextLayer.TTL, dest, func(ctx context.Context) (any, error) {
-				// 递归查询更深层或 loader
-				// 注意：startIndex 必须是 i+2，因为 nextLayer（i+1）已经在当前 GetOrLoad 中查询过了
-				return c.loadFromNextLayers(ctx, key, dest, i+2, loader)
-			})
-
-			if err != nil {
-				return nil, err
-			}
-			return temp, nil
+			return nil, ErrNotFound // 不真正加载，只查缓存
 		})
-
 		if err == nil {
-			// 命中，返回结果
+			// 命中，回填到前面的层
+			if !c.opts.SkipBackfill && i > 0 {
+				c.backfillRange(ctx, key, dest, 0, i)
+			}
 			return nil
 		}
-
-		// 判断是否是 NotFound 错误
-		// 注意：这里的 NotFound 可能来自：
-		// 1. 某一层缓存返回的 NotFound（如负缓存）
-		// 2. 最终 loader 返回的 NotFound
-		// 对于第一种情况，应该继续查询下一层（可能其他层有数据）
-		// 只有在最后一层返回 NotFound 时才表示确实没有数据
-		if c.isNotFound(err) {
-			if i == len(c.layers)-1 {
-				// 最后一层返回 NotFound，确实没有数据
-				return ErrNotFound
-			}
-			// 非最后一层返回 NotFound，记录并继续尝试下一层
+		// 非 NotFound 错误记录日志，继续下一层
+		if !c.isNotFound(err) {
 			c.onError(ctx, layer.Name, "get", key, err)
-			continue
 		}
-
-		// 其他错误，记录并继续尝试下一层
-		c.onError(ctx, layer.Name, "get", key, err)
 	}
 
-	// 所有层都失败，直接调用 loader
+	// 2. 所有层都未命中，调用 loader（只调用一次）
 	val, err := loader(ctx)
 	if err != nil {
 		if c.isNotFound(err) {
@@ -238,55 +221,17 @@ func (c *Cache) GetOrLoad(
 		return err
 	}
 
-	// 回填到所有层
+	// 3. 将结果复制到 dest
+	if err := copyValue(val, dest); err != nil {
+		return err
+	}
+
+	// 4. 回填到所有层
 	if !c.opts.SkipBackfill {
 		c.backfillAll(ctx, key, val)
 	}
 
-	// 将结果复制到 dest
-	return copyValue(val, dest)
-}
-
-// loadFromNextLayers 从指定层开始加载（内部递归辅助函数）
-func (c *Cache) loadFromNextLayers(
-	ctx context.Context,
-	key string,
-	dest any,
-	startIndex int,
-	loader func(ctx context.Context) (any, error),
-) (any, error) {
-	// 遍历剩余层
-	for i := startIndex; i < len(c.layers); i++ {
-		layer := c.layers[i]
-		var temp any = dest
-		err := layer.Layer.GetOrLoad(ctx, key, layer.TTL, dest, func(ctx context.Context) (any, error) {
-			// 最后一层了，调用 loader
-			if i == len(c.layers)-1 {
-				return loader(ctx)
-			}
-			// 继续下一层
-			return c.loadFromNextLayers(ctx, key, dest, i+1, loader)
-		})
-
-		if err == nil {
-			// 找到数据，回填到前面的层
-			if !c.opts.SkipBackfill && i > startIndex {
-				c.backfillRange(ctx, key, temp, startIndex, i)
-			}
-			return temp, nil
-		}
-
-		// NotFound 直接返回
-		if c.isNotFound(err) {
-			return nil, err
-		}
-
-		// 其他错误，记录并继续
-		c.onError(ctx, layer.Name, "get", key, err)
-	}
-
-	// 所有层都失败，调用 loader
-	return loader(ctx)
+	return nil
 }
 
 // backfillTimeout 回填操作的超时时间
@@ -323,6 +268,7 @@ func (c *Cache) backfillAll(ctx context.Context, key string, value any) {
 }
 
 // backfillRange 回填到指定范围的层（异步执行，不阻塞主流程）
+// 将 value 回填到 [start, end) 范围内的层
 func (c *Cache) backfillRange(ctx context.Context, key string, value any, start, end int) {
 	// 异步执行回填，不阻塞主流程
 	go func() {

@@ -230,7 +230,48 @@ func FromRequestWithTrustedProxies(r *http.Request, trustedProxies []string) str
 	}
 
 	// 从可信代理，读取代理头
-	return FromRequest(r)
+	// 优先检查 X-Real-IP
+	if realIP := r.Header.Get("X-Real-IP"); realIP != "" && IsValid(realIP) {
+		return realIP
+	}
+
+	// 从右向左遍历 X-Forwarded-For，找第一个不在 trusted proxies 列表中的 IP
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		for i := len(parts) - 1; i >= 0; i-- {
+			ip := strings.TrimSpace(parts[i])
+			if !IsValid(ip) {
+				continue
+			}
+			// 检查该 IP 是否是可信代理
+			isTrusted := false
+			for _, proxy := range trustedProxies {
+				if strings.Contains(proxy, "/") {
+					if IsInCIDR(ip, proxy) {
+						isTrusted = true
+						break
+					}
+				} else {
+					if ip == proxy {
+						isTrusted = true
+						break
+					}
+				}
+			}
+			if !isTrusted {
+				return ip
+			}
+		}
+	}
+
+	// 检查其他代理头
+	for _, header := range []string{"CF-Connecting-IP", "True-Client-IP"} {
+		if ip := r.Header.Get(header); ip != "" && IsValid(ip) {
+			return ip
+		}
+	}
+
+	return remoteIP
 }
 
 // ParseCIDR 解析 CIDR

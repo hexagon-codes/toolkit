@@ -392,6 +392,8 @@ func (h *priorityHeap[T]) Pop() any {
 	old := h.items
 	n := len(old)
 	item := old[n-1]
+	var zero T
+	old[n-1] = zero // 帮助 GC 回收
 	h.items = old[0 : n-1]
 	return item
 }

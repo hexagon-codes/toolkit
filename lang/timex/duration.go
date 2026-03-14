@@ -29,6 +29,9 @@ func FormatDuration(d time.Duration) string {
 		return "0s"
 	}
 
+	// 保存原始值，用于微秒/纳秒级别的回退格式化
+	original := d
+
 	var result strings.Builder
 	negative := d < 0
 	if negative {
@@ -62,9 +65,9 @@ func FormatDuration(d time.Duration) string {
 		fmt.Fprintf(&result, "%dms", millis)
 	}
 
-	// 如果只有微秒或纳秒
+	// 如果只有微秒或纳秒，使用原始 Duration 的 String() 方法（保留负号）
 	if result.Len() == 0 || (negative && result.Len() == 1) {
-		return d.String()
+		return original.String()
 	}
 
 	return result.String()

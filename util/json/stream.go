@@ -96,21 +96,23 @@ func (d *NDJSONDecoder) Decode(v any) error {
 		return ErrStreamClosed
 	}
 
-	if !d.scanner.Scan() {
-		if err := d.scanner.Err(); err != nil {
-			d.lastErr = err
-			return err
+	for {
+		if !d.scanner.Scan() {
+			if err := d.scanner.Err(); err != nil {
+				d.lastErr = err
+				return err
+			}
+			return io.EOF
 		}
-		return io.EOF
-	}
 
-	line := d.scanner.Bytes()
-	// 跳过空行
-	if len(bytes.TrimSpace(line)) == 0 {
-		return d.Decode(v) // 递归读取下一行
-	}
+		line := d.scanner.Bytes()
+		// 跳过空行（使用循环代替递归，避免大量空行导致栈溢出）
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
 
-	return json.Unmarshal(line, v)
+		return json.Unmarshal(line, v)
+	}
 }
 
 // More 是否还有更多行

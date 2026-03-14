@@ -172,7 +172,14 @@ func deepCopyArray(src reflect.Value, visited map[uintptr]reflect.Value) reflect
 //   - T: 拷贝后的值
 //
 // 注意: 对于指针、切片、map 等引用类型，仅拷贝引用
+// 对于 nil interface 直接返回零值
 func Clone[T any](src T) T {
+	v := reflect.ValueOf(&src).Elem()
+	// 当 T 为接口类型且值为 nil 时，reflect.TypeOf 会 panic，需要特殊处理
+	if v.Kind() == reflect.Interface && v.IsNil() {
+		var zero T
+		return zero
+	}
 	dst := reflect.New(reflect.TypeOf(src)).Elem()
 	dst.Set(reflect.ValueOf(src))
 	return dst.Interface().(T)

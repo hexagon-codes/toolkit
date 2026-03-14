@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -94,6 +95,9 @@ func New(cfg *Config, opts ...Option) (*Client, error) {
 
 	// TLS
 	if cfg.InsecureSkipVerify || cfg.CACert != "" {
+		if cfg.InsecureSkipVerify {
+			log.Printf("[WARNING] elasticsearch: InsecureSkipVerify 已启用，TLS 证书验证被跳过，不建议在生产环境使用")
+		}
 		tlsConfig := &tls.Config{
 			InsecureSkipVerify: cfg.InsecureSkipVerify,
 		}

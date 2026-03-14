@@ -7,6 +7,8 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"hash"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -218,6 +220,12 @@ func formatInt64(n int64) string {
 		return "0"
 	}
 
+	// 特殊处理 MinInt64，因为 -MinInt64 会溢出
+	const minInt64 = -9223372036854775808
+	if n == minInt64 {
+		return "-9223372036854775808"
+	}
+
 	negative := n < 0
 	if negative {
 		n = -n
@@ -338,47 +346,18 @@ func sortAndJoinParams(params map[string]string) string {
 	for k := range params {
 		keys = append(keys, k)
 	}
-	sortStrings(keys)
+	sort.Strings(keys)
 
-	// 拼接
-	var result string
-	for _, k := range keys {
-		result += k + "=" + params[k] + "&"
-	}
-
-	// 移除最后的 &
-	if len(result) > 0 {
-		result = result[:len(result)-1]
-	}
-
-	return result
-}
-
-// sortStrings 字符串排序（快速排序，避免导入 sort 包以保持零依赖）
-func sortStrings(s []string) {
-	if len(s) <= 1 {
-		return
-	}
-	quickSort(s, 0, len(s)-1)
-}
-
-func quickSort(s []string, low, high int) {
-	if low < high {
-		pivot := partition(s, low, high)
-		quickSort(s, low, pivot-1)
-		quickSort(s, pivot+1, high)
-	}
-}
-
-func partition(s []string, low, high int) int {
-	pivot := s[high]
-	i := low - 1
-	for j := low; j < high; j++ {
-		if s[j] <= pivot {
-			i++
-			s[i], s[j] = s[j], s[i]
+	// 使用 strings.Builder 拼接，避免大量字符串拼接的性能问题
+	var b strings.Builder
+	for i, k := range keys {
+		if i > 0 {
+			b.WriteByte('&')
 		}
+		b.WriteString(k)
+		b.WriteByte('=')
+		b.WriteString(params[k])
 	}
-	s[i+1], s[high] = s[high], s[i+1]
-	return i + 1
+
+	return b.String()
 }

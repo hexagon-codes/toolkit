@@ -1,5 +1,7 @@
 package slice
 
+import "math/rand/v2"
+
 // Unique 去重（保持顺序）
 func Unique[T comparable](slice []T) []T {
 	seen := make(map[T]struct{}, len(slice))
@@ -45,11 +47,14 @@ func LastIndexOf[T comparable](slice []T, item T) int {
 	return -1
 }
 
-// Remove 移除第一个匹配的元素
+// Remove 移除第一个匹配的元素（不修改原始切片）
 func Remove[T comparable](slice []T, item T) []T {
 	for i, v := range slice {
 		if v == item {
-			return append(slice[:i], slice[i+1:]...)
+			result := make([]T, 0, len(slice)-1)
+			result = append(result, slice[:i]...)
+			result = append(result, slice[i+1:]...)
+			return result
 		}
 	}
 	return slice
@@ -66,12 +71,15 @@ func RemoveAll[T comparable](slice []T, item T) []T {
 	return result
 }
 
-// RemoveAt 移除指定索引的元素
+// RemoveAt 移除指定索引的元素（不修改原始切片）
 func RemoveAt[T any](slice []T, index int) []T {
 	if index < 0 || index >= len(slice) {
 		return slice
 	}
-	return append(slice[:index], slice[index+1:]...)
+	result := make([]T, 0, len(slice)-1)
+	result = append(result, slice[:index]...)
+	result = append(result, slice[index+1:]...)
+	return result
 }
 
 // Reverse 反转切片
@@ -88,15 +96,9 @@ func Shuffle[T any](slice []T) []T {
 	result := make([]T, len(slice))
 	copy(result, slice)
 
-	// 使用时间作为随机种子的简单伪随机
-	// 注意：如需加密级别的随机，请使用 crypto/rand
-	seed := uint64(len(result)) ^ uint64(cap(result))
+	// 使用 math/rand/v2（Go 1.22+），自动使用加密安全的随机种子
 	for i := len(result) - 1; i > 0; i-- {
-		// 简单的 xorshift 伪随机数生成
-		seed ^= seed << 13
-		seed ^= seed >> 7
-		seed ^= seed << 17
-		j := int(seed % uint64(i+1))
+		j := rand.IntN(i + 1)
 		result[i], result[j] = result[j], result[i]
 	}
 
