@@ -59,4 +59,69 @@
 // - 所有函数都使用本地时区
 // - 时间戳为 0 会返回 "1970-01-01 08:00:00"（北京时间）
 // - 所有函数都是并发安全的
+//
+// --- English ---
+//
+// Package timex provides time utility functions.
+//
+// This package provides convenient tools for timestamp formatting,
+// supporting both millisecond and second-level timestamps.
+//
+// # Main Features
+//
+// Millisecond timestamps:
+//   - MsecFormat: format millisecond timestamp to "Y-m-d H:i:s"
+//   - MsecFormatWithLayout: format millisecond timestamp with custom layout
+//
+// Second-level timestamps:
+//   - SecFormat: format second-level timestamp to "Y-m-d H:i:s"
+//   - SecFormatWithLayout: format second-level timestamp with custom layout
+//
+// # Usage Examples
+//
+//	import "github.com/hexagon-codes/toolkit/lang/timex"
+//	import "time"
+//
+//	// Millisecond timestamp formatting
+//	ms := time.Now().UnixMilli()
+//	formatted := timex.MsecFormat(ms)
+//	// Output: "2024-01-29 15:04:05"
+//
+//	// Custom layout
+//	custom := timex.MsecFormatWithLayout(ms, "2006/01/02")
+//	// Output: "2024/01/29"
+//
+//	timeOnly := timex.MsecFormatWithLayout(ms, "15:04:05")
+//	// Output: "15:04:05"
+//
+//	// Second-level timestamp formatting
+//	sec := time.Now().Unix()
+//	formatted := timex.SecFormat(sec)
+//	// Output: "2024-01-29 15:04:05"
+//
+//	custom := timex.SecFormatWithLayout(sec, "2006-01-02")
+//	// Output: "2024-01-29"
+//
+// # Time Format Reference
+//
+// Go time formatting uses the reference time: 2006-01-02 15:04:05
+//
+// Common layouts:
+//   - "2006-01-02 15:04:05" - full datetime
+//   - "2006-01-02" - date only
+//   - "15:04:05" - time only
+//   - "2006/01/02" - slash-separated
+//   - "02-Jan-2006" - English month name
+//
+// # Design Principles
+//
+// 1. Simple and easy to use: provides shorthand functions for common formats
+// 2. Flexible: supports custom layouts
+// 3. Zero external dependencies: only uses Go standard library
+//
+// # Notes
+//
+// - All functions use the local timezone
+// - A timestamp of 0 returns "1970-01-01 08:00:00" (Beijing time)
+// - All functions are concurrency-safe
 package timex

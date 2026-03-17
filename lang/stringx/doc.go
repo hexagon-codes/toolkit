@@ -68,4 +68,78 @@
 // - 修改其中一个会影响另一个
 // - 仅在确保不会修改数据时使用
 // - StringToSlice 使用反射，性能开销较大
+//
+// --- English ---
+//
+// Package stringx provides high-performance string operation utilities.
+//
+// This package provides performance-optimized string operations,
+// including zero-copy conversions using the unsafe package.
+//
+// # Main Features
+//
+// Zero-copy conversions:
+//   - BytesToString: convert []byte to string (zero-copy)
+//   - String2Bytes: convert string to []byte (zero-copy)
+//
+// General conversions:
+//   - StringToSlice: convert a string to a slice of any type (using reflection)
+//
+// # Usage Examples
+//
+//	import "github.com/hexagon-codes/toolkit/lang/stringx"
+//
+//	// Zero-copy conversion (high performance)
+//	bytes := []byte("hello world")
+//	str := stringx.BytesToString(bytes)  // zero-copy, extremely fast
+//
+//	str := "hello world"
+//	bytes := stringx.String2Bytes(str)   // zero-copy, extremely fast
+//
+//	// String to slice (using reflection)
+//	result := stringx.StringToSlice("1,2,3", ",")
+//	// result = []int{1, 2, 3}
+//
+// # Performance Considerations
+//
+// Unsafe operations (zero-copy):
+//   - BytesToString and String2Bytes use unsafe pointers
+//   - Avoids memory allocation and copying for extremely high performance
+//   - Be aware of data lifetime considerations
+//
+// Use cases:
+//   - ✅ Read-only operations
+//   - ✅ Performance-critical paths
+//   - ❌ When data needs to be modified
+//   - ❌ When data lifetime is uncertain
+//
+// # Safety Warning
+//
+// ⚠️ Important: BytesToString and String2Bytes use the unsafe package.
+//
+// Unsafe usage:
+//
+//	bytes := []byte("hello")
+//	str := stringx.BytesToString(bytes)
+//	bytes[0] = 'H'  // ❌ Dangerous! This modifies the content of str
+//
+// Safe usage:
+//
+//	bytes := []byte("hello")
+//	str := stringx.BytesToString(bytes)
+//	// Only read str, do not modify bytes
+//	fmt.Println(str)  // ✅ Safe
+//
+// # Design Principles
+//
+// 1. Performance first: pursue maximum performance within safety bounds
+// 2. Zero external dependencies: only uses Go standard library
+// 3. Clear warnings: unsafe risks are clearly documented
+//
+// # Notes
+//
+// - Data returned by BytesToString and String2Bytes shares the same underlying memory
+// - Modifying one will affect the other
+// - Only use when you are certain the data will not be modified
+// - StringToSlice uses reflection and has a higher performance overhead
 package stringx

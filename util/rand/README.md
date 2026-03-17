@@ -1,3 +1,5 @@
+中文 | [English](README.en.md)
+
 # Rand 随机数生成工具
 
 提供加密安全的随机数生成功能，基于 `crypto/rand`。

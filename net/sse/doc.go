@@ -21,4 +21,31 @@
 //	for event := range stream.Events() {
 //	    fmt.Println(event.Data)
 //	}
+//
+// --- English ---
+//
+// Package sse provides Server-Sent Events (SSE) handling capabilities.
+//
+// SSE is a server-push technology widely used for streaming responses
+// from AI APIs. This package provides SSE event parsing, client
+// connection, and server-side writing functionality.
+//
+// Basic usage:
+//
+//	// Parse SSE events
+//	reader := sse.NewReader(resp.Body)
+//	for {
+//	    event, err := reader.Read()
+//	    if err == io.EOF {
+//	        break
+//	    }
+//	    fmt.Println(event.Data)
+//	}
+//
+//	// Connect to an SSE endpoint
+//	client := sse.NewClient("https://api.example.com/stream")
+//	stream, err := client.Connect(ctx)
+//	for event := range stream.Events() {
+//	    fmt.Println(event.Data)
+//	}
 package sse

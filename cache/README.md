@@ -1,3 +1,5 @@
+中文 | [English](README.en.md)
+
 # Cache - 通用缓存库
 
 通用缓存库，支持本地缓存、Redis 缓存和多层缓存，提供稳定 key 和不稳定 key 两种缓存策略。

@@ -1,3 +1,5 @@
+中文 | [English](README.en.md)
+
 # Validator 数据验证工具
 
 提供全面的数据验证功能，支持常见格式验证和自定义规则。

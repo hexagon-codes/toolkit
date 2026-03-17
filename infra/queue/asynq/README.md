@@ -1,3 +1,5 @@
+中文 | [English](README.en.md)
+
 # Asynq Queue Package
 
 ## 功能特性

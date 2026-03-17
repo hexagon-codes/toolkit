@@ -44,4 +44,54 @@
 //	sum := stream.FromSlice([]int{1, 2, 3, 4, 5}).
 //	    Reduce(0, func(acc, n int) int { return acc + n })
 //	// 15
+//
+// --- English ---
+//
+// Package stream provides a functional stream processing API.
+//
+// Stream provides chainable operations for processing data collections,
+// similar to Java 8 Stream API. Supports lazy evaluation and various
+// transform, filter, and aggregate operations.
+//
+// Main features:
+//   - Lazy evaluation: intermediate operations are not executed immediately
+//   - Fluent chaining: clean and expressive API design
+//   - Type-safe: uses generics to guarantee type safety
+//
+// Creating a Stream:
+//   - Of: create from values
+//   - FromSlice: create from a slice
+//   - Generate: create using a generator function
+//   - Range: create a numeric range
+//
+// Intermediate operations (return a new Stream):
+//   - Filter: filter elements
+//   - Map: transform elements
+//   - FlatMap: flatten and transform
+//   - Distinct: deduplicate elements
+//   - Sorted: sort elements
+//   - Limit: limit the number of elements
+//   - Skip: skip elements
+//
+// Terminal operations (return a result):
+//   - Collect: collect into a slice
+//   - ForEach: iterate over elements
+//   - Reduce: reduce to a single value
+//   - Count: count elements
+//   - First/Last: get the first/last element
+//   - Any/All/None: conditional checks
+//
+// Examples:
+//
+//	// Filter and transform
+//	result := stream.FromSlice([]int{1, 2, 3, 4, 5}).
+//	    Filter(func(n int) bool { return n%2 == 0 }).
+//	    Map(func(n int) int { return n * 2 }).
+//	    Collect()
+//	// [4, 8]
+//
+//	// Reduce operation
+//	sum := stream.FromSlice([]int{1, 2, 3, 4, 5}).
+//	    Reduce(0, func(acc, n int) int { return acc + n })
+//	// 15
 package stream

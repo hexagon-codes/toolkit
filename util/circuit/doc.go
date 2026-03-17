@@ -28,4 +28,38 @@
 //	breaker.OnStateChange(func(from, to circuit.State) {
 //	    log.Printf("breaker state changed: %s -> %s", from, to)
 //	})
+//
+// --- English ---
+//
+// Package circuit provides a circuit breaker implementation.
+//
+// The circuit breaker prevents cascading failures by automatically
+// tripping when a downstream service becomes unavailable, avoiding
+// continuous failed requests that consume system resources.
+//
+// The circuit breaker has three states:
+//   - Closed: normal state, all requests pass through
+//   - Open: tripped state, all requests are rejected
+//   - HalfOpen: probing state, limited requests pass through to detect recovery
+//
+// Basic usage:
+//
+//	breaker := circuit.New(
+//	    circuit.WithThreshold(5),            // trip after 5 failures
+//	    circuit.WithTimeout(30*time.Second), // enter half-open after 30 seconds
+//	)
+//
+//	result, err := breaker.Execute(func() (any, error) {
+//	    return callExternalAPI()
+//	})
+//
+// For AI APIs:
+//
+//	breaker := circuit.NewAIBreaker(circuit.OpenAIConfig)
+//
+// Supports observer pattern:
+//
+//	breaker.OnStateChange(func(from, to circuit.State) {
+//	    log.Printf("breaker state changed: %s -> %s", from, to)
+//	})
 package circuit

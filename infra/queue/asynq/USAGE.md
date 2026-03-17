@@ -1,3 +1,5 @@
+中文 | [English](USAGE.en.md)
+
 # Asynq 使用指南
 
 ## 快速开始

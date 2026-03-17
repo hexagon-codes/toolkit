@@ -1,3 +1,28 @@
+// Package local 提供支持 TTL 的内存缓存
+//
+// 支持自动过期、容量限制和 singleflight 去重。
+//
+// 基本用法:
+//
+//	c := local.New()
+//	c.Set("key", value, 5*time.Minute)
+//	val, ok := c.Get("key")
+//
+// 带选项:
+//
+//	c := local.New(
+//	    local.WithMaxSize(1000),
+//	    local.WithCleanupInterval(time.Minute),
+//	)
+//
+// GetOrLoad 模式:
+//
+//	val, err := c.GetOrLoad(ctx, "key", ttl, func(ctx context.Context) (any, error) {
+//	    return db.Find(ctx, id)
+//	})
+//
+// --- English ---
+//
 // Package local provides an in-memory cache with TTL support.
 //
 // Features automatic expiration, size limits, and singleflight deduplication.

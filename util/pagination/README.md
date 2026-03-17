@@ -1,3 +1,5 @@
+中文 | [English](README.en.md)
+
 # Pagination 分页工具
 
 简单易用的分页计算工具，提供完整的分页信息。

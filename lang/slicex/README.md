@@ -1,3 +1,5 @@
+中文 | [English](README.en.md)
+
 # Slicex - 泛型切片工具
 
 提供函数式切片操作工具，支持 Map、Filter、Reduce 等常见操作。

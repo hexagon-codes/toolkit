@@ -1,3 +1,5 @@
+中文 | [English](README.en.md)
+
 # MySQL 数据库封装
 
 生产级 MySQL 数据库连接池封装，支持连接池管理、健康检查、事务等功能。

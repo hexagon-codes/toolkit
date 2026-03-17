@@ -1,3 +1,5 @@
+中文 | [English](COMPARISON.en.md)
+
 # Go 协程池对比分析
 
 本文档对比分析三个 Go 协程池实现：

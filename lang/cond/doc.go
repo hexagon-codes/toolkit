@@ -22,4 +22,32 @@
 //	    Case("active", "活跃").
 //	    Case("inactive", "非活跃").
 //	    Default("未知")
+//
+// --- English ---
+//
+// Package cond provides conditional utility functions to simplify
+// conditional logic and value selection.
+//
+// Main features:
+//   - If/IfFunc: ternary expression replacement
+//   - IfZero: zero-value check with default
+//   - Coalesce: return the first non-zero value
+//   - Switch: type-safe switch expression
+//
+// Examples:
+//
+//	// Ternary expression replacement
+//	result := cond.If(age >= 18, "adult", "minor")
+//
+//	// Lazy evaluation (avoid unnecessary computation)
+//	result := cond.IfFunc(cached, getCached, fetchFromDB)
+//
+//	// Return first non-zero value
+//	name := cond.Coalesce(nickname, username, "anonymous")
+//
+//	// Switch expression
+//	msg := cond.Switch[string, string](status).
+//	    Case("active", "Active").
+//	    Case("inactive", "Inactive").
+//	    Default("Unknown")
 package cond

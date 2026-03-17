@@ -1,3 +1,5 @@
+中文 | [English](README.en.md)
+
 # Redis 客户端封装
 
 生产级 Redis 客户端封装，支持单机、集群、哨兵模式，以及分布式锁等功能。

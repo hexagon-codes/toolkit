@@ -1,3 +1,5 @@
+中文 | [English](README.en.md)
+
 # Hash 哈希工具
 
 提供常用的哈希算法和密码加密功能。

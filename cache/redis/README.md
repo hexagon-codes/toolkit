@@ -1,3 +1,5 @@
+中文 | [English](README.en.md)
+
 # Redis Cache
 
 Redis 分布式缓存，提供 **StableCache**（稳定 key）和 **UnstableCache**（不稳定 key）两种缓存策略，支持版本号失效、TTL 抖动和防击穿。

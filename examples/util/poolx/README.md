@@ -1,3 +1,5 @@
+中文 | [English](README.en.md)
+
 # Hexpool 协程池示例
 
 本目录包含 `util/poolx` 包的使用示例。这是一个功能全面、性能卓越的 Go 协程池实现。

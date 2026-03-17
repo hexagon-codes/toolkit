@@ -31,4 +31,41 @@
 //	result := optional.Map(opt, func(n int) string {
 //	    return strconv.Itoa(n)
 //	})
+//
+// --- English ---
+//
+// Package optional provides the Option[T] type for explicitly representing
+// values that may be absent.
+//
+// The Option type is a functional programming pattern used as an alternative
+// to nil pointers, making code more type-safe and readable.
+//
+// Main types:
+//   - Option[T]: a container that may or may not hold a value
+//
+// Main functions:
+//   - Some: create an Option containing a value
+//   - None: create an empty Option
+//   - FromPtr: create an Option from a pointer
+//   - Map: transform the value inside an Option
+//   - FlatMap: chain Option transformations
+//
+// Example:
+//
+//	// Create an Option
+//	opt := optional.Some(42)
+//	empty := optional.None[int]()
+//
+//	// Check and retrieve value
+//	if opt.IsSome() {
+//	    value := opt.Unwrap()
+//	}
+//
+//	// Use a default value
+//	value := opt.UnwrapOr(0)
+//
+//	// Chain transformations
+//	result := optional.Map(opt, func(n int) string {
+//	    return strconv.Itoa(n)
+//	})
 package optional

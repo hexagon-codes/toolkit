@@ -58,4 +58,68 @@
 // - Singleflight: 适用于读多写少的场景
 // - Pool: 对象可能被 GC 回收，不要存储重要数据
 // - 所有类型都是并发安全的
+//
+// --- English ---
+//
+// Package syncx provides utility functions for concurrent synchronization.
+//
+// This package enhances the Go standard library sync package with
+// implementations of common concurrency patterns.
+//
+// # Main Features
+//
+// Cache stampede prevention:
+//   - Singleflight: prevents duplicate execution of the same function call
+//
+// Object pools:
+//   - Pool: a simple wrapper around sync.Pool
+//   - TypedPool: a type-safe object pool (generics)
+//
+// # Usage Examples
+//
+//	import "github.com/hexagon-codes/toolkit/lang/syncx"
+//
+//	// Singleflight - prevent cache stampede
+//	sf := syncx.NewSingleflight()
+//	result, err := sf.Do("user:123", func() (any, error) {
+//	    return db.GetUser(123)  // concurrent requests execute only once
+//	})
+//
+//	// Pool - object reuse
+//	pool := syncx.NewPool(func() any {
+//	    return &bytes.Buffer{}
+//	})
+//	buf := pool.Get().(*bytes.Buffer)
+//	defer pool.Put(buf)
+//
+//	// TypedPool - type-safe object pool
+//	pool := syncx.NewTypedPool(func() *bytes.Buffer {
+//	    return &bytes.Buffer{}
+//	})
+//	buf := pool.Get()  // no type assertion needed
+//	defer pool.Put(buf)
+//
+// # Typical Use Cases
+//
+// 1. Singleflight is used for:
+//   - Preventing cache stampede (multiple requests querying the same missing key)
+//   - Reducing database load (merging duplicate queries)
+//   - Deduplicating API requests
+//
+// 2. Pool is used for:
+//   - Frequently created temporary objects (bytes.Buffer, strings.Builder)
+//   - Reducing GC pressure
+//   - Improving performance
+//
+// # Design Principles
+//
+// 1. Zero external dependencies: only uses Go standard library
+// 2. Simple and easy to use: clean and straightforward API
+// 3. Type-safe: provides generic versions
+//
+// # Notes
+//
+// - Singleflight: best suited for read-heavy, write-light scenarios
+// - Pool: objects may be garbage collected; do not store important data in them
+// - All types are concurrency-safe
 package syncx

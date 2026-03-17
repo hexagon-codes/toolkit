@@ -31,4 +31,40 @@
 //
 //	// 设置字段
 //	reflectx.SetField(&user, "Age", 21)
+//
+// --- English ---
+//
+// Package reflectx provides reflection-based utility functions.
+//
+// Main features:
+//   - StructToMap: convert a struct to a map
+//   - MapToStruct: convert a map to a struct
+//   - GetField: get a struct field value
+//   - SetField: set a struct field value
+//   - DeepCopy: deep copy a value
+//   - IsZero: check if a value is the zero value
+//   - IsNil: check if a value is nil
+//
+// Examples:
+//
+//	type User struct {
+//	    Name string `json:"name"`
+//	    Age  int    `json:"age"`
+//	}
+//
+//	// Struct to map
+//	user := User{Name: "Alice", Age: 20}
+//	m := reflectx.StructToMap(user)
+//	// map[string]any{"Name": "Alice", "Age": 20}
+//
+//	// Map to struct
+//	data := map[string]any{"Name": "Bob", "Age": 25}
+//	var u User
+//	reflectx.MapToStruct(data, &u)
+//
+//	// Get a field
+//	name, _ := reflectx.GetField(user, "Name")
+//
+//	// Set a field
+//	reflectx.SetField(&user, "Age", 21)
 package reflectx

@@ -54,4 +54,64 @@
 // - 所有函数都是并发安全的（纯函数，无状态）
 // - 空参数会返回类型的零值
 // - 浮点数运算遵循 IEEE 754 标准
+//
+// --- English ---
+//
+// Package mathx provides utility functions for mathematical operations.
+//
+// This package provides an enhanced version of the Go standard library math
+// package, with generic support as its primary feature.
+//
+// # Main Features
+//
+// Comparison and clamping:
+//   - Min/Max: generic minimum/maximum value
+//   - MinMax: return both minimum and maximum at once
+//   - Clamp: constrain a value within a specified range
+//
+// Absolute value:
+//   - Abs: generic absolute value
+//   - AbsDiff: absolute difference between two numbers
+//
+// Rounding:
+//   - Round: round to nearest integer
+//   - RoundTo: round to specified decimal places
+//   - Ceil/Floor/Trunc: rounding functions
+//
+// # Usage Examples
+//
+//	import "github.com/hexagon-codes/toolkit/lang/mathx"
+//
+//	// Generic Min/Max (supports int, float64, string, etc.)
+//	min := mathx.Min(3, 1, 4, 1, 5)           // 1 (int)
+//	max := mathx.Max(3.14, 2.71, 1.41)        // 3.14 (float64)
+//	minStr := mathx.Min("c", "a", "b")        // "a" (string)
+//
+//	// Clamp a value
+//	clamped := mathx.Clamp(15, 0, 10)         // 10
+//
+//	// Absolute value (generic)
+//	abs := mathx.Abs(-5)                      // 5 (int)
+//	absf := mathx.Abs(-3.14)                  // 3.14 (float64)
+//
+//	// Rounding
+//	rounded := mathx.RoundTo(3.14159, 2)      // 3.14
+//
+// # Differences from the Standard math Package
+//
+// 1. Generic support: Min/Max/Abs support all comparable types
+// 2. More convenient: Min/Max accept variadic arguments
+// 3. Zero dependencies: only uses Go standard library
+//
+// # Design Principles
+//
+// 1. Type-safe: uses generics for compile-time checks
+// 2. Performance first: functions are inlined where possible
+// 3. Clean API: naming is consistent with the standard library
+//
+// # Notes
+//
+// - All functions are concurrency-safe (pure functions, stateless)
+// - Empty arguments return the type's zero value
+// - Floating-point arithmetic follows the IEEE 754 standard
 package mathx

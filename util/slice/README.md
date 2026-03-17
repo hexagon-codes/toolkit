@@ -1,3 +1,5 @@
+中文 | [English](README.en.md)
+
 # Slice 切片工具
 
 提供常用切片操作的泛型函数，简化切片处理。

@@ -1,3 +1,5 @@
+中文 | [English](README.en.md)
+
 # Syncx - 并发同步工具
 
 提供常用的并发同步模式实现，包括 Singleflight 和对象池。

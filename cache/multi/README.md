@@ -1,3 +1,5 @@
+中文 | [English](README.en.md)
+
 # Multi-Level Cache
 
 多层缓存封装，支持**本地 + Redis + DB** 三层缓存架构，自动处理逐层查询和回填。

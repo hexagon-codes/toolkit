@@ -67,4 +67,77 @@
 // - 转换失败不会 panic，而是返回类型的零值
 // - 字符串 "true"、"yes"、"1" 会被转换为 true
 // - 浮点数转整数会截断小数部分
+//
+// --- English ---
+//
+// Package conv provides general-purpose type conversion utilities.
+//
+// This package provides conversions between various Go types, with the design
+// principle of returning zero values on failure rather than panicking.
+//
+// # Main Features
+//
+// Basic type conversions:
+//   - String: convert any type to string
+//   - Int/Int32/Int64: convert any type to integer
+//   - Uint/Uint32/Uint64: convert any type to unsigned integer
+//   - Float32/Float64: convert any type to float
+//   - Bool: convert any type to boolean
+//
+// JSON/Map operations:
+//   - JSONToMap: convert JSON string to Map
+//   - MapToJSON: convert Map to JSON string
+//
+// Map operations:
+//   - MergeMaps: merge multiple Maps
+//   - MapKeys: extract all keys
+//   - MapValues: extract all values
+//
+// # Usage Examples
+//
+//	import "github.com/hexagon-codes/toolkit/lang/conv"
+//
+//	// String conversion
+//	s := conv.String(123)           // "123"
+//	s := conv.String(true)          // "true"
+//
+//	// Integer conversion
+//	i := conv.Int("456")            // 456
+//	i := conv.Int("invalid")        // 0 (returns zero value on failure)
+//
+//	// Float conversion
+//	f := conv.Float64("3.14")       // 3.14
+//	f := conv.Float64(123)          // 123.0
+//
+//	// JSON/Map conversion
+//	m, _ := conv.JSONToMap(`{"name":"Alice"}`)
+//	json, _ := conv.MapToJSON(m)
+//
+//	// Map operations
+//	merged := conv.MergeMaps(m1, m2)
+//	keys := conv.MapKeys(m)
+//	values := conv.MapValues(m)
+//
+// # Design Principles
+//
+// 1. No panic on failure: returns zero value when conversion fails
+// 2. Interface-driven: supports custom types implementing conversion interfaces
+// 3. Smart inference: automatically handles common types
+// 4. Zero external dependencies: only uses Go standard library
+//
+// # Conversion Rules
+//
+// Conversion functions try in the following order:
+//  1. Check for nil, return zero value
+//  2. Type assertion for common Go types
+//  3. Check if the value implements a conversion interface (e.g., iString, iFloat32)
+//  4. Fall back to standard library functions (strconv, fmt)
+//  5. Return zero value on failure
+//
+// # Notes
+//
+// - All conversion functions are concurrency-safe (pure functions, stateless)
+// - Failed conversions do not panic; they return the type's zero value
+// - Strings "true", "yes", "1" are converted to true
+// - Float-to-integer conversion truncates the decimal part
 package conv

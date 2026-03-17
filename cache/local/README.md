@@ -1,3 +1,5 @@
+中文 | [English](README.en.md)
+
 # Local Cache
 
 本地内存缓存，基于 `sync.Map` 实现，提供 LRU 驱逐、过期策略和防击穿能力。

@@ -24,4 +24,34 @@
 //
 //	// Unzip 元组切片
 //	names, ages = tuple.Unzip2(pairs)
+//
+// --- English ---
+//
+// Package tuple provides generic tuple types for combining multiple values
+// of different types.
+//
+// Main types:
+//   - Tuple2[A, B]: a 2-element tuple
+//   - Tuple3[A, B, C]: a 3-element tuple
+//   - Tuple4[A, B, C, D]: a 4-element tuple
+//
+// Main features:
+//   - Constructors: T2/T3/T4
+//   - Unpack: Unpack method
+//   - Swap: Swap method (Tuple2 only)
+//   - Zip/Unzip: pair/split slices
+//
+// Examples:
+//
+//	// Create a tuple
+//	t := tuple.T2("name", 18)
+//	name, age := t.Unpack()
+//
+//	// Zip two slices
+//	names := []string{"Alice", "Bob"}
+//	ages := []int{20, 25}
+//	pairs := tuple.Zip2(names, ages)  // []Tuple2[string, int]
+//
+//	// Unzip a tuple slice
+//	names, ages = tuple.Unzip2(pairs)
 package tuple

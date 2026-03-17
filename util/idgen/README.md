@@ -1,3 +1,5 @@
+中文 | [English](README.en.md)
+
 # IDGen ID 生成器
 
 提供多种 ID 生成方案：UUID、Snowflake、NanoID。
