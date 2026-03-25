@@ -562,6 +562,7 @@ type rateLimiter struct {
 	tokens   chan struct{}
 	interval time.Duration
 	stop     chan struct{}
+	once     sync.Once
 }
 
 // NewRateLimitedPool 创建带限流的连接池
@@ -613,10 +614,14 @@ func (rlp *RateLimitedPool) Do(req *http.Request) (*http.Response, error) {
 	return rlp.pool.Do(req)
 }
 
-// Close 关闭限流池
-func (rlp *RateLimitedPool) Close() {
-	close(rlp.limiter.stop)
+// Close 关闭限流池，停止 token 补充协程并关闭底层连接池。
+// 多次调用是安全的。
+func (rlp *RateLimitedPool) Close() error {
+	rlp.limiter.once.Do(func() {
+		close(rlp.limiter.stop)
+	})
 	rlp.pool.Close()
+	return nil
 }
 
 // ============== 断路器中间件 ==============

@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -224,5 +225,52 @@ func TestPool_ClosedPoolReturnsError(t *testing.T) {
 	_, err := pool.Do(req)
 	if err == nil {
 		t.Error("expected error from closed pool")
+	}
+}
+
+func TestRateLimitedPool_CloseStopsGoroutine(t *testing.T) {
+	// Let existing goroutines settle.
+	runtime.GC()
+	time.Sleep(50 * time.Millisecond)
+	before := runtime.NumGoroutine()
+
+	pool := NewPool()
+	rlp := NewRateLimitedPool(pool, 10)
+
+	// The refiller goroutine should have been spawned.
+	runtime.Gosched()
+	time.Sleep(50 * time.Millisecond)
+	during := runtime.NumGoroutine()
+	if during <= before {
+		t.Log("warning: goroutine count did not increase; test may be flaky on this platform")
+	}
+
+	// Close should stop the refiller goroutine.
+	if err := rlp.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	// Give the goroutine time to exit.
+	time.Sleep(100 * time.Millisecond)
+	runtime.GC()
+	after := runtime.NumGoroutine()
+
+	if after > before {
+		t.Errorf("goroutine leak: before=%d, after Close=%d", before, after)
+	}
+}
+
+func TestRateLimitedPool_DoubleCloseNoPanic(t *testing.T) {
+	pool := NewPool()
+	rlp := NewRateLimitedPool(pool, 5)
+
+	// First close should succeed.
+	if err := rlp.Close(); err != nil {
+		t.Fatalf("first Close returned error: %v", err)
+	}
+
+	// Second close must not panic.
+	if err := rlp.Close(); err != nil {
+		t.Fatalf("second Close returned error: %v", err)
 	}
 }

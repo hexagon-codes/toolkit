@@ -520,7 +520,7 @@ retryPool := httpx.NewRetryPool(pool, httpx.RetryConfig{
     },
 })
 
-// 带限流的连接池
+// 带限流的连接池（实现 io.Closer，通过 sync.Once 保证幂等关闭）
 rateLimitedPool := httpx.NewRateLimitedPool(pool, 100)  // 100 QPS
 defer rateLimitedPool.Close()
 
@@ -872,6 +872,11 @@ future := poolx.SubmitFunc(p, func() (int, error) {
 })
 result, err := future.Get()
 
+// 等待第一个完成（通过 cancel context 防止 goroutine 泄漏）
+f1 := poolx.SubmitFunc(p, func() (int, error) { return callAPI1() })
+f2 := poolx.SubmitFunc(p, func() (int, error) { return callAPI2() })
+val, idx, err := poolx.AwaitFirst(f1, f2)
+
 // 并行 Map
 results, _ := poolx.Map(ctx, items, 4, func(item T) (R, error) {
     return process(item), nil
@@ -1063,17 +1068,17 @@ s.Any(func(n int) bool { return n > 10 })
 s.All(func(n int) bool { return n > 0 })
 ```
 
+## 近期更新
+
+- **net/httpx**: `RateLimitedPool` 实现 `io.Closer` 接口，`Close() error` 方法通过 `sync.Once` 保证幂等，多次调用安全
+- **util/poolx**: `AwaitFirst` 使用可取消 context，首个结果返回后自动取消剩余等待，防止 goroutine 泄漏
+- **util/poolx**: 修复 `workerStack.retrieveExpiry` 环形缓冲区压缩逻辑，过期回收后正确重建存活 worker 队列
+
 ## 项目结构
 
 ```
 toolkit/
 ├── event/              # 事件总线（发布-订阅，线程安全）
-│
-├── ai/                 # AI 工具
-│   ├── streamx/       # 流式响应处理（OpenAI/Claude/Gemini）
-│   ├── tokenizer/     # Token 计数
-│   ├── template/      # Prompt 模板
-│   └── meter/         # 用量计量
 │
 ├── cache/              # 缓存
 │   ├── local/         # 本地缓存（LRU）

@@ -423,6 +423,8 @@ func AwaitAll[T any](futures ...*Future[T]) ([]T, error) {
 }
 
 // AwaitFirst waits for the first future to complete and returns its result.
+// It uses a cancellable context so that goroutines waiting on remaining futures
+// are released once the first result arrives, preventing goroutine leaks.
 func AwaitFirst[T any](futures ...*Future[T]) (T, int, error) {
 	if len(futures) == 0 {
 		var zero T
@@ -436,11 +438,14 @@ func AwaitFirst[T any](futures ...*Future[T]) (T, int, error) {
 		err   error
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	resultCh := make(chan result, 1)
 
 	for i, f := range futures {
 		go func(idx int, future *Future[T]) {
-			val, err := future.Get()
+			val, err := future.GetWithContext(ctx)
 			select {
 			case resultCh <- result{value: val, index: idx, err: err}:
 			default:
@@ -449,6 +454,8 @@ func AwaitFirst[T any](futures ...*Future[T]) (T, int, error) {
 	}
 
 	r := <-resultCh
+	// Cancel context to unblock remaining goroutines
+	cancel()
 	return r.value, r.index, r.err
 }
 

@@ -520,7 +520,7 @@ retryPool := httpx.NewRetryPool(pool, httpx.RetryConfig{
     },
 })
 
-// Rate-limited connection pool
+// Rate-limited connection pool (implements io.Closer, idempotent via sync.Once)
 rateLimitedPool := httpx.NewRateLimitedPool(pool, 100)  // 100 QPS
 defer rateLimitedPool.Close()
 
@@ -872,6 +872,11 @@ future := poolx.SubmitFunc(p, func() (int, error) {
 })
 result, err := future.Get()
 
+// Await first completion (uses cancel context to prevent goroutine leaks)
+f1 := poolx.SubmitFunc(p, func() (int, error) { return callAPI1() })
+f2 := poolx.SubmitFunc(p, func() (int, error) { return callAPI2() })
+val, idx, err := poolx.AwaitFirst(f1, f2)
+
 // Parallel Map
 results, _ := poolx.Map(ctx, items, 4, func(item T) (R, error) {
     return process(item), nil
@@ -1063,17 +1068,17 @@ s.Any(func(n int) bool { return n > 10 })
 s.All(func(n int) bool { return n > 0 })
 ```
 
+## Recent Changes
+
+- **net/httpx**: `RateLimitedPool` now implements `io.Closer` with `Close() error`, idempotent via `sync.Once` (safe to call multiple times)
+- **util/poolx**: `AwaitFirst` now uses a cancellable context to release waiting goroutines once the first result arrives, preventing goroutine leaks
+- **util/poolx**: Fixed `workerStack.retrieveExpiry` ring buffer compaction logic to correctly rebuild the surviving worker queue after expiry cleanup
+
 ## Project Structure
 
 ```
 toolkit/
 ├── event/              # Event bus (pub/sub, thread-safe)
-│
-├── ai/                 # AI utilities
-│   ├── streamx/       # Streaming response handler (OpenAI/Claude/Gemini)
-│   ├── tokenizer/     # Token counting
-│   ├── template/      # Prompt templates
-│   └── meter/         # Usage metering
 │
 ├── cache/              # Caching
 │   ├── local/         # Local cache (LRU)

@@ -369,34 +369,25 @@ func (s *workerStack) retrieveExpiry(duration time.Duration) []*worker {
 	s.expiry = s.expiry[:0]
 	now := time.Now()
 
-	// Check for expired workers
+	var surviving []*worker
+
 	for i := 0; i < s.len; i++ {
 		idx := (s.head - s.len + i + s.cap) % s.cap
 		w := s.items[idx]
 		if w != nil && now.Sub(time.Unix(0, w.lastActive.Load())) > duration {
 			s.expiry = append(s.expiry, w)
-			s.items[idx] = nil
+		} else if w != nil {
+			surviving = append(surviving, w)
 		}
+		s.items[idx] = nil
 	}
 
-	// 原地紧缩，避免在持有 spinlock 时分配内存
-	writeIdx := 0
-	for i := 0; i < s.len; i++ {
-		idx := (s.head - s.len + i + s.cap) % s.cap
-		if s.items[idx] != nil {
-			if writeIdx != idx {
-				s.items[writeIdx] = s.items[idx]
-				s.items[idx] = nil
-			}
-			writeIdx++
-		}
+	// Rebuild ring from surviving items
+	for i, w := range surviving {
+		s.items[i] = w
 	}
-	// 清除尾部残留引用
-	for i := writeIdx; i < s.cap; i++ {
-		s.items[i] = nil
-	}
-	s.len = writeIdx
-	s.head = writeIdx
+	s.head = len(surviving)
+	s.len = len(surviving)
 
 	return s.expiry
 }
