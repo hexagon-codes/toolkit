@@ -46,10 +46,10 @@ func (e *Event) JSON(v any) error {
 
 // Reader SSE 事件读取器
 type Reader struct {
-	reader  *bufio.Reader
-	closed  bool
-	lastID  string
-	mu      sync.Mutex
+	reader *bufio.Reader
+	closed bool
+	lastID string
+	mu     sync.Mutex
 }
 
 // NewReader 创建 SSE 事件读取器

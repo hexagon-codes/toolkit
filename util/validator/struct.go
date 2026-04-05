@@ -50,9 +50,9 @@ type RuleFunc func(value any, param string) bool
 
 // Validator 结构体验证器
 type Validator struct {
-	tagName string               // 验证标签名，默认 "validate"
-	rules   map[string]RuleFunc  // 注册的验证规则
-	msgs    map[string]string    // 错误消息模板
+	tagName string              // 验证标签名，默认 "validate"
+	rules   map[string]RuleFunc // 注册的验证规则
+	msgs    map[string]string   // 错误消息模板
 }
 
 // NewValidator 创建验证器
@@ -531,7 +531,7 @@ func isEmpty(value any) bool {
 		return rv.Len() == 0
 	case reflect.Ptr, reflect.Interface:
 		return rv.IsNil()
-	// 数字类型零值不算空，应该正常验证
+		// 数字类型零值不算空，应该正常验证
 	}
 	return false
 }

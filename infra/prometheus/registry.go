@@ -394,8 +394,8 @@ type summaryValue struct {
 	// writePos 环形缓冲区写入位置
 	writePos int
 	// full 标记缓冲区是否已满（开始覆盖旧数据）
-	full bool
-	sum  float64
+	full  bool
+	sum   float64
 	count uint64
 }
 

@@ -85,7 +85,7 @@ type OTLPExporter struct {
 	bufferMu     sync.Mutex
 
 	// Shutdown
-	done     chan struct{}
+	done      chan struct{}
 	closeOnce sync.Once
 }
 

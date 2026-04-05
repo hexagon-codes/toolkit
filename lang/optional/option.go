@@ -401,11 +401,20 @@ func Flatten[T any](o Option[Option[T]]) Option[T] {
 //   - Option[[2]any]: 如果两个都是 Some，返回包含两个值的 Option
 //
 // 注意: 由于 Go 泛型限制，返回数组类型。可以用 ZipWith 获得更好的类型
-func Zip[T, U any](o1 Option[T], o2 Option[U]) Option[struct{ First T; Second U }] {
+func Zip[T, U any](o1 Option[T], o2 Option[U]) Option[struct {
+	First  T
+	Second U
+}] {
 	if o1.present && o2.present {
-		return Some(struct{ First T; Second U }{o1.value, o2.value})
+		return Some(struct {
+			First  T
+			Second U
+		}{o1.value, o2.value})
 	}
-	return None[struct{ First T; Second U }]()
+	return None[struct {
+		First  T
+		Second U
+	}]()
 }
 
 // ZipWith 使用函数组合两个 Option

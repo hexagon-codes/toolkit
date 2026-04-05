@@ -195,34 +195,34 @@ func CustomAIClientWithHeaders(baseURL string, headers map[string]string) *Clien
 
 // AIRequest AI API 请求参数
 type AIRequest struct {
-	Model       string       `json:"model"`
-	Messages    []AIMessage  `json:"messages"`
-	MaxTokens   int          `json:"max_tokens,omitempty"`
-	Temperature float64      `json:"temperature,omitempty"`
-	Stream      bool         `json:"stream,omitempty"`
-	Tools       []AITool     `json:"tools,omitempty"`
-	ToolChoice  any          `json:"tool_choice,omitempty"`
-	TopP        float64      `json:"top_p,omitempty"`
-	Stop        []string     `json:"stop,omitempty"`
-	N           int          `json:"n,omitempty"`
-	Seed        int          `json:"seed,omitempty"`
-	User        string       `json:"user,omitempty"`
+	Model       string      `json:"model"`
+	Messages    []AIMessage `json:"messages"`
+	MaxTokens   int         `json:"max_tokens,omitempty"`
+	Temperature float64     `json:"temperature,omitempty"`
+	Stream      bool        `json:"stream,omitempty"`
+	Tools       []AITool    `json:"tools,omitempty"`
+	ToolChoice  any         `json:"tool_choice,omitempty"`
+	TopP        float64     `json:"top_p,omitempty"`
+	Stop        []string    `json:"stop,omitempty"`
+	N           int         `json:"n,omitempty"`
+	Seed        int         `json:"seed,omitempty"`
+	User        string      `json:"user,omitempty"`
 }
 
 // AIMessage AI 消息
 type AIMessage struct {
-	Role       string        `json:"role"`
-	Content    any           `json:"content"` // string 或 []ContentPart
-	Name       string        `json:"name,omitempty"`
-	ToolCalls  []AIToolCall  `json:"tool_calls,omitempty"`
-	ToolCallID string        `json:"tool_call_id,omitempty"`
+	Role       string       `json:"role"`
+	Content    any          `json:"content"` // string 或 []ContentPart
+	Name       string       `json:"name,omitempty"`
+	ToolCalls  []AIToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string       `json:"tool_call_id,omitempty"`
 }
 
 // AIContentPart 内容部分（多模态）
 type AIContentPart struct {
-	Type     string       `json:"type"` // text, image_url
-	Text     string       `json:"text,omitempty"`
-	ImageURL *AIImageURL  `json:"image_url,omitempty"`
+	Type     string      `json:"type"` // text, image_url
+	Text     string      `json:"text,omitempty"`
+	ImageURL *AIImageURL `json:"image_url,omitempty"`
 }
 
 // AIImageURL 图片 URL
@@ -233,8 +233,8 @@ type AIImageURL struct {
 
 // AITool AI 工具定义
 type AITool struct {
-	Type     string      `json:"type"` // function
-	Function AIFunction  `json:"function"`
+	Type     string     `json:"type"` // function
+	Function AIFunction `json:"function"`
 }
 
 // AIFunction 函数定义
@@ -246,9 +246,9 @@ type AIFunction struct {
 
 // AIToolCall 工具调用
 type AIToolCall struct {
-	ID       string          `json:"id"`
-	Type     string          `json:"type"` // function
-	Function AIFunctionCall  `json:"function"`
+	ID       string         `json:"id"`
+	Type     string         `json:"type"` // function
+	Function AIFunctionCall `json:"function"`
 }
 
 // AIFunctionCall 函数调用

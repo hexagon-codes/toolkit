@@ -143,7 +143,7 @@ type Request struct {
 	headers  map[string]string
 	query    url.Values
 	body     io.Reader
-	bodyData []byte        // 缓存的 body 数据，用于重试
+	bodyData []byte // 缓存的 body 数据，用于重试
 	ctx      context.Context
 	jsonErr  error // JSON 编码错误
 }

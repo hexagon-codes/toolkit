@@ -614,7 +614,7 @@ func TestURL_EdgeCases(t *testing.T) {
 		{"https://example.com/path/to/page", true},
 		{"//example.com", false}, // 协议相对 URL 缺少 scheme，不视为有效 URL
 		{"http://", false},       // 缺少 host
-		{"example.com", false},  // 缺少协议
+		{"example.com", false},   // 缺少协议
 		{"ht!tp://example.com", false},
 	}
 
