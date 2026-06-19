@@ -3,6 +3,7 @@ package otel
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/hexagon-codes/toolkit/infra/observe"
 )
@@ -73,10 +74,19 @@ func (p *W3CTraceContextPropagator) Extract(ctx context.Context, carrier Carrier
 	}
 
 	// 解析 traceparent
-	// 格式: 00-{trace-id}-{span-id}-{flags}
-	var version, traceID, spanID, flags string
-	_, err := fmt.Sscanf(traceparent, "%2s-%s-%s-%2s", &version, &traceID, &spanID, &flags)
-	if err != nil {
+	// 格式: version-{trace-id}-{span-id}-{flags}，4 个字段以 '-' 分隔。
+	//
+	// 注意：不能用 fmt.Sscanf("%s") 解析，因为动词 %s 匹配"到空白符/EOF 为止
+	// 的连续非空白串"，根本不把 '-' 当分隔符，会把 traceID 之后的全部内容
+	// （含 spanID、flags）贪婪吞进第一个 %s，导致后续字段为空、解析失败，
+	// W3C 分布式追踪链路彻底断开。改用 strings.Split 按 '-' 精确切分。
+	parts := strings.Split(traceparent, "-")
+	if len(parts) != 4 {
+		// 字段数不符合 W3C traceparent 规范，视为无效，保持原 ctx 不变。
+		return ctx
+	}
+	traceID := parts[1]
+	if traceID == "" {
 		return ctx
 	}
 

@@ -218,7 +218,9 @@ func TestMapCarrier(t *testing.T) {
 func TestW3CTraceContextPropagator(t *testing.T) {
 	prop := NewW3CTraceContextPropagator()
 
-	// Extract
+	// 回归: 原断言只验"非 nil"这类无信息量弱不变量, 长期掩盖了 W3C Extract
+	// 因 fmt.Sscanf %s 贪婪匹配而彻底失效的 bug。此处升级为验证 Extract 真正
+	// 从 traceparent 中解析出 traceID 并注入 ctx, 锁死核心闭环, 不得弱化。
 	carrier := MapCarrier{
 		"traceparent": "00-trace123-span456-01",
 	}
@@ -226,6 +228,14 @@ func TestW3CTraceContextPropagator(t *testing.T) {
 
 	if ctx == nil {
 		t.Fatal("expected non-nil context")
+	}
+
+	got, ok := ctx.Value(traceIDKey{}).(string)
+	if !ok {
+		t.Fatal("expected traceID to be injected into context from traceparent")
+	}
+	if got != "trace123" {
+		t.Errorf("extracted traceID = %q, want %q", got, "trace123")
 	}
 }
 
