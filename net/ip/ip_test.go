@@ -118,6 +118,10 @@ func TestIsPublic(t *testing.T) {
 		{"127.0.0.1", false},   // loopback
 		{"0.0.0.0", false},     // unspecified
 		{"invalid", false},
+		// 链路本地补强：复用 IsPrivateOrReservedIP 后，链路本地不再被误判为公网
+		{"169.254.1.1", false},     // link-local
+		{"169.254.169.254", false}, // 云元数据端点，SSRF 重点
+		{"fe80::1", false},         // link-local v6
 	}
 
 	for _, tt := range tests {

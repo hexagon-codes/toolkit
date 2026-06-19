@@ -48,12 +48,40 @@ func IsLoopback(ip string) bool {
 }
 
 // IsPublic 判断是否为公网 IP
+//
+// 公网定义为：能被解析为合法 IP，且不属于任何内网/保留地址段。
+// 内网/保留判定复用 IsPrivateOrReservedIP，因此除 RFC1918/ULA、回环、未指定
+// 外，链路本地（169.254.0.0/16、fe80::/10，含云元数据端点 169.254.169.254）
+// 同样被判为非公网——这与早期实现相比补齐了链路本地一类，避免误把元数据端点
+// 当作公网放行（SSRF 隐患）。对仅含 RFC1918/ULA/回环/未指定的既有用例，
+// 判定结果保持不变，向后兼容。
 func IsPublic(ip string) bool {
 	parsed := net.ParseIP(ip)
 	if parsed == nil {
 		return false
 	}
-	return !parsed.IsPrivate() && !parsed.IsLoopback() && !parsed.IsUnspecified()
+	return !IsPrivateOrReservedIP(parsed)
+}
+
+// IsPrivateOrReservedIP 判断（已解析的）net.IP 是否为内网或保留地址，用于 SSRF 防御。
+//
+// 比 IsPrivate 覆盖更全：除 RFC1918/ULA 私有段外，还包含——
+//   - 回环：127.0.0.0/8、::1
+//   - 链路本地：169.254.0.0/16（含云元数据端点 169.254.169.254）、fe80::/10
+//   - 未指定：0.0.0.0、::
+//
+// 做 SSRF / URL 出站校验时应使用本函数而非 IsPrivate —— 后者仅覆盖 RFC1918/ULA，
+// 会漏放 loopback 与 link-local（云元数据 SSRF 的常见攻击面）。
+// 入参为 nil 时返回 false（无法判定即视为非内网，交由上层另行处理）。
+func IsPrivateOrReservedIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() ||
+		ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsUnspecified()
 }
 
 // IsInCIDR 判断 IP 是否在 CIDR 范围内
