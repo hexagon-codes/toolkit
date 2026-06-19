@@ -197,6 +197,33 @@ type localItem struct {
 	packed     []byte
 	expireAt   time.Time
 	accessedAt atomic.Int64 // LRU: 最后访问时间（UnixNano），使用原子操作支持读锁下更新
+
+	// seq 是单调递增的访问序列号，作为 accessedAt 相同时的 LRU 淘汰 tiebreak。
+	//
+	// 动机：accessedAt 取自 wall-clock（UnixNano），在高频写入/访问或低分辨率时钟
+	// （部分平台 time.Now() 精度可达毫秒级）下，多个条目可能落在同一纳秒。此时仅按
+	// accessedAt 排序无法区分先后，叠加 Go map 遍历顺序非确定性，淘汰对象会随机变化，
+	// 导致下游确定性 LRU 测试 flaky。
+	//
+	// 每次写入与每次 LRU 访问刷新时，都会从 Cache.accessSeq 原子自增取一个全局唯一、
+	// 单调递增的序列号写入本字段。于是淘汰时按 (accessedAt, seq) 字典序取最小者，
+	// 即可在任意时钟分辨率下得到确定的淘汰对象，且与 accessedAt 的 LRU 语义一致
+	// （seq 仅在 accessedAt 相同时生效，越小表示越早被访问，应优先淘汰）。
+	//
+	// 使用原子操作，支持读锁下更新（与 accessedAt 同步刷新）。
+	seq atomic.Uint64
+
+	// raw 用于裸 Get/Set API：直接存放调用方传入的原始 any 值，
+	// 不经 Codec 序列化。仅当 isRaw 为 true 时有效。
+	//
+	// 与 packed 互斥：
+	//   - loader 路径（GetOrLoad/GetOrLoadEx）写入 packed，isRaw=false
+	//   - 裸 Set 路径写入 raw，isRaw=true，packed 为 nil
+	//
+	// 这样裸 API 与 loader API 共享同一份底层存储、过期、LRU 淘汰机制，
+	// 但各自的读路径互不干扰。
+	raw   any
+	isRaw bool
 }
 
 // newLocalItem 创建新的 localItem
@@ -219,6 +246,16 @@ func (i *localItem) setAccessedAt(t time.Time) {
 	i.accessedAt.Store(t.UnixNano())
 }
 
+// getSeq 获取访问序列号（LRU 淘汰 tiebreak）
+func (i *localItem) getSeq() uint64 {
+	return i.seq.Load()
+}
+
+// setSeq 设置访问序列号（原子操作）
+func (i *localItem) setSeq(s uint64) {
+	i.seq.Store(s)
+}
+
 type Cache struct {
 	mu         sync.RWMutex
 	items      map[string]*localItem // 使用指针以支持读锁下原子更新 accessedAt
@@ -233,6 +270,26 @@ type Cache struct {
 
 	// 版本号：Clear() 时递增，用于防止 singleflight 竞态写入旧数据
 	generation atomic.Uint64
+
+	// accessSeq 是本缓存实例内单调递增的访问序列号发号器。
+	// 每次写入或 LRU 访问刷新都会 Add(1) 取号并写入对应 localItem.seq，
+	// 作为 accessedAt 相同时的确定性淘汰 tiebreak（详见 localItem.seq）。
+	accessSeq atomic.Uint64
+}
+
+// nextSeq 取下一个单调递增的访问序列号（并发安全）。
+func (c *Cache) nextSeq() uint64 {
+	return c.accessSeq.Add(1)
+}
+
+// touchLRU 刷新条目的 LRU 访问信息：同步更新 accessedAt 与 seq。
+//
+// 两者必须成对更新——accessedAt 决定 LRU 主序，seq 在同一纳秒内决定先后，
+// 共同保证淘汰对象在任意时钟分辨率下都是确定的。该方法使用原子操作，
+// 可在读锁下安全调用（无需升级写锁）。
+func (c *Cache) touchLRU(item *localItem, now time.Time) {
+	item.setAccessedAt(now)
+	item.setSeq(c.nextSeq())
 }
 
 const (
@@ -271,6 +328,25 @@ func NewCacheWithCleanup(maxEntries int, cleanupInterval time.Duration, opts ...
 	}
 
 	return c
+}
+
+// NewCacheNoCleanup 创建"无后台清理"的本地缓存：不启动任何后台 goroutine，
+// 仅依赖惰性过期（读取到过期条目时就地删除）+ 写入时的 LRU 容量淘汰。
+//
+// 适用场景：调用方将本缓存委托/嵌入到更大的生命周期中（如下游 ToolCache），
+// 不希望被一个无法显式停止的后台 goroutine 拖累，从而避免 goroutine 泄漏。
+// 这等价于 NewCacheWithCleanup(maxEntries, 0, opts...)，但语义更显式、更易自文档化。
+//
+// 与定期清理构造的区别：
+//   - 过期条目只在被再次读取、或因容量超限触发 LRU 淘汰时才被回收；
+//     在被读取前会一直占用 map 槽位（但已过期条目读取必然返回未命中）。
+//   - 没有后台 goroutine，因此即使不调用 Stop/Close 也不会泄漏 goroutine。
+//
+// 仍可安全调用 Stop()/Close()（幂等空操作），便于与统一的关闭流程兼容。
+//
+// 注意：maxEntries <= 0 时同样会规整为 DefaultMaxEntries（10000），防止 OOM。
+func NewCacheNoCleanup(maxEntries int, opts ...Option) *Cache {
+	return NewCacheWithCleanup(maxEntries, 0, opts...)
 }
 
 func (c *Cache) GetOrLoad(
@@ -390,8 +466,8 @@ func (c *Cache) getItem(fullKey string) ([]byte, bool, error) {
 		return nil, false, ErrCorrupt
 	}
 
-	// LRU: 原子更新访问时间（无需写锁）
-	item.setAccessedAt(now)
+	// LRU: 原子更新访问时间与序列号（无需写锁）
+	c.touchLRU(item, now)
 
 	// 返回副本，避免外部修改
 	cp := make([]byte, len(item.packed))
@@ -425,7 +501,11 @@ func (c *Cache) setItemWithGen(fullKey string, packed []byte, ttl time.Duration,
 		return
 	}
 
-	c.items[fullKey] = newLocalItem(cp, exp, now)
+	item := newLocalItem(cp, exp, now)
+	// 写入即视为一次访问：赋予最新序列号，保证它在同一纳秒内是"最近使用"的，
+	// 不会被同时间戳的旧条目反超而误淘汰。
+	item.setSeq(c.nextSeq())
+	c.items[fullKey] = item
 	c.evictIfNeededLocked(now)
 }
 
@@ -456,24 +536,33 @@ func (c *Cache) evictIfNeededLocked(now time.Time) {
 		return
 	}
 
-	// 2) LRU 驱逐：删除最久未访问的条目
+	// 2) LRU 驱逐：删除最久未访问的条目（确定性淘汰）
 	// 性能特征：使用选择排序找最小的 needDel 个元素，时间复杂度 O(n*needDel)。
 	// 当 maxEntries 较大（>10万）且频繁触发驱逐时性能可能下降，
 	// 可考虑引入 container/heap 或双向链表优化为 O(n*log(n))。
 	// 对于常见的万级缓存场景，当前实现足够高效。
+	//
+	// 确定性保证：排序键为 (accessedAt, seq) 二元组。accessedAt 为 LRU 主序，
+	// seq 为同一纳秒内的单调 tiebreak。任意两个条目都有严格全序，因此即便
+	// Go map 遍历顺序不确定，选择排序选出的淘汰对象也完全确定。
 	needDel := len(c.items) - c.maxEntries
 	if needDel <= 0 {
 		return
 	}
 
-	// 收集所有条目的访问时间
-	type keyTime struct {
-		key  string
-		time time.Time
+	// 收集所有条目的访问时间与序列号
+	type keyMeta struct {
+		key        string
+		accessedAt int64  // UnixNano
+		seq        uint64 // 同时间戳 tiebreak
 	}
-	candidates := make([]keyTime, 0, len(c.items))
+	candidates := make([]keyMeta, 0, len(c.items))
 	for k, it := range c.items {
-		candidates = append(candidates, keyTime{k, it.getAccessedAt()})
+		candidates = append(candidates, keyMeta{
+			key:        k,
+			accessedAt: it.accessedAt.Load(),
+			seq:        it.getSeq(),
+		})
 	}
 
 	// 部分排序：只需要找到最小的 needDel 个元素
@@ -481,7 +570,8 @@ func (c *Cache) evictIfNeededLocked(now time.Time) {
 	for i := 0; i < needDel && i < len(candidates); i++ {
 		minIdx := i
 		for j := i + 1; j < len(candidates); j++ {
-			if candidates[j].time.Before(candidates[minIdx].time) {
+			if lruLess(candidates[j].accessedAt, candidates[j].seq,
+				candidates[minIdx].accessedAt, candidates[minIdx].seq) {
 				minIdx = j
 			}
 		}
@@ -491,6 +581,21 @@ func (c *Cache) evictIfNeededLocked(now time.Time) {
 		// 删除第 i 个最旧的条目
 		delete(c.items, candidates[i].key)
 	}
+}
+
+// lruLess 定义 LRU 淘汰的严格全序：按 (accessedAt, seq) 字典序比较。
+//
+// 返回 true 表示左侧条目"更应被淘汰"（更久未访问）。
+//   - accessedAt 较小者优先淘汰（最久未访问）。
+//   - accessedAt 相同时，seq 较小者优先淘汰（同一纳秒内更早被访问）。
+//
+// 由于 seq 在本缓存实例内单调唯一，(accessedAt, seq) 构成严格全序，
+// 保证淘汰对象在任意时钟分辨率下都是确定的，不受 map 遍历顺序影响。
+func lruLess(aAccessed int64, aSeq uint64, bAccessed int64, bSeq uint64) bool {
+	if aAccessed != bAccessed {
+		return aAccessed < bAccessed
+	}
+	return aSeq < bSeq
 }
 
 func (c *Cache) unmarshalPacked(packed []byte, dest any) error {
@@ -556,12 +661,26 @@ func (c *Cache) cleanExpired() {
 	}
 }
 
-// Stop 停止定期清理（优雅关闭时调用）
+// Stop 停止定期清理（优雅关闭时调用）。
+//
+// 幂等：多次调用安全，只会真正关闭一次。对"无后台清理"构造
+// （NewCacheNoCleanup / cleanupInterval<=0）的缓存调用也安全——
+// 此时没有后台 goroutine，调用仅是把停止信号 channel 关闭，不产生副作用。
 func (c *Cache) Stop() {
 	// 使用 atomic.Bool 确保只关闭一次
 	if c.stopped.CompareAndSwap(false, true) {
 		close(c.stopCleanup)
 	}
+}
+
+// Close 是 Stop 的同名别名，停止后台清理并释放相关资源。
+//
+// 提供该方法是为契合 Go 生态中"资源持有者实现 Close() error"的惯例
+// （形似 io.Closer），便于下游用统一的关闭流程（如 defer c.Close()）管理缓存生命周期。
+// 始终返回 nil；与 Stop 一样幂等，多次调用安全。
+func (c *Cache) Close() error {
+	c.Stop()
+	return nil
 }
 
 // Len 返回当前缓存条目数（用于监控）
