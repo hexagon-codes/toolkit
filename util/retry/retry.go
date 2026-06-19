@@ -3,7 +3,6 @@ package retry
 import (
 	"context"
 	"errors"
-	"fmt"
 	"math"
 	"time"
 )
@@ -30,6 +29,13 @@ type Config struct {
 	// HTTP 感知
 	RetryAfterAware bool  // 是否感知 Retry-After 头
 	LastError       error // 最后一次错误（内部使用）
+
+	// 兼容性增强开关（均默认关闭，零值即历史行为，保证向后兼容）。
+	// 详见 compat.go 中对应的 Option：
+	//   - WithUnwrapFinalError / WithReturnLastError
+	//   - WithOnRetryZeroBased
+	unwrapFinalError bool // 为 true 时，重试耗尽返回的最终错误用多 %w 包装，可 errors.Is 到原始 lastErr
+	onRetryZeroBased bool // 为 true 时，OnRetry 回调计数改为零基（首次重试 n==0）
 }
 
 // Option 配置选项
@@ -125,10 +131,8 @@ func Do(fn func() error, opts ...Option) error {
 			break
 		}
 
-		// 回调
-		if config.OnRetry != nil {
-			config.OnRetry(attempt, err)
-		}
+		// 回调（计数基准由 WithOnRetryZeroBased 控制，默认一基）
+		config.invokeOnRetry(attempt, err)
 
 		// 计算延迟
 		delay := calculateDelay(attempt, config)
@@ -136,7 +140,8 @@ func Do(fn func() error, opts ...Option) error {
 		time.Sleep(delay)
 	}
 
-	return fmt.Errorf("%w: %v", ErrMaxAttemptsReached, lastErr)
+	// 最终错误的解包语义由 WithUnwrapFinalError 控制，默认仅含 sentinel
+	return config.finalError(lastErr)
 }
 
 // calculateDelay 计算延迟时间（支持抖动和 Retry-After）
@@ -205,10 +210,8 @@ func DoWithContext(ctx context.Context, fn func() error, opts ...Option) error {
 			break
 		}
 
-		// 回调
-		if config.OnRetry != nil {
-			config.OnRetry(attempt, err)
-		}
+		// 回调（计数基准由 WithOnRetryZeroBased 控制，默认一基）
+		config.invokeOnRetry(attempt, err)
 
 		// 计算延迟
 		delay := calculateDelay(attempt, config)
@@ -223,7 +226,8 @@ func DoWithContext(ctx context.Context, fn func() error, opts ...Option) error {
 		}
 	}
 
-	return fmt.Errorf("%w: %v", ErrMaxAttemptsReached, lastErr)
+	// 最终错误的解包语义由 WithUnwrapFinalError 控制，默认仅含 sentinel
+	return config.finalError(lastErr)
 }
 
 // applyDefaultBackoff 当用户设置了 Multiplier 但没有显式设置 DelayFunc 时，自动使用指数退避
