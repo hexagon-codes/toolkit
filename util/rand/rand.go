@@ -46,23 +46,16 @@ func UpperString(length int) string {
 // StringFrom 从指定字符集生成随机字符串
 // 使用 crypto/rand 生成加密安全的随机数
 // 如果随机数生成失败会 panic（极少发生，通常表示系统熵源问题）
+//
+// 若需要在熵源失败时以 error 形式优雅传播而非 panic，请使用 TryStringFrom。
 func StringFrom(charset string, length int) string {
-	if length <= 0 {
-		return ""
+	// 复用与 TryStringFrom 共享的核心实现 stringFrom，保持行为完全一致；
+	// 唯一区别是本函数在出错时将 error 转为 panic（保持原有契约不变）。
+	s, err := stringFrom(charset, length)
+	if err != nil {
+		panic("crypto/rand.Int failed: " + err.Error())
 	}
-
-	result := make([]byte, length)
-	charsetLen := big.NewInt(int64(len(charset)))
-
-	for i := 0; i < length; i++ {
-		num, err := rand.Int(rand.Reader, charsetLen)
-		if err != nil {
-			panic("crypto/rand.Int failed: " + err.Error())
-		}
-		result[i] = charset[num.Int64()]
-	}
-
-	return string(result)
+	return s
 }
 
 // Int 生成指定范围的随机整数 [min, max)
