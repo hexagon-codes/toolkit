@@ -18,7 +18,7 @@ Provides three rate limiting algorithm implementations: Token Bucket, Leaky Buck
 ### Token Bucket Rate Limiting
 
 ```go
-import "github.com/everyday-items/toolkit/util/rate"
+import "github.com/hexagon-codes/toolkit/util/rate"
 
 // Create token bucket limiter
 // Capacity: 10 tokens, rate: 5 tokens per second

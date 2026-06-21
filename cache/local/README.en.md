@@ -17,7 +17,7 @@ An in-memory cache based on `sync.Map`, providing LRU eviction, expiration polic
 ## Installation
 
 ```bash
-go get github.com/everyday-items/toolkit/cache/local
+go get github.com/hexagon-codes/toolkit/cache/local
 ```
 
 ## Quick Start
@@ -30,7 +30,7 @@ import (
     "fmt"
     "time"
 
-    "github.com/everyday-items/toolkit/cache/local"
+    "github.com/hexagon-codes/toolkit/cache/local"
 )
 
 type User struct {
@@ -117,6 +117,26 @@ cache := local.NewCacheWithCleanup(1000, -1)
 defer cache.Stop()
 ```
 
+### NewCacheNoCleanup
+
+Creates a local cache **without starting the background periodic cleanup goroutine**.
+
+```go
+func NewCacheNoCleanup(maxEntries int, opts ...Option) *Cache
+```
+
+**Differences from the cleanup-enabled constructors**:
+- Expired entries are only reclaimed when read again, or when an over-capacity write triggers LRU eviction; until then they keep occupying a map slot (though reading an expired entry always returns a miss).
+- No background goroutine, so no goroutine leak even if `Stop`/`Close` is never called.
+- `Stop()`/`Close()` remain safe to call (idempotent no-ops), for compatibility with a unified shutdown flow.
+
+**Example**:
+
+```go
+// For short-lived or test scenarios: no background goroutine
+cache := local.NewCacheNoCleanup(1000)
+```
+
 ### GetOrLoad
 
 Gets cached data, loading via loader on cache miss.
@@ -197,6 +217,23 @@ func (c *Cache) Stop()
 ```go
 cache := local.NewCache(1000)
 defer cache.Stop()
+```
+
+### Close
+
+An alias for `Stop` that stops background cleanup and releases related resources. Always returns `nil`; like `Stop`, it is idempotent and safe to call multiple times.
+
+```go
+func (c *Cache) Close() error
+```
+
+It is provided to match the Go idiom of "resource holders implement `Close() error`" (resembling `io.Closer`), so the cache lifecycle can be managed with a unified shutdown flow (e.g. `defer c.Close()`).
+
+**Example**:
+
+```go
+cache := local.NewCache(1000)
+defer cache.Close()
 ```
 
 ### Len
@@ -386,9 +423,9 @@ cache := local.NewCache(1000,
 
 ```go
 import (
-    "github.com/everyday-items/toolkit/cache/local"
-    "github.com/everyday-items/toolkit/cache/multi"
-    "github.com/everyday-items/toolkit/cache/redis"
+    "github.com/hexagon-codes/toolkit/cache/local"
+    "github.com/hexagon-codes/toolkit/cache/multi"
+    "github.com/hexagon-codes/toolkit/cache/redis"
 )
 
 // Create local cache

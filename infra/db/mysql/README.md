@@ -22,7 +22,7 @@
 package main
 
 import (
-    "github.com/everyday-items/toolkit/infra/db/mysql"
+    "github.com/hexagon-codes/toolkit/infra/db/mysql"
 )
 
 func main() {

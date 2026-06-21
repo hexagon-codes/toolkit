@@ -24,7 +24,7 @@ package main
 
 import (
     "context"
-    "github.com/everyday-items/toolkit/infra/db/redis"
+    "github.com/hexagon-codes/toolkit/infra/db/redis"
 )
 
 func main() {

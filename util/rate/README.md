@@ -18,7 +18,7 @@
 ### 令牌桶限流
 
 ```go
-import "github.com/everyday-items/toolkit/util/rate"
+import "github.com/hexagon-codes/toolkit/util/rate"
 
 // 创建令牌桶限流器
 // 容量：10个令牌，速率：每秒生成5个令牌

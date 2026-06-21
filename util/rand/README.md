@@ -17,7 +17,7 @@
 ### 随机字符串
 
 ```go
-import "github.com/everyday-items/toolkit/util/rand"
+import "github.com/hexagon-codes/toolkit/util/rand"
 
 // 生成16位随机字符串（字母+数字）
 token := rand.String(16)
@@ -130,6 +130,35 @@ Code(length int) string
 // Token 生成字母数字 Token
 Token(length int) string
 ```
+
+### 错误返回安全变体（Try*）
+
+上述函数在底层熵源（`crypto/rand`）失败时会 **panic**，适合"随机数失败即视为致命错误"的场景。在 OAuth state、CSRF token、一次性凭据等生成路径上，若希望以 error 形式优雅传播而非 panic，可使用对应的 `Try*` 变体。
+
+每个 `Try*` 函数行为与对应原函数完全一致，唯一区别是熵源失败时返回 error 而非 panic。可通过 `errors.Is(err, rand.ErrInsufficientEntropy)` 判定是否为熵源故障。
+
+```go
+s, err := rand.TryToken(32)
+if err != nil {
+    // 例如返回 5xx 或重试，而非击穿协程
+    return fmt.Errorf("生成 token 失败: %w", err)
+}
+```
+
+| 安全变体 | 对应函数 |
+|---------|---------|
+| `TryString(length)` | `String` |
+| `TryStringFrom(charset, length)` | `StringFrom` |
+| `TryNumericString(length)` | `NumericString` |
+| `TryAlphaString(length)` | `AlphaString` |
+| `TryLowerString(length)` | `LowerString` |
+| `TryUpperString(length)` | `UpperString` |
+| `TryToken(length)` | `Token` |
+| `TryCode(length)` | `Code` |
+| `TryInt(min, max)` | `Int` |
+| `TryInt64(min, max)` | `Int64` |
+| `TryBytes(length)` | `Bytes` |
+| `TryBool()` | `Bool` |
 
 ## 使用场景
 
@@ -306,8 +335,8 @@ BenchmarkBytes           500000       3500 ns/op
    - 如需包含上界，使用 `Int(min, max+1)`
 
 4. **错误处理**：
-   - 内部忽略了 `crypto/rand` 的错误（极少失败）
-   - 失败时会返回确定性结果（而非 panic）
+   - 普通函数（`String`/`Int`/`Bytes` 等）在 `crypto/rand` 失败时会 **panic**（极少发生，通常表示系统熵源问题）
+   - 若需以 error 形式优雅传播而非 panic，请使用对应的 `Try*` 安全变体，并以 `errors.Is(err, rand.ErrInsufficientEntropy)` 判定熵源故障
 
 5. **长度限制**：
    - 生成长字符串时（> 1MB）可能较慢

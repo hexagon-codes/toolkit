@@ -4,6 +4,8 @@
 
 Provides generic functions for common slice operations, simplifying slice handling.
 
+> **Note:** This package overlaps heavily with [`lang/slicex`](../../lang/slicex/), which is a more complete superset (more functions). Prefer `lang/slicex` for new code.
+
 ## Features
 
 - ✅ Generic support (Go 1.18+)
@@ -19,7 +21,7 @@ Provides generic functions for common slice operations, simplifying slice handli
 ### Basic Operations
 
 ```go
-import "github.com/everyday-items/toolkit/util/slice"
+import "github.com/hexagon-codes/toolkit/util/slice"
 
 // Deduplication
 nums := []int{1, 2, 2, 3, 3, 3}

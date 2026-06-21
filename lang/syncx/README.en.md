@@ -18,7 +18,7 @@ Provides implementations of common concurrent synchronization patterns, includin
 ### Singleflight - Prevent Cache Stampede
 
 ```go
-import "github.com/everyday-items/toolkit/lang/syncx"
+import "github.com/hexagon-codes/toolkit/lang/syncx"
 
 // Create a Singleflight instance
 sf := syncx.NewSingleflight()
@@ -38,7 +38,7 @@ sf.Forget("user:123")
 ```go
 import (
     "bytes"
-    "github.com/everyday-items/toolkit/lang/syncx"
+    "github.com/hexagon-codes/toolkit/lang/syncx"
 )
 
 // Create object pool
@@ -64,7 +64,7 @@ pool.Put(buf)
 ```go
 import (
     "bytes"
-    "github.com/everyday-items/toolkit/lang/syncx"
+    "github.com/hexagon-codes/toolkit/lang/syncx"
 )
 
 // Create type-safe object pool (no type assertion needed)

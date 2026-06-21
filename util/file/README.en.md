@@ -19,7 +19,7 @@ A convenient toolkit that simplifies file operations, encapsulating common file 
 ### File Checks
 
 ```go
-import "github.com/everyday-items/toolkit/util/file"
+import "github.com/hexagon-codes/toolkit/util/file"
 
 // Check if file exists
 if file.Exists("/path/to/file.txt") {

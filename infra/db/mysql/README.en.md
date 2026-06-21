@@ -22,7 +22,7 @@ Production-grade MySQL database connection pool wrapper with connection pool man
 package main
 
 import (
-    "github.com/everyday-items/toolkit/infra/db/mysql"
+    "github.com/hexagon-codes/toolkit/infra/db/mysql"
 )
 
 func main() {

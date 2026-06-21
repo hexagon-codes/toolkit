@@ -22,7 +22,7 @@ A general-purpose cache library supporting local cache, Redis cache, and multi-l
 ## Installation
 
 ```bash
-go get github.com/everyday-items/toolkit/cache
+go get github.com/hexagon-codes/toolkit/cache
 ```
 
 ## Quick Start
@@ -38,9 +38,9 @@ import (
     "context"
     "time"
 
-    "github.com/everyday-items/toolkit/cache/local"
-    "github.com/everyday-items/toolkit/cache/redis"
-    "github.com/everyday-items/toolkit/cache/multi"
+    "github.com/hexagon-codes/toolkit/cache/local"
+    "github.com/hexagon-codes/toolkit/cache/redis"
+    "github.com/hexagon-codes/toolkit/cache/multi"
     goredis "github.com/redis/go-redis/v9"
 )
 
@@ -80,7 +80,7 @@ import (
     "fmt"
     "time"
 
-    "github.com/everyday-items/toolkit/cache/local"
+    "github.com/hexagon-codes/toolkit/cache/local"
 )
 
 func main() {
@@ -128,7 +128,7 @@ import (
     "fmt"
     "time"
 
-    "github.com/everyday-items/toolkit/cache/redis"
+    "github.com/hexagon-codes/toolkit/cache/redis"
     goredis "github.com/redis/go-redis/v9"
 )
 
@@ -173,7 +173,7 @@ import (
     "fmt"
     "time"
 
-    "github.com/everyday-items/toolkit/cache/redis"
+    "github.com/hexagon-codes/toolkit/cache/redis"
     goredis "github.com/redis/go-redis/v9"
 )
 

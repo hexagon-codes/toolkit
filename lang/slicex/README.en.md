@@ -19,7 +19,7 @@ Provides functional slice operation utilities supporting Map, Filter, Reduce, an
 ### Basic Operations
 
 ```go
-import "github.com/everyday-items/toolkit/lang/slicex"
+import "github.com/hexagon-codes/toolkit/lang/slicex"
 
 // Contains check
 found := slicex.Contains([]int{1, 2, 3}, 2)  // true

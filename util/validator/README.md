@@ -20,7 +20,7 @@
 ### 格式验证
 
 ```go
-import "github.com/everyday-items/toolkit/util/validator"
+import "github.com/hexagon-codes/toolkit/util/validator"
 
 // 邮箱验证
 valid := validator.Email("user@example.com")  // true

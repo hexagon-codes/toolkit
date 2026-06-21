@@ -7,7 +7,7 @@
 ### 1. 安装
 
 ```bash
-go get github.com/everyday-items/toolkit/infra/queue/asynq
+go get github.com/hexagon-codes/toolkit/infra/queue/asynq
 ```
 
 ### 2. 基本概念
@@ -25,7 +25,7 @@ go get github.com/everyday-items/toolkit/infra/queue/asynq
 使用前必须配置依赖注入：
 
 ```go
-import "github.com/everyday-items/toolkit/infra/queue/asynq"
+import "github.com/hexagon-codes/toolkit/infra/queue/asynq"
 
 // 1. 实现 Logger 接口
 type MyLogger struct{}
@@ -131,7 +131,7 @@ func (w *EmailWorker) ProcessTask(ctx context.Context, t *asynq.Task) (err error
 **方式 1：使用 TaskBuilder（推荐）**
 
 ```go
-import "github.com/everyday-items/toolkit/infra/queue/asynq"
+import "github.com/hexagon-codes/toolkit/infra/queue/asynq"
 
 // 简单任务
 task := asynq.NewTask("email:send").

@@ -19,7 +19,7 @@
 ### 文件判断
 
 ```go
-import "github.com/everyday-items/toolkit/util/file"
+import "github.com/hexagon-codes/toolkit/util/file"
 
 // 判断文件是否存在
 if file.Exists("/path/to/file.txt") {

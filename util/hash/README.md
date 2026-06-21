@@ -16,7 +16,7 @@
 ### 哈希函数
 
 ```go
-import "github.com/everyday-items/toolkit/util/hash"
+import "github.com/hexagon-codes/toolkit/util/hash"
 
 // MD5
 md5Hash := hash.MD5("data")

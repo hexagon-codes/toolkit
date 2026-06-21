@@ -20,7 +20,7 @@
 ### 基础类型转换
 
 ```go
-import "github.com/everyday-items/toolkit/lang/conv"
+import "github.com/hexagon-codes/toolkit/lang/conv"
 
 // 字符串转换
 s := conv.String(123)          // "123"

@@ -19,7 +19,7 @@
 ### 基础操作
 
 ```go
-import "github.com/everyday-items/toolkit/lang/mathx"
+import "github.com/hexagon-codes/toolkit/lang/mathx"
 
 // Min/Max - 支持可变参数
 min := mathx.Min(3, 1, 4, 1, 5)           // 1 (int)
@@ -145,7 +145,7 @@ import "math"
 min := math.Min(3.14, 2.71)  // 只能用于 float64
 
 // mathx 支持所有类型
-import "github.com/everyday-items/toolkit/lang/mathx"
+import "github.com/hexagon-codes/toolkit/lang/mathx"
 min := mathx.Min(3, 1, 4)                  // int
 min := mathx.Min(3.14, 2.71, 1.41)        // float64
 min := mathx.Min("c", "a", "b")           // string
@@ -337,7 +337,7 @@ min3 := math.Min(math.Min(a, b), c)
 ### mathx 包
 
 ```go
-import "github.com/everyday-items/toolkit/lang/mathx"
+import "github.com/hexagon-codes/toolkit/lang/mathx"
 
 // 支持泛型
 min := mathx.Min(3, 1, 4)           // int
@@ -423,7 +423,7 @@ RoundTo:          15 ns/op
    min := math.Min(a, b)  // 略快于泛型版本
 
    // 通用场景（推荐）
-   import "github.com/everyday-items/toolkit/lang/mathx"
+   import "github.com/hexagon-codes/toolkit/lang/mathx"
    min := mathx.Min(a, b)  // 类型安全 + 可读性更好
    ```
 

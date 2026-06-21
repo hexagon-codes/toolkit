@@ -29,7 +29,7 @@ Pure Go utilities with **zero external dependencies**, providing commonly used t
 General-purpose type conversion utilities supporting conversions between various Go types.
 
 ```go
-import "github.com/everyday-items/toolkit/lang/conv"
+import "github.com/hexagon-codes/toolkit/lang/conv"
 
 // String conversion
 conv.String(123)        // "123"
@@ -71,19 +71,19 @@ values := conv.MapValues(m)
 High-performance string operations including zero-copy conversions.
 
 ```go
-import "github.com/everyday-items/toolkit/lang/stringx"
+import "github.com/hexagon-codes/toolkit/lang/stringx"
 
 // Zero-copy conversion (uses unsafe, use with care)
 str := stringx.BytesToString([]byte("hello"))
-bytes := stringx.String2Bytes("world")
+bytes := stringx.StringToBytes("world")
 
-// Slice type conversion (uses reflect)
-result := stringx.StringToSlice("1,2,3", ",")
-// result = []int{1, 2, 3}
+// Convert any slice/array to []any (uses reflect)
+result := stringx.StringToSlice([]int{1, 2, 3})
+// result = []any{1, 2, 3}
 ```
 
 **Warning**:
-- `BytesToString` and `String2Bytes` use unsafe pointers
+- `BytesToString` and `StringToBytes` use unsafe pointers
 - Do not modify the converted data
 - Use only in performance-critical paths
 
@@ -92,7 +92,7 @@ result := stringx.StringToSlice("1,2,3", ",")
 Timestamp formatting utilities.
 
 ```go
-import "github.com/everyday-items/toolkit/lang/timex"
+import "github.com/hexagon-codes/toolkit/lang/timex"
 
 // Millisecond timestamp to string
 ms := time.Now().UnixMilli()
@@ -118,7 +118,7 @@ timex.SecFormatWithLayout(ts, "15:04:05")
 Slice operations missing from the Go standard library, implemented with generics for type safety.
 
 ```go
-import "github.com/everyday-items/toolkit/lang/slicex"
+import "github.com/hexagon-codes/toolkit/lang/slicex"
 
 // Contains check
 found := slicex.Contains([]int{1, 2, 3}, 2)  // true
@@ -163,7 +163,7 @@ groups := slicex.GroupBy(users, func(u User) string {
 Generic-enhanced version of the standard `math` package.
 
 ```go
-import "github.com/everyday-items/toolkit/lang/mathx"
+import "github.com/hexagon-codes/toolkit/lang/mathx"
 
 // Generic Min/Max (supports int, float64, string, etc.)
 min := mathx.Min(3, 1, 4, 1, 5)           // 1 (int)
@@ -197,7 +197,7 @@ floor := mathx.Floor(3.14)                // 3.0
 Utility functions for concurrent synchronization, enhancing the standard `sync` package.
 
 ```go
-import "github.com/everyday-items/toolkit/lang/syncx"
+import "github.com/hexagon-codes/toolkit/lang/syncx"
 
 // Singleflight - prevent cache stampede
 sf := syncx.NewSingleflight()
@@ -232,7 +232,7 @@ defer pool.Put(buf)
 ## Installation
 
 ```bash
-go get github.com/everyday-items/toolkit/lang
+go get github.com/hexagon-codes/toolkit/lang
 ```
 
 ## Complete Examples
@@ -244,7 +244,7 @@ package main
 
 import (
     "fmt"
-    "github.com/everyday-items/toolkit/lang/conv"
+    "github.com/hexagon-codes/toolkit/lang/conv"
 )
 
 func main() {
@@ -279,7 +279,7 @@ package main
 import (
     "fmt"
     "time"
-    "github.com/everyday-items/toolkit/lang/timex"
+    "github.com/hexagon-codes/toolkit/lang/timex"
 )
 
 func main() {
@@ -347,7 +347,7 @@ conv.String(User{Name: "Alice"}) // "Alice"
 
 ### unsafe Operations
 
-`stringx.BytesToString()` and `String2Bytes()` use unsafe pointers:
+`stringx.BytesToString()` and `StringToBytes()` use unsafe pointers:
 
 **Advantages**:
 - Zero-copy, extremely high performance
@@ -383,7 +383,7 @@ gconv.String(123)
 gconv.Int("456")
 
 // New code
-import "github.com/everyday-items/toolkit/lang/conv"
+import "github.com/hexagon-codes/toolkit/lang/conv"
 conv.String(123)
 conv.Int("456")
 ```

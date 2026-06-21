@@ -17,7 +17,7 @@ Provides cryptographically secure random number generation based on `crypto/rand
 ### Random Strings
 
 ```go
-import "github.com/everyday-items/toolkit/util/rand"
+import "github.com/hexagon-codes/toolkit/util/rand"
 
 // Generate 16-character random string (letters + digits)
 token := rand.String(16)
@@ -130,6 +130,35 @@ Code(length int) string
 // Token generates an alphanumeric token
 Token(length int) string
 ```
+
+### Error-Returning Safe Variants (Try*)
+
+The functions above **panic** when the underlying entropy source (`crypto/rand`) fails, which suits "a random-number failure is fatal" scenarios. On paths like OAuth state, CSRF tokens, or one-time credentials, where you want to propagate the failure gracefully as an error rather than panic, use the corresponding `Try*` variant.
+
+Each `Try*` function behaves identically to its counterpart; the only difference is that it returns an error instead of panicking on entropy failure. Use `errors.Is(err, rand.ErrInsufficientEntropy)` to detect an entropy-source failure.
+
+```go
+s, err := rand.TryToken(32)
+if err != nil {
+    // e.g. return 5xx or retry, rather than crashing the goroutine
+    return fmt.Errorf("failed to generate token: %w", err)
+}
+```
+
+| Safe Variant | Counterpart |
+|-------------|-------------|
+| `TryString(length)` | `String` |
+| `TryStringFrom(charset, length)` | `StringFrom` |
+| `TryNumericString(length)` | `NumericString` |
+| `TryAlphaString(length)` | `AlphaString` |
+| `TryLowerString(length)` | `LowerString` |
+| `TryUpperString(length)` | `UpperString` |
+| `TryToken(length)` | `Token` |
+| `TryCode(length)` | `Code` |
+| `TryInt(min, max)` | `Int` |
+| `TryInt64(min, max)` | `Int64` |
+| `TryBytes(length)` | `Bytes` |
+| `TryBool()` | `Bool` |
 
 ## Use Cases
 
@@ -306,8 +335,8 @@ BenchmarkBytes           500000       3500 ns/op
    - To include upper bound, use `Int(min, max+1)`
 
 4. **Error Handling**:
-   - Internally ignores `crypto/rand` errors (very rare failures)
-   - Returns a deterministic result on failure (rather than panic)
+   - The plain functions (`String`/`Int`/`Bytes`, etc.) **panic** when `crypto/rand` fails (very rare, usually a system entropy-source issue)
+   - To propagate the failure gracefully as an error instead of panicking, use the corresponding `Try*` safe variant and detect entropy failures with `errors.Is(err, rand.ErrInsufficientEntropy)`
 
 5. **Length Limit**:
    - May be slow for generating very long strings (> 1MB)

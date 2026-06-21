@@ -20,7 +20,7 @@ Redis 分布式缓存，提供 **StableCache**（稳定 key）和 **UnstableCach
 ## 安装
 
 ```bash
-go get github.com/everyday-items/toolkit/cache/redis
+go get github.com/hexagon-codes/toolkit/cache/redis
 go get github.com/redis/go-redis/v9
 ```
 
@@ -36,7 +36,7 @@ import (
     "fmt"
     "time"
 
-    "github.com/everyday-items/toolkit/cache/redis"
+    "github.com/hexagon-codes/toolkit/cache/redis"
     goredis "github.com/redis/go-redis/v9"
 )
 
@@ -575,9 +575,9 @@ cache.InvalidatePattern(ctx, "user:list:*")
 
 ```go
 import (
-    "github.com/everyday-items/toolkit/cache/local"
-    "github.com/everyday-items/toolkit/cache/multi"
-    "github.com/everyday-items/toolkit/cache/redis"
+    "github.com/hexagon-codes/toolkit/cache/local"
+    "github.com/hexagon-codes/toolkit/cache/multi"
+    "github.com/hexagon-codes/toolkit/cache/redis"
 )
 
 // 创建本地缓存

@@ -17,7 +17,7 @@ Provides multiple ID generation schemes: UUID, Snowflake, and NanoID.
 ### UUID
 
 ```go
-import "github.com/everyday-items/toolkit/util/idgen"
+import "github.com/hexagon-codes/toolkit/util/idgen"
 
 // Generate UUID
 id := idgen.UUID()

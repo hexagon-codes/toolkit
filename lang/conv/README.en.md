@@ -20,7 +20,7 @@ Provides comprehensive Go type conversion capabilities, supporting conversions b
 ### Primitive Type Conversion
 
 ```go
-import "github.com/everyday-items/toolkit/lang/conv"
+import "github.com/hexagon-codes/toolkit/lang/conv"
 
 // String conversion
 s := conv.String(123)          // "123"

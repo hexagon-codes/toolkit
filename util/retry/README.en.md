@@ -21,7 +21,7 @@ A general-purpose retry logic implementation supporting multiple backoff strateg
 package main
 
 import (
-    "github.com/everyday-items/toolkit/util/retry"
+    "github.com/hexagon-codes/toolkit/util/retry"
 )
 
 func main() {
@@ -145,6 +145,47 @@ retry.DelayType(retry.ExponentialBackoff)
 | `OnRetry(fn)` | Retry callback function | nil |
 | `RetryIf(fn)` | Retry condition check | Retry on any error |
 | `DelayType(fn)` | Delay strategy | Fixed delay |
+
+## Compatibility Options
+
+The following are purely additive compatibility options. **Default behavior is unchanged**; they take effect only when explicitly enabled, preserving backward compatibility.
+
+### WithUnwrapFinalError / WithReturnLastError
+
+By default, the final error returned when retries are exhausted is `fmt.Errorf("%w: %v", ErrMaxAttemptsReached, lastErr)`, whose error chain only carries `ErrMaxAttemptsReached`, so `errors.Is(err, lastErr)` is always `false`.
+
+Enabling this option switches the final error to multi-`%w` wrapping, so the original last error also enters the error chain and can be unwrapped:
+
+```go
+err := retry.Do(
+    func() error { return apiCall() },
+    retry.Attempts(3),
+    retry.WithUnwrapFinalError(), // alias: retry.WithReturnLastError()
+)
+
+// Both hold:
+errors.Is(err, retry.ErrMaxAttemptsReached) // true (sentinel preserved)
+errors.Is(err, ErrUpstream)                 // true (original error unwrappable)
+```
+
+`WithReturnLastError()` is a semantic alias for `WithUnwrapFinalError()` with identical effect.
+
+> Note: this option only affects the error returned on the "retries exhausted" path. Errors returned early because `RetryIf` deemed them non-retryable, and `ctx.Err()` returned on context cancellation/timeout, already return the original error directly and are unaffected.
+
+### WithOnRetryZeroBased
+
+By default the `OnRetry` callback uses one-based counting (first retry `n == 1`). Enabling this option switches to zero-based counting (first retry `n == 0`), to align with the "number of retries already occurred" semantics used by some downstream frameworks.
+
+```go
+retry.Do(fn,
+    retry.WithOnRetryZeroBased(),
+    retry.OnRetry(func(n int, err error) {
+        // n == 0 on the first retry
+    }),
+)
+```
+
+> This option only shifts the count value passed to the callback; it does not affect invocation timing, invocation count, or backoff/jitter behavior.
 
 ## Use Cases
 

@@ -20,7 +20,7 @@
 package main
 
 import (
-    "github.com/everyday-items/toolkit/lang/stringx"
+    "github.com/hexagon-codes/toolkit/lang/stringx"
 )
 
 func main() {

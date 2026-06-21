@@ -4,7 +4,7 @@
 
 一个生产级 Go 通用工具包，采用领域驱动设计理念。
 
-[![Go Version](https://img.shields.io/badge/Go-%3E%3D%201.22-blue)](https://golang.org/)
+[![Go Version](https://img.shields.io/badge/Go-%3E%3D%201.25-blue)](https://golang.org/)
 
 ## 特性
 
@@ -13,7 +13,7 @@
 ✅ **接口驱动** - 易于扩展和测试
 ✅ **零拷贝优化** - 高性能字符串/字节操作
 ✅ **完整监控** - Prometheus 指标支持
-✅ **泛型支持** - Go 1.22+ 泛型实现类型安全
+✅ **泛型支持** - Go 泛型实现类型安全
 ✅ **安全优先** - SSRF 防护（IPv6）、HMAC 恒定时间比较、AES-GCM 推荐
 ✅ **AI 生态** - OpenAI/Claude/Gemini 等 14+ 平台预设客户端与流式响应处理
 ✅ **多层缓存** - Local → Redis → DB 三层防护（防击穿/穿透/雪崩）
@@ -23,7 +23,7 @@
 ## 快速开始
 
 ```bash
-go get github.com/hexagon-codes/toolkit
+go get github.com/hexagon-codes/toolkit@v0.1.0
 ```
 
 ### 类型转换
@@ -1078,6 +1078,8 @@ s.All(func(n int) bool { return n > 0 })
 
 ```
 toolkit/
+├── blobstore/          # Blob 存储（本地落盘 + S3/R2 后端 seam + 流式 + TTL）
+│
 ├── event/              # 事件总线（发布-订阅，线程安全）
 │
 ├── cache/              # 缓存
@@ -1127,7 +1129,11 @@ toolkit/
 ├── net/                # 网络工具
 │   ├── httpx/         # HTTP 客户端（SSRF 防护/连接池/重试/限流/AI 预设）
 │   ├── ip/            # IP 工具
-│   └── sse/           # Server-Sent Events
+│   ├── sse/           # Server-Sent Events
+│   └── ssrf/          # URL 级 SSRF 校验
+│
+├── os/                 # 操作系统能力
+│   └── sandbox/       # 命令沙箱（网络策略/代理）
 │
 ├── util/               # 工具组件
 │   ├── circuit/       # 熔断器（AI 预设/多实例管理）
@@ -1136,12 +1142,13 @@ toolkit/
 │   ├── env/           # 环境变量
 │   ├── file/          # 文件操作
 │   ├── hash/          # 哈希（MD5/SHA/Bcrypt）
-│   ├── idgen/         # ID 生成（Snowflake）
+│   ├── idgen/         # ID 生成（Snowflake/NanoID）
 │   ├── json/          # JSON 辅助
+│   ├── lease/         # 分布式互斥租约（FencingToken）
 │   ├── logger/        # 日志（基于 slog）
 │   ├── pagination/    # 分页
 │   ├── poolx/         # 高性能协程池
-│   ├── rand/          # 随机数
+│   ├── rand/          # 随机数（含返回 error 的 Try* 安全变体）
 │   ├── rate/          # 限流器
 │   ├── reflectx/      # 反射工具（DeepCopy/Clone/StructToMap）
 │   ├── retry/         # 重试机制
@@ -1254,15 +1261,19 @@ crypto (加密) → util (工具) → collection (数据结构) → lang (零依
 
 ## 依赖
 
-核心依赖：
+核心依赖（按需引入，仅相关子包才会拉取对应依赖）：
 ```
-github.com/hibiken/asynq           # 任务队列
-github.com/redis/go-redis/v9       # Redis 客户端
-github.com/prometheus/client_golang # 监控指标
-golang.org/x/sync                  # singleflight
-golang.org/x/crypto                # 加密扩展
-github.com/bytedance/gopkg         # goroutine 池
-github.com/google/uuid             # UUID 生成
+github.com/hibiken/asynq                  # 任务队列（infra/queue/asynq）
+github.com/redis/go-redis/v9              # Redis 客户端（cache/redis、infra/db/redis）
+github.com/go-sql-driver/mysql            # MySQL 驱动（infra/db/mysql）
+go.mongodb.org/mongo-driver               # MongoDB 驱动（infra/db/mongodb）
+github.com/ClickHouse/clickhouse-go/v2    # ClickHouse 驱动（infra/db/clickhouse）
+github.com/elastic/go-elasticsearch/v8    # Elasticsearch 客户端（infra/db/elasticsearch）
+github.com/prometheus/client_golang       # 监控指标（infra/prometheus）
+golang.org/x/sync                         # singleflight
+golang.org/x/crypto                       # 加密扩展
+github.com/bytedance/gopkg                # goroutine 池（util/poolx）
+github.com/google/uuid                    # UUID 生成
 ```
 
 **注意**：`lang/` 和 `collection/` 包零外部依赖，只使用 Go 标准库。

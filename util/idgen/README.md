@@ -17,7 +17,7 @@
 ### UUID
 
 ```go
-import "github.com/everyday-items/toolkit/util/idgen"
+import "github.com/hexagon-codes/toolkit/util/idgen"
 
 // 生成 UUID
 id := idgen.UUID()

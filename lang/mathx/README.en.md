@@ -19,7 +19,7 @@ Provides generic versions of mathematical functions, supporting all numeric type
 ### Basic Operations
 
 ```go
-import "github.com/everyday-items/toolkit/lang/mathx"
+import "github.com/hexagon-codes/toolkit/lang/mathx"
 
 // Min/Max - supports variadic arguments
 min := mathx.Min(3, 1, 4, 1, 5)           // 1 (int)
@@ -145,7 +145,7 @@ import "math"
 min := math.Min(3.14, 2.71)  // only works with float64
 
 // mathx supports all types
-import "github.com/everyday-items/toolkit/lang/mathx"
+import "github.com/hexagon-codes/toolkit/lang/mathx"
 min := mathx.Min(3, 1, 4)                  // int
 min := mathx.Min(3.14, 2.71, 1.41)        // float64
 min := mathx.Min("c", "a", "b")           // string
@@ -337,7 +337,7 @@ min3 := math.Min(math.Min(a, b), c)
 ### mathx Package
 
 ```go
-import "github.com/everyday-items/toolkit/lang/mathx"
+import "github.com/hexagon-codes/toolkit/lang/mathx"
 
 // Supports generics
 min := mathx.Min(3, 1, 4)           // int
@@ -423,7 +423,7 @@ RoundTo:             15 ns/op
    min := math.Min(a, b)  // slightly faster than generic version
 
    // General scenario (recommended)
-   import "github.com/everyday-items/toolkit/lang/mathx"
+   import "github.com/hexagon-codes/toolkit/lang/mathx"
    min := mathx.Min(a, b)  // type-safe + better readability
    ```
 

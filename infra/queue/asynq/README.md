@@ -18,7 +18,7 @@
 
 ### 必需实现的接口
 
-1. **AsynqConfig** - 配置接口
+1. **ConfigProvider** - 配置接口
    - `GetRedisAddrs() []string` - Redis 地址列表
    - `GetRedisPassword() string` - Redis 密码
    - `GetRedisUsername() string` - Redis 用户名（Redis 6.0+ ACL）
@@ -27,7 +27,7 @@
    - `IsPollingEnabled() bool` - 是否启用轮询
    - `IsRedisEnabled() bool` - 是否启用 Redis
 
-2. **AsynqLogger** - 日志接口
+2. **Logger** - 日志接口
    - `Log(msg string)` - 普通日志
    - `LogSkip(skip int, msg string)` - 带调用栈跳过的日志
    - `Error(msg string)` - 错误日志
@@ -38,10 +38,10 @@
 #### 方案 1：使用默认实现（快速开始）
 
 ```go
-import "github.com/everyday-items/toolkit/infra/queue/asynq"
+import "github.com/hexagon-codes/toolkit/infra/queue/asynq"
 
 // 使用默认配置
-config := &asynq.DefaultAsynqConfig{
+config := &asynq.DefaultConfigProvider{
     RedisAddrs:     []string{"localhost:6379"},
     RedisPassword:  "",
     Concurrency:    10,

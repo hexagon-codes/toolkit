@@ -18,7 +18,7 @@
 
 ### Required Interfaces
 
-1. **AsynqConfig** - Configuration interface
+1. **ConfigProvider** - Configuration interface
    - `GetRedisAddrs() []string` - Redis address list
    - `GetRedisPassword() string` - Redis password
    - `GetRedisUsername() string` - Redis username (Redis 6.0+ ACL)
@@ -27,7 +27,7 @@
    - `IsPollingEnabled() bool` - Whether polling is enabled
    - `IsRedisEnabled() bool` - Whether Redis is enabled
 
-2. **AsynqLogger** - Logger interface
+2. **Logger** - Logger interface
    - `Log(msg string)` - Normal log
    - `LogSkip(skip int, msg string)` - Log with call stack skip
    - `Error(msg string)` - Error log
@@ -38,10 +38,10 @@
 #### Option 1: Use Default Implementation (Quick Start)
 
 ```go
-import "github.com/everyday-items/toolkit/infra/queue/asynq"
+import "github.com/hexagon-codes/toolkit/infra/queue/asynq"
 
 // Use default configuration
-config := &asynq.DefaultAsynqConfig{
+config := &asynq.DefaultConfigProvider{
     RedisAddrs:     []string{"localhost:6379"},
     RedisPassword:  "",
     Concurrency:    10,

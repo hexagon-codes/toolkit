@@ -18,7 +18,7 @@
 ### Singleflight - 防缓存击穿
 
 ```go
-import "github.com/everyday-items/toolkit/lang/syncx"
+import "github.com/hexagon-codes/toolkit/lang/syncx"
 
 // 创建 Singleflight 实例
 sf := syncx.NewSingleflight()
@@ -38,7 +38,7 @@ sf.Forget("user:123")
 ```go
 import (
     "bytes"
-    "github.com/everyday-items/toolkit/lang/syncx"
+    "github.com/hexagon-codes/toolkit/lang/syncx"
 )
 
 // 创建对象池
@@ -64,7 +64,7 @@ pool.Put(buf)
 ```go
 import (
     "bytes"
-    "github.com/everyday-items/toolkit/lang/syncx"
+    "github.com/hexagon-codes/toolkit/lang/syncx"
 )
 
 // 创建类型安全的对象池（无需类型断言）

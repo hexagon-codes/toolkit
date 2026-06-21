@@ -7,7 +7,7 @@
 ### 1. Installation
 
 ```bash
-go get github.com/everyday-items/toolkit/infra/queue/asynq
+go get github.com/hexagon-codes/toolkit/infra/queue/asynq
 ```
 
 ### 2. Core Concepts
@@ -25,7 +25,7 @@ go get github.com/everyday-items/toolkit/infra/queue/asynq
 Before use, configure dependency injection:
 
 ```go
-import "github.com/everyday-items/toolkit/infra/queue/asynq"
+import "github.com/hexagon-codes/toolkit/infra/queue/asynq"
 
 // 1. Implement the Logger interface
 type MyLogger struct{}
@@ -131,7 +131,7 @@ func (w *EmailWorker) ProcessTask(ctx context.Context, t *asynq.Task) (err error
 **Option 1: Use TaskBuilder (recommended)**
 
 ```go
-import "github.com/everyday-items/toolkit/infra/queue/asynq"
+import "github.com/hexagon-codes/toolkit/infra/queue/asynq"
 
 // Simple task
 task := asynq.NewTask("email:send").

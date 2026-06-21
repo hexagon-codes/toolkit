@@ -17,7 +17,7 @@
 ### JSON 序列化
 
 ```go
-import "github.com/everyday-items/toolkit/util/json"
+import "github.com/hexagon-codes/toolkit/util/json"
 
 type User struct {
     Name string `json:"name"`

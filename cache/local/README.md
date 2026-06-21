@@ -17,7 +17,7 @@
 ## 安装
 
 ```bash
-go get github.com/everyday-items/toolkit/cache/local
+go get github.com/hexagon-codes/toolkit/cache/local
 ```
 
 ## 快速开始
@@ -30,7 +30,7 @@ import (
     "fmt"
     "time"
 
-    "github.com/everyday-items/toolkit/cache/local"
+    "github.com/hexagon-codes/toolkit/cache/local"
 )
 
 type User struct {
@@ -117,6 +117,26 @@ cache := local.NewCacheWithCleanup(1000, -1)
 defer cache.Stop()
 ```
 
+### NewCacheNoCleanup
+
+创建本地缓存，且**不启动后台定期清理 goroutine**。
+
+```go
+func NewCacheNoCleanup(maxEntries int, opts ...Option) *Cache
+```
+
+**与定期清理构造的区别**：
+- 过期条目只在被再次读取、或因容量超限触发 LRU 淘汰时才被回收；在被读取前会一直占用 map 槽位（但已过期条目读取必然返回未命中）。
+- 没有后台 goroutine，因此即使不调用 `Stop`/`Close` 也不会泄漏 goroutine。
+- 仍可安全调用 `Stop()`/`Close()`（幂等空操作），便于与统一的关闭流程兼容。
+
+**示例**：
+
+```go
+// 适用于短生命周期或测试场景：无后台 goroutine
+cache := local.NewCacheNoCleanup(1000)
+```
+
 ### GetOrLoad
 
 获取缓存数据，未命中时调用 loader 加载。
@@ -197,6 +217,23 @@ func (c *Cache) Stop()
 ```go
 cache := local.NewCache(1000)
 defer cache.Stop()
+```
+
+### Close
+
+`Stop` 的同名别名，停止后台清理并释放相关资源。始终返回 `nil`，与 `Stop` 一样幂等，多次调用安全。
+
+```go
+func (c *Cache) Close() error
+```
+
+提供该方法是为契合 Go 生态中"资源持有者实现 `Close() error`"的惯例（形似 `io.Closer`），便于用统一的关闭流程（如 `defer c.Close()`）管理缓存生命周期。
+
+**示例**：
+
+```go
+cache := local.NewCache(1000)
+defer cache.Close()
 ```
 
 ### Len
@@ -386,9 +423,9 @@ cache := local.NewCache(1000,
 
 ```go
 import (
-    "github.com/everyday-items/toolkit/cache/local"
-    "github.com/everyday-items/toolkit/cache/multi"
-    "github.com/everyday-items/toolkit/cache/redis"
+    "github.com/hexagon-codes/toolkit/cache/local"
+    "github.com/hexagon-codes/toolkit/cache/multi"
+    "github.com/hexagon-codes/toolkit/cache/redis"
 )
 
 // 创建本地缓存

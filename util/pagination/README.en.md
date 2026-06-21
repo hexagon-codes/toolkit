@@ -18,7 +18,7 @@ A simple and easy-to-use pagination calculation tool that provides complete pagi
 ### Basic Usage
 
 ```go
-import "github.com/everyday-items/toolkit/util/pagination"
+import "github.com/hexagon-codes/toolkit/util/pagination"
 
 // Create pagination (page 1, 10 items per page, 95 total records)
 p := pagination.New(1, 10, 95)

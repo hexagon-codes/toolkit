@@ -21,7 +21,7 @@
 import (
     "fmt"
     "time"
-    "github.com/everyday-items/toolkit/lang/timex"
+    "github.com/hexagon-codes/toolkit/lang/timex"
 )
 
 // 毫秒时间戳格式化
@@ -248,7 +248,7 @@ Go 的时间格式使用**参考时间** `Mon Jan 2 15:04:05 MST 2006`，这是�
 import (
     "log"
     "time"
-    "github.com/everyday-items/toolkit/lang/timex"
+    "github.com/hexagon-codes/toolkit/lang/timex"
 )
 
 func LogEvent(event string) {
@@ -264,7 +264,7 @@ func LogEvent(event string) {
 ```go
 import (
     "time"
-    "github.com/everyday-items/toolkit/lang/timex"
+    "github.com/hexagon-codes/toolkit/lang/timex"
 )
 
 type User struct {
@@ -292,7 +292,7 @@ func CreateUser(name string) *User {
 import (
     "fmt"
     "time"
-    "github.com/everyday-items/toolkit/lang/timex"
+    "github.com/hexagon-codes/toolkit/lang/timex"
 )
 
 func GenerateBackupFilename() string {
@@ -310,7 +310,7 @@ func GenerateBackupFilename() string {
 import (
     "encoding/json"
     "time"
-    "github.com/everyday-items/toolkit/lang/timex"
+    "github.com/hexagon-codes/toolkit/lang/timex"
 )
 
 type APIResponse struct {
@@ -344,7 +344,7 @@ func NewAPIResponse(code int, msg string, data any) *APIResponse {
 ```go
 import (
     "time"
-    "github.com/everyday-items/toolkit/lang/timex"
+    "github.com/hexagon-codes/toolkit/lang/timex"
 )
 
 func ScheduleTask(interval time.Duration) {
@@ -365,7 +365,7 @@ func ScheduleTask(interval time.Duration) {
 import (
     "fmt"
     "time"
-    "github.com/everyday-items/toolkit/lang/timex"
+    "github.com/hexagon-codes/toolkit/lang/timex"
 )
 
 type DailyReport struct {
@@ -393,7 +393,7 @@ func GenerateDailyReport() *DailyReport {
 import (
     "fmt"
     "time"
-    "github.com/everyday-items/toolkit/lang/timex"
+    "github.com/hexagon-codes/toolkit/lang/timex"
 )
 
 type Alert struct {
@@ -419,7 +419,7 @@ func CreateAlert(severity, message string) *Alert {
 ```go
 import (
     "time"
-    "github.com/everyday-items/toolkit/lang/timex"
+    "github.com/hexagon-codes/toolkit/lang/timex"
 )
 
 func MeasurePerformance(funcName string, fn func()) {
@@ -502,7 +502,7 @@ formatted := t.Format("2006-01-02 15:04:05")  // 步骤 2：格式化
 ### timex 简化方式
 
 ```go
-import "github.com/everyday-items/toolkit/lang/timex"
+import "github.com/hexagon-codes/toolkit/lang/timex"
 
 ms := time.Now().UnixMilli()
 formatted := timex.MsecFormat(ms)  // 1 步完成
@@ -530,7 +530,7 @@ formatted := timex.MsecFormat(ms)  // 1 步完成
 ```go
 import (
     "time"
-    "github.com/everyday-items/toolkit/lang/timex"
+    "github.com/hexagon-codes/toolkit/lang/timex"
 )
 
 func GetNextDayFormatted() string {
@@ -623,7 +623,7 @@ package main
 import (
     "fmt"
     "time"
-    "github.com/everyday-items/toolkit/lang/timex"
+    "github.com/hexagon-codes/toolkit/lang/timex"
 )
 
 func main() {

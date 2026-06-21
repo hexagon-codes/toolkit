@@ -4,6 +4,8 @@
 
 提供常用切片操作的泛型函数，简化切片处理。
 
+> **提示**：本包与 [`lang/slicex`](../../lang/slicex/) 功能高度重叠，`lang/slicex` 是更完整的超集（函数更全）。新代码建议优先使用 `lang/slicex`。
+
 ## 特性
 
 - ✅ 泛型支持（Go 1.18+）
@@ -19,7 +21,7 @@
 ### 基本操作
 
 ```go
-import "github.com/everyday-items/toolkit/util/slice"
+import "github.com/hexagon-codes/toolkit/util/slice"
 
 // 去重
 nums := []int{1, 2, 2, 3, 3, 3}

@@ -18,7 +18,7 @@
 ### 基本用法
 
 ```go
-import "github.com/everyday-items/toolkit/util/pagination"
+import "github.com/hexagon-codes/toolkit/util/pagination"
 
 // 创建分页（第1页，每页10条，总共95条记录）
 p := pagination.New(1, 10, 95)

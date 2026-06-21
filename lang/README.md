@@ -29,7 +29,7 @@
 通用类型转换工具，支持各种 Go 类型之间的转换。
 
 ```go
-import "github.com/everyday-items/toolkit/lang/conv"
+import "github.com/hexagon-codes/toolkit/lang/conv"
 
 // 字符串转换
 conv.String(123)        // "123"
@@ -71,19 +71,19 @@ values := conv.MapValues(m)
 高性能字符串操作，包括零拷贝转换。
 
 ```go
-import "github.com/everyday-items/toolkit/lang/stringx"
+import "github.com/hexagon-codes/toolkit/lang/stringx"
 
 // 零拷贝转换（使用 unsafe，需谨慎）
 str := stringx.BytesToString([]byte("hello"))
-bytes := stringx.String2Bytes("world")
+bytes := stringx.StringToBytes("world")
 
-// 字符串切片转换（使用 reflect）
-result := stringx.StringToSlice("1,2,3", ",")
-// result = []int{1, 2, 3}
+// 任意切片/数组转 []any（使用 reflect）
+result := stringx.StringToSlice([]int{1, 2, 3})
+// result = []any{1, 2, 3}
 ```
 
 **警告**：
-- `BytesToString` 和 `String2Bytes` 使用 unsafe 指针
+- `BytesToString` 和 `StringToBytes` 使用 unsafe 指针
 - 不要修改转换后的数据
 - 仅在性能关键路径使用
 
@@ -92,7 +92,7 @@ result := stringx.StringToSlice("1,2,3", ",")
 时间戳格式化工具。
 
 ```go
-import "github.com/everyday-items/toolkit/lang/timex"
+import "github.com/hexagon-codes/toolkit/lang/timex"
 
 // 毫秒时间戳转字符串
 ms := time.Now().UnixMilli()
@@ -118,7 +118,7 @@ timex.SecFormatWithLayout(ts, "15:04:05")
 Go 标准库缺失的切片操作，使用泛型实现类型安全。
 
 ```go
-import "github.com/everyday-items/toolkit/lang/slicex"
+import "github.com/hexagon-codes/toolkit/lang/slicex"
 
 // 包含检查
 found := slicex.Contains([]int{1, 2, 3}, 2)  // true
@@ -163,7 +163,7 @@ groups := slicex.GroupBy(users, func(u User) string {
 标准库 math 包的泛型增强版本。
 
 ```go
-import "github.com/everyday-items/toolkit/lang/mathx"
+import "github.com/hexagon-codes/toolkit/lang/mathx"
 
 // 泛型 Min/Max（支持 int, float64, string 等）
 min := mathx.Min(3, 1, 4, 1, 5)           // 1 (int)
@@ -197,7 +197,7 @@ floor := mathx.Floor(3.14)                // 3.0
 并发同步的工具函数，对标准库 sync 的增强。
 
 ```go
-import "github.com/everyday-items/toolkit/lang/syncx"
+import "github.com/hexagon-codes/toolkit/lang/syncx"
 
 // Singleflight - 防缓存击穿
 sf := syncx.NewSingleflight()
@@ -232,7 +232,7 @@ defer pool.Put(buf)
 ## 安装
 
 ```bash
-go get github.com/everyday-items/toolkit/lang
+go get github.com/hexagon-codes/toolkit/lang
 ```
 
 ## 完整示例
@@ -244,7 +244,7 @@ package main
 
 import (
     "fmt"
-    "github.com/everyday-items/toolkit/lang/conv"
+    "github.com/hexagon-codes/toolkit/lang/conv"
 )
 
 func main() {
@@ -279,7 +279,7 @@ package main
 import (
     "fmt"
     "time"
-    "github.com/everyday-items/toolkit/lang/timex"
+    "github.com/hexagon-codes/toolkit/lang/timex"
 )
 
 func main() {
@@ -347,7 +347,7 @@ conv.String(User{Name: "Alice"}) // "Alice"
 
 ### unsafe 操作
 
-`stringx.BytesToString()` 和 `String2Bytes()` 使用 unsafe 指针：
+`stringx.BytesToString()` 和 `StringToBytes()` 使用 unsafe 指针：
 
 **优点**：
 - 零拷贝，性能极高
@@ -383,7 +383,7 @@ gconv.String(123)
 gconv.Int("456")
 
 // 新代码
-import "github.com/everyday-items/toolkit/lang/conv"
+import "github.com/hexagon-codes/toolkit/lang/conv"
 conv.String(123)
 conv.Int("456")
 ```

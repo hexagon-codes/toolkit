@@ -24,9 +24,9 @@ import (
     "context"
     "time"
 
-    "github.com/everyday-items/toolkit/cache/local"
-    "github.com/everyday-items/toolkit/cache/redis"
-    "github.com/everyday-items/toolkit/cache/multi"
+    "github.com/hexagon-codes/toolkit/cache/local"
+    "github.com/hexagon-codes/toolkit/cache/redis"
+    "github.com/hexagon-codes/toolkit/cache/multi"
     goredis "github.com/redis/go-redis/v9"
 )
 

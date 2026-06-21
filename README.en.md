@@ -4,7 +4,7 @@
 
 A production-grade Go general-purpose toolkit with domain-driven design principles.
 
-[![Go Version](https://img.shields.io/badge/Go-%3E%3D%201.22-blue)](https://golang.org/)
+[![Go Version](https://img.shields.io/badge/Go-%3E%3D%201.25-blue)](https://golang.org/)
 
 ## Features
 
@@ -13,7 +13,7 @@ A production-grade Go general-purpose toolkit with domain-driven design principl
 ✅ **Interface-Driven** - Easy to extend and test
 ✅ **Zero-Copy Optimization** - High-performance string/byte operations
 ✅ **Full Observability** - Prometheus metrics support
-✅ **Generics Support** - Type-safe implementations using Go 1.22+ generics
+✅ **Generics Support** - Type-safe implementations using Go generics
 ✅ **Security-First** - SSRF protection (IPv6), HMAC constant-time comparison, AES-GCM recommended
 ✅ **AI Ecosystem** - Preset clients for 14+ platforms (OpenAI/Claude/Gemini) with streaming response handling
 ✅ **Multi-Layer Cache** - Local → Redis → DB three-layer protection (cache breakdown/penetration/avalanche)
@@ -23,7 +23,7 @@ A production-grade Go general-purpose toolkit with domain-driven design principl
 ## Quick Start
 
 ```bash
-go get github.com/hexagon-codes/toolkit
+go get github.com/hexagon-codes/toolkit@v0.1.0
 ```
 
 ### Type Conversion
@@ -1078,6 +1078,8 @@ s.All(func(n int) bool { return n > 0 })
 
 ```
 toolkit/
+├── blobstore/          # Blob storage (local disk + S3/R2 backend seam + streaming + TTL)
+│
 ├── event/              # Event bus (pub/sub, thread-safe)
 │
 ├── cache/              # Caching
@@ -1127,7 +1129,11 @@ toolkit/
 ├── net/                # Network utilities
 │   ├── httpx/         # HTTP client (SSRF protection/connection pool/retry/rate limiting/AI presets)
 │   ├── ip/            # IP utilities
-│   └── sse/           # Server-Sent Events
+│   ├── sse/           # Server-Sent Events
+│   └── ssrf/          # URL-level SSRF validation
+│
+├── os/                 # Operating system capabilities
+│   └── sandbox/       # Command sandbox (network policy/proxy)
 │
 ├── util/               # Utility components
 │   ├── circuit/       # Circuit breaker (AI presets/multi-instance management)
@@ -1136,12 +1142,13 @@ toolkit/
 │   ├── env/           # Environment variables
 │   ├── file/          # File operations
 │   ├── hash/          # Hashing (MD5/SHA/Bcrypt)
-│   ├── idgen/         # ID generation (Snowflake)
+│   ├── idgen/         # ID generation (Snowflake/NanoID)
 │   ├── json/          # JSON helpers
+│   ├── lease/         # Distributed mutex lease (FencingToken)
 │   ├── logger/        # Logging (based on slog)
 │   ├── pagination/    # Pagination
 │   ├── poolx/         # High-performance goroutine pool
-│   ├── rand/          # Random numbers
+│   ├── rand/          # Random numbers (incl. error-returning Try* safe variants)
 │   ├── rate/          # Rate limiter
 │   ├── reflectx/      # Reflection utilities (DeepCopy/Clone/StructToMap)
 │   ├── retry/         # Retry mechanism
@@ -1254,15 +1261,19 @@ All collection and utility functions prefer generic implementations for type saf
 
 ## Dependencies
 
-Core dependencies:
+Core dependencies (pulled in on demand — only the relevant sub-package brings its dependency):
 ```
-github.com/hibiken/asynq           # task queue
-github.com/redis/go-redis/v9       # Redis client
-github.com/prometheus/client_golang # metrics
-golang.org/x/sync                  # singleflight
-golang.org/x/crypto                # crypto extensions
-github.com/bytedance/gopkg         # goroutine pool
-github.com/google/uuid             # UUID generation
+github.com/hibiken/asynq                  # task queue (infra/queue/asynq)
+github.com/redis/go-redis/v9              # Redis client (cache/redis, infra/db/redis)
+github.com/go-sql-driver/mysql            # MySQL driver (infra/db/mysql)
+go.mongodb.org/mongo-driver               # MongoDB driver (infra/db/mongodb)
+github.com/ClickHouse/clickhouse-go/v2    # ClickHouse driver (infra/db/clickhouse)
+github.com/elastic/go-elasticsearch/v8    # Elasticsearch client (infra/db/elasticsearch)
+github.com/prometheus/client_golang       # metrics (infra/prometheus)
+golang.org/x/sync                         # singleflight
+golang.org/x/crypto                       # crypto extensions
+github.com/bytedance/gopkg                # goroutine pool (util/poolx)
+github.com/google/uuid                    # UUID generation
 ```
 
 **Note**: `lang/` and `collection/` packages have zero external dependencies and use only the Go standard library.

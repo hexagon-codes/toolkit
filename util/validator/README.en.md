@@ -20,7 +20,7 @@ Provides comprehensive data validation functionality supporting common format va
 ### Format Validation
 
 ```go
-import "github.com/everyday-items/toolkit/util/validator"
+import "github.com/hexagon-codes/toolkit/util/validator"
 
 // Email validation
 valid := validator.Email("user@example.com")  // true
