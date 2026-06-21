@@ -70,8 +70,8 @@ func Int64(any any) int64 {
 		if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
 			return 0
 		}
-		// 检查溢出
-		if value > math.MaxInt64 || value < math.MinInt64 {
+		// 检查溢出：int64 的有效范围为 [-2^63, 2^63)
+		if float64(value) >= maxInt64AsFloat || float64(value) < minInt64AsFloat {
 			return 0
 		}
 		return int64(value)
@@ -80,8 +80,8 @@ func Int64(any any) int64 {
 		if math.IsNaN(value) || math.IsInf(value, 0) {
 			return 0
 		}
-		// 检查溢出
-		if value > math.MaxInt64 || value < math.MinInt64 {
+		// 检查溢出：int64 的有效范围为 [-2^63, 2^63)
+		if value >= maxInt64AsFloat || value < minInt64AsFloat {
 			return 0
 		}
 		return int64(value)
@@ -102,6 +102,14 @@ func Int64(any any) int64 {
 		return v
 	}
 }
+
+// float 边界常量。math.MaxInt64 转 float64 会向上取整为 2^63，
+// 直接用它做上界比较会漏判，故显式使用可精确表示的 2^63 / -2^63 / 2^64。
+const (
+	maxInt64AsFloat  = 9223372036854775808.0  // 2^63，int64 上界（开区间，>= 视为溢出）
+	minInt64AsFloat  = -9223372036854775808.0 // -2^63，int64 下界（闭区间）
+	maxUint64AsFloat = 18446744073709551616.0 // 2^64，uint64 上界（开区间，>= 视为溢出）
+)
 
 // TryInt64 将任意类型转换为 int64，返回是否成功
 //
@@ -148,8 +156,8 @@ func TryInt64(any any) (int64, bool) {
 		if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
 			return 0, false
 		}
-		// 检查溢出
-		if value > math.MaxInt64 || value < math.MinInt64 {
+		// 检查溢出：int64 的有效范围为 [-2^63, 2^63)
+		if float64(value) >= maxInt64AsFloat || float64(value) < minInt64AsFloat {
 			return 0, false
 		}
 		return int64(value), true
@@ -158,8 +166,8 @@ func TryInt64(any any) (int64, bool) {
 		if math.IsNaN(value) || math.IsInf(value, 0) {
 			return 0, false
 		}
-		// 检查溢出
-		if value > math.MaxInt64 || value < math.MinInt64 {
+		// 检查溢出：int64 的有效范围为 [-2^63, 2^63)
+		if value >= maxInt64AsFloat || value < minInt64AsFloat {
 			return 0, false
 		}
 		return int64(value), true
@@ -253,7 +261,8 @@ func Uint64(any any) uint64 {
 		if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
 			return 0
 		}
-		if value < 0 {
+		// 检查范围：uint64 的有效范围为 [0, 2^64)
+		if value < 0 || float64(value) >= maxUint64AsFloat {
 			return 0
 		}
 		return uint64(value)
@@ -262,7 +271,8 @@ func Uint64(any any) uint64 {
 		if math.IsNaN(value) || math.IsInf(value, 0) {
 			return 0
 		}
-		if value < 0 {
+		// 检查范围：uint64 的有效范围为 [0, 2^64)
+		if value < 0 || value >= maxUint64AsFloat {
 			return 0
 		}
 		return uint64(value)

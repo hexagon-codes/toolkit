@@ -106,6 +106,7 @@ type LeakyBucket struct {
 // NewLeakyBucket 创建漏桶限流器
 // capacity: 桶容量
 // rate: 漏水速率（例如：100ms 表示每100ms漏出一滴水）
+// 当 rate <= 0 时不进行限流，每次请求都放行
 func NewLeakyBucket(capacity int, rate time.Duration) *LeakyBucket {
 	return &LeakyBucket{
 		capacity:     capacity,
@@ -158,6 +159,14 @@ func (lb *LeakyBucket) Wait() time.Duration {
 // leak 漏水
 func (lb *LeakyBucket) leak() {
 	now := time.Now()
+
+	// 速率非正时不限流：每次都把桶完全漏空
+	if lb.rate <= 0 {
+		lb.water = 0
+		lb.lastLeakTime = now
+		return
+	}
+
 	elapsed := now.Sub(lb.lastLeakTime)
 
 	// 计算漏出的水量
@@ -297,7 +306,8 @@ func (sw *SlidingWindow) Record() {
 	if len(sw.requests) >= maxSize {
 		// 移除最旧的一半记录
 		removeCount := len(sw.requests) / 2
-		newRequests := make([]time.Time, len(sw.requests)-removeCount, sw.capacity)
+		keep := len(sw.requests) - removeCount
+		newRequests := make([]time.Time, keep, max(keep, sw.capacity))
 		copy(newRequests, sw.requests[removeCount:])
 		sw.requests = newRequests
 	}

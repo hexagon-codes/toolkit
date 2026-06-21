@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"hash"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -265,13 +266,10 @@ func NewAPISigner(appKey, appSecret string) *APISigner {
 }
 
 // Sign 签名请求参数
-// 签名算法：HMAC-SHA256(sortedParams + timestamp + nonce, appSecret)
+// 签名算法：HMAC-SHA256(canonicalString, appSecret)
+// 规范化字符串对每个字段做长度前缀编码，确保不同请求不会拼接出相同的签名串。
 func (s *APISigner) Sign(params map[string]string, timestamp int64, nonce string) string {
-	// 按 key 排序拼接参数
-	sortedParams := sortAndJoinParams(params)
-
-	// 拼接签名字符串
-	signStr := sortedParams + formatInt64(timestamp) + nonce
+	signStr := canonicalSignString(params, timestamp, nonce)
 
 	// 计算签名
 	return HMACSHA256Hex([]byte(signStr), []byte(s.appSecret))
@@ -333,6 +331,33 @@ func (s *APISigner) VerifyWithNonceCheck(params map[string]string, timestamp int
 	// 检查 nonce 唯一性
 	expireAt := timestamp + maxAge
 	return nonceChecker.Check(nonce, expireAt)
+}
+
+// canonicalSignString 构造无歧义的签名串。
+// 每个字段（参数 key、参数 value、timestamp、nonce）都带长度前缀，
+// 因此任何字段的内容都无法越过边界与相邻字段拼接成相同的串，
+// 不同请求一定产生不同的签名串。
+func canonicalSignString(params map[string]string, timestamp int64, nonce string) string {
+	keys := make([]string, 0, len(params))
+	for k := range params {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var b strings.Builder
+	writeField := func(s string) {
+		b.WriteString(strconv.Itoa(len(s)))
+		b.WriteByte(':')
+		b.WriteString(s)
+	}
+	for _, k := range keys {
+		writeField(k)
+		writeField(params[k])
+	}
+	writeField(formatInt64(timestamp))
+	writeField(nonce)
+
+	return b.String()
 }
 
 // sortAndJoinParams 排序并拼接参数

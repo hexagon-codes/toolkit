@@ -413,6 +413,8 @@ type Pool struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 	sem    chan struct{}
+	mu     sync.Mutex
+	errs   []error
 }
 
 // NewPool 创建协程池
@@ -441,14 +443,29 @@ func (p *Pool) Go(fn func(ctx context.Context) error) {
 			<-p.sem
 			p.wg.Done()
 		}()
-		fn(p.ctx)
+		if err := fn(p.ctx); err != nil {
+			p.mu.Lock()
+			p.errs = append(p.errs, err)
+			p.mu.Unlock()
+		}
 	}()
 }
 
-// Wait 等待所有任务完成
+// Wait 等待所有任务完成。
+// 返回首个任务错误（多个错误时合并）；若无任务错误但 context 已取消，返回 ctx.Err()。
 func (p *Pool) Wait() error {
 	p.wg.Wait()
-	return p.ctx.Err()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	switch len(p.errs) {
+	case 0:
+		return p.ctx.Err()
+	case 1:
+		return p.errs[0]
+	default:
+		return multiWaitError(p.errs)
+	}
 }
 
 // Close 关闭池
