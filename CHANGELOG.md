@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### Changed
+- **BREAKING** `crypto/sign`：`APISigner.Sign` 改为长度前缀规范化编码（netstring 风格），消除「参数 + timestamp + nonce」无分隔符直接拼接导致的签名串碰撞（如 `{a:"1"}, ts=23` 与 `{a:"12"}, ts=3` 旧实现产生相同串）。**签名 wire 格式变更，与 ≤v0.1.0 不互通**——旧版本生成的签名无法通过新版 `Verify`，跨版本部署需同步升级或在灰度期双验。
+
+### Fixed
+- `lang/contextx`：`Pool.Wait()` 现返回任务错误（首个错误，多个时合并）；此前仅返回 `ctx.Err()`，导致 `Go()` 中任务返回的 error 被静默吞掉。**行为变更**：依赖「任务失败时 `Wait()` 仍返回 nil」的调用方需复核。
+- `lang/conv`：修复 `Int64`/`TryInt64`/`Uint64` 对 float 输入的溢出边界判断——`math.MaxInt64` 转 `float64` 会向上取整为 2^63 导致边界漏判（恰为 2^63 时旧实现回绕成 `MinInt64`），改用可精确表示的 2^63 / 2^64 边界常量。
+- `util/rate`：`LeakyBucket` 速率 `<=0` 时不再除零 panic（改为不限流放行）；`SlidingWindow.Record` 在小容量（< 50）下不再因 `len > cap` panic。
+
 ## [0.1.0] - 2026-06-19
 向后兼容的 MINOR 版本（仅新增 API，不破坏 v0.0.x 导出契约），被 ai-core v0.1.4 依赖。
 
