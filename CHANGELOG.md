@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-21
+含破坏性变更的 MINOR 版本（SemVer 0.x：BREAKING 提升 MINOR）。`crypto/sign` 签名 wire 格式变更，下游（含 ai-core）升级前需评估签名跨版本兼容性。
+
 ### Changed
 - **BREAKING** `crypto/sign`：`APISigner.Sign` 改为长度前缀规范化编码（netstring 风格），消除「参数 + timestamp + nonce」无分隔符直接拼接导致的签名串碰撞（如 `{a:"1"}, ts=23` 与 `{a:"12"}, ts=3` 旧实现产生相同串）。**签名 wire 格式变更，与 ≤v0.1.0 不互通**——旧版本生成的签名无法通过新版 `Verify`，跨版本部署需同步升级或在灰度期双验。
 
