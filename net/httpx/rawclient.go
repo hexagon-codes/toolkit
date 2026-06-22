@@ -44,6 +44,9 @@ func RawClient(opts ...RawOption) *http.Client {
 	transport := cfg.customTransport
 	if transport == nil {
 		transport = &http.Transport{
+			// 与 net/http.DefaultTransport 一致地遵循 HTTP(S)_PROXY/NO_PROXY 环境变量，
+			// 使 RawClient 与宿主机上其余 HTTP 客户端走同一代理出口。
+			Proxy:                 http.ProxyFromEnvironment,
 			ResponseHeaderTimeout: cfg.responseHeaderTimeout,
 			MaxIdleConns:          cfg.maxIdleConns,
 			MaxIdleConnsPerHost:   cfg.maxIdleConnsPerHost,

@@ -43,6 +43,11 @@ func TestRawClient_DefaultsAreSane(t *testing.T) {
 	if tr.IdleConnTimeout != 90*time.Second {
 		t.Errorf("IdleConnTimeout want 90s, got %v", tr.IdleConnTimeout)
 	}
+	// 必须像 net/http.DefaultTransport 一样遵循 HTTP(S)_PROXY 环境变量，否则在用代理
+	// 上网的宿主机上，基于 RawClient 的客户端（如 browser skill）会绕过代理无法访问。
+	if tr.Proxy == nil {
+		t.Error("default transport must set Proxy (ProxyFromEnvironment) to honor HTTP(S)_PROXY")
+	}
 }
 
 func TestRawClient_WithResponseHeaderTimeout(t *testing.T) {
