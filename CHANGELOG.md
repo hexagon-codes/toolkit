@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-06-22
+向后兼容的 PATCH 版本（修正默认行为，无导出 API 变更）。
+
+### Fixed
+- `net/httpx`：`RawClient` 默认 transport 现设置 `Proxy: http.ProxyFromEnvironment`，与 `net/http.DefaultTransport` 一致地遵循 `HTTP(S)_PROXY`/`NO_PROXY` 环境变量。此前基于 RawClient 的客户端在以代理上网的宿主机上会绕过代理，导致无法访问外网。
+
 ## [0.2.0] - 2026-06-21
 含破坏性变更的 MINOR 版本（SemVer 0.x：BREAKING 提升 MINOR）。`crypto/sign` 签名 wire 格式变更，下游（含 ai-core）升级前需评估签名跨版本兼容性。
 
