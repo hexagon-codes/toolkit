@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-06-28
+向后兼容的 PATCH 版本（新增 `os/sandbox` 只读授权能力，无导出 API 破坏）。
+
+### Added
+- `os/sandbox`：新增 `Config.ReadablePaths`，在 `Workspace` 之外额外授予「只读」访问的宿主路径（用于用户经数据连接器等显式授权的本地目录，让沙箱内 `code_exec` 能读到）。仅授读不授写；darwin seatbelt profile 为每个授权路径追加 `file-read*` 放行，并对路径做安全校验（须为绝对路径、不含会破坏或注入 SBPL 字面量的字符），非法路径跳过、不污染整张 profile。
+
 ## [0.2.1] - 2026-06-22
 向后兼容的 PATCH 版本（修正默认行为，无导出 API 变更）。
 
