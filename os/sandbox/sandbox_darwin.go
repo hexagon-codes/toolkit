@@ -89,6 +89,19 @@ func (s *darwinSandbox) generateSBPL() string {
 	sb.WriteString("(allow file-write* (subpath \"/tmp\"))\n")
 	sb.WriteString("(allow file-write* (subpath \"/private/tmp\"))\n")
 
+	// 额外授权目录：只读放行（用户经数据连接器等显式授权的本地目录，让 code_exec 能读到）。
+	// 仅 file-read*（不授写），且写在 DeniedPaths 的 deny 之前——后写的 deny 规则在 seatbelt 里优先生效。
+	// 安全：路径来自连接器自由文本，必须先过 isSafeSeatbeltPath——含 `"`/`\`/换行的路径会终止/损坏
+	// SBPL 字面量（轻则整张 profile 失效搞瘫所有 code_exec，重则注入 (allow network*) 之类逃逸沙箱），
+	// 非绝对路径写进 subpath 也无意义。非法者跳过，绝不污染 profile。
+	for _, readable := range s.cfg.ReadablePaths {
+		expanded := expandPath(readable)
+		if !isSafeSeatbeltPath(expanded) {
+			continue
+		}
+		sb.WriteString(fmt.Sprintf("(allow file-read* (subpath \"%s\"))\n", expanded))
+	}
+
 	// 明确拒绝的路径
 	for _, denied := range s.cfg.DeniedPaths {
 		expanded := expandPath(denied)
@@ -222,6 +235,18 @@ func cleanEnv(env []string) []string {
 		}
 	}
 	return clean
+}
+
+// isSafeSeatbeltPath 判断一个路径能否安全写进 SBPL 的 (subpath "...") 字面量。
+//
+// 要求：① 绝对路径（subpath 只对绝对路径有意义）② 不含会破坏/注入 SBPL 字符串的字符——
+// 双引号 `"`（终止字面量→注入）、反斜杠 `\`（SBPL 转义引导；macOS 路径分隔是 `/`，正常路径不含 `\`）、
+// 换行/回车/空字符（截断 profile）。非法路径直接拒绝（跳过放行），宁可少授权也不污染整张 profile。
+func isSafeSeatbeltPath(p string) bool {
+	if p == "" || !strings.HasPrefix(p, "/") {
+		return false
+	}
+	return !strings.ContainsAny(p, "\"\\\n\r\x00")
 }
 
 // expandPath 展开路径中的波浪号前缀为当前用户的 home 目录。

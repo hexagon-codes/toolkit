@@ -20,7 +20,12 @@ type Config struct {
 	Workspace   string   `yaml:"workspace"`    // 工作区目录 (可读写)
 	Timeout     int      `yaml:"timeout"`      // 超时秒数，默认 60
 	DeniedPaths []string `yaml:"denied_paths"` // 禁止访问的路径
-	Network     bool     `yaml:"network"`      // 是否允许网络，默认 false
+	// ReadablePaths 额外授予「只读」访问的宿主路径（在 Workspace 之外）。
+	// 用途：用户经数据连接器等显式授权的本地目录，需让沙箱内代码 (code_exec) 能读到。
+	// 语义：deny-default 沙箱里为每个路径追加只读放行（darwin: file-read* subpath）；
+	// 不授予写权限（写仅限 Workspace）。DeniedPaths 的 deny 规则写在放行之后、保持优先。
+	ReadablePaths []string `yaml:"readable_paths"`
+	Network       bool     `yaml:"network"` // 是否允许网络，默认 false
 }
 
 // ExecResult 沙箱执行结果
