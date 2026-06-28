@@ -56,6 +56,27 @@ func TruncateWithSuffix(s string, maxLen int, suffix string) string {
 	return string(runes[:maxLen-suffixLen]) + suffix
 }
 
+// TruncateBytes 按【字节预算】截断字符串，但回退到 rune 边界后再附加后缀（后缀不计入预算）。
+//
+// 与 Truncate/TruncateWithSuffix（按 rune 数截断、后缀计入预算）语义不同：
+// 这里 maxBytes 限制的是【内容部分的字节长度】（适用于"输出大小上限/存储字节上限"类场景），
+// 截断点若落在多字节 UTF-8 字符中间，会向前回退到完整 rune 边界，绝不劈裂多字节字符产生乱码。
+// 用于工具 stdout/stderr 上限、知识库分块、文档标题等"按字节封顶"的截断点，替代裸 s[:n]。
+func TruncateBytes(s string, maxBytes int, suffix string) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(s) <= maxBytes {
+		return s
+	}
+	cut := maxBytes
+	// 回退到 rune 边界：UTF-8 续字节形如 10xxxxxx (0xC0 掩码 == 0x80)。
+	for cut > 0 && (s[cut]&0xC0) == 0x80 {
+		cut--
+	}
+	return s[:cut] + suffix
+}
+
 // PadLeft 左填充字符串到指定长度
 func PadLeft(s string, length int, pad string) string {
 	if pad == "" {
