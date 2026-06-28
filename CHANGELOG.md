@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-06-28
+向后兼容的 PATCH 版本（新增 `lang/stringx` 按字节封顶截断能力，无导出 API 破坏）。
+
+### Added
+- `lang/stringx`：新增 `TruncateBytes(s, maxBytes, suffix)`，按【字节预算】截断字符串并回退到完整 rune 边界后再附加后缀（后缀不计入预算）。截断点落在多字节 UTF-8 字符中间时向前回退到边界，绝不劈裂多字节字符产生乱码。适用于工具 stdout/stderr 上限、知识库分块、文档标题等「按字节封顶」场景，替代裸 `s[:n]`。与按 rune 数截断、后缀计入预算的 `Truncate`/`TruncateWithSuffix` 语义互补。
+
 ## [0.2.2] - 2026-06-28
 向后兼容的 PATCH 版本（新增 `os/sandbox` 只读授权能力，无导出 API 破坏）。
 
