@@ -102,6 +102,24 @@ func TestWindows_Timeout(t *testing.T) {
 	t.Logf("timed out after %v (expected ~2s)", elapsed)
 }
 
+func TestWindows_ExecPreservesNonZeroExitCode(t *testing.T) {
+	ws := t.TempDir()
+	sb, err := New(Config{Workspace: ws, Timeout: 10})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result, err := sb.Exec(ctx, "cmd", []string{"/c", "exit", "7"})
+	if err != nil {
+		t.Fatalf("exec failed: %v", err)
+	}
+	if result.ExitCode != 7 {
+		t.Fatalf("expected ExitCode=7, got %d (stdout=%q stderr=%q)", result.ExitCode, result.Stdout, result.Stderr)
+	}
+}
+
 func TestWindows_EnvironmentClean(t *testing.T) {
 	ws := t.TempDir()
 	sb, err := New(Config{Workspace: ws, Timeout: 10})

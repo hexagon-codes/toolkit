@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -26,13 +27,28 @@ type Config struct {
 	// 不授予写权限（写仅限 Workspace）。DeniedPaths 的 deny 规则写在放行之后、保持优先。
 	ReadablePaths []string `yaml:"readable_paths"`
 	Network       bool     `yaml:"network"` // 是否允许网络，默认 false
+
+	// Baseline resource limits. These are intentionally conservative defaults
+	// for agent-facing code execution rather than full enterprise resource
+	// governance. Unsupported platform limits must be surfaced by callers as
+	// capability gaps instead of silently pretending they are enforced.
+	MaxOutputBytes    int64 `yaml:"max_output_bytes"`
+	MaxStderrBytes    int64 `yaml:"max_stderr_bytes"`
+	MaxWorkspaceBytes int64 `yaml:"max_workspace_bytes"`
+	MaxArtifactBytes  int64 `yaml:"max_artifact_bytes"`
+	MaxMemoryBytes    int64 `yaml:"max_memory_bytes"`
+	MaxProcesses      int   `yaml:"max_processes"`
 }
 
 // ExecResult 沙箱执行结果
 type ExecResult struct {
-	Stdout   string
-	Stderr   string
-	ExitCode int
+	Stdout          string
+	Stderr          string
+	ExitCode        int
+	StdoutBytes     int64
+	StderrBytes     int64
+	StdoutTruncated bool
+	StderrTruncated bool
 }
 
 // Sandbox 沙箱接口
@@ -49,12 +65,68 @@ func New(cfg Config) (Sandbox, error) {
 	if cfg.Workspace == "" {
 		return nil, fmt.Errorf("sandbox workspace is required")
 	}
+	if real, err := filepath.EvalSymlinks(cfg.Workspace); err == nil {
+		cfg.Workspace = real
+	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 60
+	}
+	if cfg.MaxOutputBytes <= 0 {
+		cfg.MaxOutputBytes = 64 * 1024
+	}
+	if cfg.MaxStderrBytes <= 0 {
+		cfg.MaxStderrBytes = 64 * 1024
+	}
+	if cfg.MaxWorkspaceBytes <= 0 {
+		cfg.MaxWorkspaceBytes = 1024 * 1024 * 1024
+	}
+	if cfg.MaxArtifactBytes <= 0 {
+		cfg.MaxArtifactBytes = 50 * 1024 * 1024
+	}
+	if cfg.MaxMemoryBytes <= 0 {
+		cfg.MaxMemoryBytes = 256 * 1024 * 1024
+	}
+	if cfg.MaxProcesses <= 0 {
+		cfg.MaxProcesses = 64
 	}
 
 	return newPlatformSandbox(cfg)
 }
+
+type boundedBuffer struct {
+	limit     int64
+	total     int64
+	truncated bool
+	buf       []byte
+}
+
+func newBoundedBuffer(limit int64) *boundedBuffer {
+	if limit <= 0 {
+		limit = 64 * 1024
+	}
+	return &boundedBuffer{limit: limit}
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	b.total += int64(n)
+	remaining := b.limit - int64(len(b.buf))
+	if remaining > 0 {
+		if int64(len(p)) > remaining {
+			b.buf = append(b.buf, p[:remaining]...)
+			b.truncated = true
+		} else {
+			b.buf = append(b.buf, p...)
+		}
+	} else if n > 0 {
+		b.truncated = true
+	}
+	return n, nil
+}
+
+func (b *boundedBuffer) String() string   { return string(b.buf) }
+func (b *boundedBuffer) BytesSeen() int64 { return b.total }
+func (b *boundedBuffer) Truncated() bool  { return b.truncated || b.total > b.limit }
 
 // newUniqueCodeFile 在 dir 下创建带唯一后缀的代码临时文件并写入 code。
 //

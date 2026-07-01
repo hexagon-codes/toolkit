@@ -3,11 +3,9 @@
 package sandbox
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -54,6 +52,7 @@ func (s *darwinSandbox) generateSBPL() string {
 	// 而 dyld 在路径解析阶段需要 stat/read "/", 缺失会导致进程在
 	// dyld 阶段 SIGABRT (macOS 26+ 上整个沙箱不可用的真正根因)。
 	sb.WriteString("(allow file-read* (literal \"/\"))\n")
+	sb.WriteString("(allow file-read* (literal \"/private\"))\n")
 
 	// 允许读取系统文件 (运行时、库等)
 	sb.WriteString("(allow file-read*\n")
@@ -132,43 +131,8 @@ func (s *darwinSandbox) Exec(ctx context.Context, command string, args []string)
 	sandboxArgs := []string{"-p", sbpl, command}
 	sandboxArgs = append(sandboxArgs, args...)
 
-	cmd := exec.CommandContext(ctx, "sandbox-exec", sandboxArgs...)
-	cmd.Dir = s.cfg.Workspace
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
 	// 清理危险环境变量
-	cmd.Env = cleanEnv(os.Environ())
-
-	err := cmd.Run()
-	// 进程被 ctx(含 cfg.Timeout 派生的 deadline)强制终止时, cmd.Run 返回的是
-	// *exec.ExitError("signal: killed"), 若仅按 ExitError 当作普通非零退出处理,
-	// 会把 err 抹成 nil, 调用方无从得知进程是"超时被杀"还是"正常退出"。
-	// 因此优先检查 ctx.Err(): 一旦 ctx 已取消/超时, 显式返回包装错误,
-	// 使 cfg.Timeout 的强制终止对调用方可见。
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return &ExecResult{
-			Stdout:   stdout.String(),
-			Stderr:   stderr.String(),
-			ExitCode: -1,
-		}, fmt.Errorf("sandbox exec terminated by timeout/cancel: %w", ctxErr)
-	}
-	exitCode := 0
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else {
-			return nil, fmt.Errorf("sandbox exec failed: %w", err)
-		}
-	}
-
-	return &ExecResult{
-		Stdout:   stdout.String(),
-		Stderr:   stderr.String(),
-		ExitCode: exitCode,
-	}, nil
+	return runBoundedCommand(ctx, "sandbox-exec", sandboxArgs, s.cfg.Workspace, cleanEnv(os.Environ()), s.cfg.MaxOutputBytes, s.cfg.MaxStderrBytes)
 }
 
 // ExecCode 在沙箱内执行代码

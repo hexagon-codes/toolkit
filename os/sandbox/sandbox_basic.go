@@ -3,11 +3,9 @@
 package sandbox
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 )
 
 // basicSandbox 基础沙箱 (无 OS 隔离，仅路径限制 + 超时)
@@ -30,36 +28,7 @@ func (s *basicSandbox) Exec(ctx context.Context, command string, args []string) 
 	ctx, cancel := withTimeout(ctx, s.cfg.Timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, command, args...)
-	cmd.Dir = s.cfg.Workspace
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-	// ctx(含 cfg.Timeout 派生 deadline)超时/取消时显式上报, 使强制终止对调用方可见。
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return &ExecResult{
-			Stdout:   stdout.String(),
-			Stderr:   stderr.String(),
-			ExitCode: -1,
-		}, fmt.Errorf("sandbox exec terminated by timeout/cancel: %w", ctxErr)
-	}
-	exitCode := 0
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else {
-			return nil, fmt.Errorf("exec failed: %w", err)
-		}
-	}
-
-	return &ExecResult{
-		Stdout:   stdout.String(),
-		Stderr:   stderr.String(),
-		ExitCode: exitCode,
-	}, nil
+	return runBoundedCommand(ctx, command, args, s.cfg.Workspace, cleanBasicEnv(os.Environ()), s.cfg.MaxOutputBytes, s.cfg.MaxStderrBytes)
 }
 
 func (s *basicSandbox) ExecCode(ctx context.Context, language, code string) (*ExecResult, error) {
@@ -89,4 +58,8 @@ func (s *basicSandbox) ExecCode(ctx context.Context, language, code string) (*Ex
 		return s.Exec(ctx, interpreter, []string{"run", tmpFile})
 	}
 	return s.Exec(ctx, interpreter, []string{tmpFile})
+}
+
+func cleanBasicEnv(env []string) []string {
+	return env
 }

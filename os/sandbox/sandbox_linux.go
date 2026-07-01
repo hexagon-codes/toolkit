@@ -3,11 +3,11 @@
 package sandbox
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -27,89 +27,96 @@ func newPlatformSandbox(cfg Config) (Sandbox, error) {
 	return &linuxSandbox{cfg: cfg}, nil
 }
 
-// Exec 在沙箱内执行命令
-// TODO: D18-D19 完整实现 Namespace + seccomp + pivot_root
-// 当前使用基础隔离 (unshare + chroot fallback)
+// Exec 在沙箱内执行命令。
+//
+// Linux 优先使用 bubblewrap，因为它能在普通桌面/CI Linux 上提供接近
+// macOS Seatbelt 的 deny-by-default 文件系统视图：workspace 读写、系统运行时
+// 只读、ReadablePaths 只读、Network=false 时 unshare net。若 bubblewrap 不可用，
+// 再使用 util-linux unshare 作为较弱但仍 fail-closed 的 namespace 后端；两者都
+// 不存在或启动失败时直接返回 sandbox unavailable，不做裸 exec fallback。
 func (s *linuxSandbox) Exec(ctx context.Context, command string, args []string) (*ExecResult, error) {
 	// 应用 cfg.Timeout: 调用方 ctx 无更早 deadline 时按配置强制超时。
 	ctx, cancel := withTimeout(ctx, s.cfg.Timeout)
 	defer cancel()
 
-	// 尝试使用 unshare 创建隔离环境
-	unshareArgs := []string{
-		"--mount", "--pid", "--fork",
-		"--", command,
-	}
-	unshareArgs = append(unshareArgs, args...)
-
-	cmd := exec.CommandContext(ctx, "unshare", unshareArgs...)
-	cmd.Dir = s.cfg.Workspace
-	cmd.Env = cleanLinuxEnv(os.Environ())
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-	// 进程被 ctx(含 cfg.Timeout 派生的 deadline)强制终止时, 必须显式上报超时,
-	// 不能误判为"unshare 无权限"而退化重跑——否则会在超时后再跑一遍命令。
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return &ExecResult{
-			Stdout:   stdout.String(),
-			Stderr:   stderr.String(),
-			ExitCode: -1,
-		}, fmt.Errorf("sandbox exec terminated by timeout/cancel: %w", ctxErr)
-	}
+	runner, runnerArgs, env, err := s.linuxSandboxRunner(command, args)
 	if err != nil {
-		// unshare 失败 (无权限) → 退化为直接执行 + 路径限制
-		return s.execFallback(ctx, command, args)
+		return nil, err
 	}
-
-	exitCode := 0
-	if exitErr, ok := err.(*exec.ExitError); ok {
-		exitCode = exitErr.ExitCode()
+	res, err := runBoundedCommand(ctx, runner, runnerArgs, s.cfg.Workspace, env, s.cfg.MaxOutputBytes, s.cfg.MaxStderrBytes)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox unavailable: linux backend failed: %w", err)
 	}
-
-	return &ExecResult{
-		Stdout:   stdout.String(),
-		Stderr:   stderr.String(),
-		ExitCode: exitCode,
-	}, nil
+	return res, nil
 }
 
-// execFallback 退化执行 (无 namespace 权限时)
-func (s *linuxSandbox) execFallback(ctx context.Context, command string, args []string) (*ExecResult, error) {
-	cmd := exec.CommandContext(ctx, command, args...)
-	cmd.Dir = s.cfg.Workspace
-	cmd.Env = cleanLinuxEnv(os.Environ())
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-	// ctx(含 cfg.Timeout 派生 deadline)超时/取消时显式上报, 使强制终止对调用方可见。
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return &ExecResult{
-			Stdout:   stdout.String(),
-			Stderr:   stderr.String(),
-			ExitCode: -1,
-		}, fmt.Errorf("sandbox exec terminated by timeout/cancel: %w", ctxErr)
+func (s *linuxSandbox) linuxSandboxRunner(command string, args []string) (string, []string, []string, error) {
+	env := cleanLinuxEnv(os.Environ())
+	if bwrap, err := exec.LookPath("bwrap"); err == nil {
+		return bwrap, s.bwrapArgs(command, args), env, nil
 	}
-	exitCode := 0
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else {
-			return nil, fmt.Errorf("exec failed: %w", err)
+	if unshare, err := exec.LookPath("unshare"); err == nil {
+		return unshare, s.unshareArgs(command, args), env, nil
+	}
+	return "", nil, nil, fmt.Errorf("sandbox unavailable: linux requires bubblewrap or unshare")
+}
+
+func (s *linuxSandbox) bwrapArgs(command string, args []string) []string {
+	out := []string{
+		"--die-with-parent",
+		"--new-session",
+		"--unshare-pid",
+		"--proc", "/proc",
+		"--dev", "/dev",
+		"--setenv", "HOME", s.cfg.Workspace,
+		"--setenv", "TMPDIR", "/tmp",
+		"--setenv", "TMP", "/tmp",
+		"--setenv", "TEMP", "/tmp",
+	}
+	if dirExists("/tmp") {
+		out = append(out, "--bind", "/tmp", "/tmp")
+	} else {
+		out = append(out, "--dir", "/tmp")
+	}
+	if !s.cfg.Network {
+		out = append(out, "--unshare-net")
+	}
+	for _, p := range linuxSystemReadPaths() {
+		if dirExists(p) {
+			out = append(out, "--ro-bind", p, p)
 		}
 	}
+	out = append(out, "--bind", s.cfg.Workspace, s.cfg.Workspace)
+	for _, p := range s.cfg.ReadablePaths {
+		if p = cleanLinuxMountPath(p); p != "" && dirExists(p) {
+			out = append(out, "--ro-bind", p, p)
+		}
+	}
+	for _, p := range s.cfg.DeniedPaths {
+		if p = cleanLinuxMountPath(p); p != "" && p != "/" {
+			out = append(out, "--tmpfs", p)
+		}
+	}
+	out = append(out, "--chdir", s.cfg.Workspace, "--", command)
+	out = append(out, args...)
+	return out
+}
 
-	return &ExecResult{
-		Stdout:   stdout.String(),
-		Stderr:   stderr.String(),
-		ExitCode: exitCode,
-	}, nil
+func (s *linuxSandbox) unshareArgs(command string, args []string) []string {
+	out := []string{
+		"--user",
+		"--map-root-user",
+		"--mount",
+		"--pid",
+		"--fork",
+		"--mount-proc",
+	}
+	if !s.cfg.Network {
+		out = append(out, "--net")
+	}
+	out = append(out, "--", command)
+	out = append(out, args...)
+	return out
 }
 
 // ExecCode 在沙箱内执行代码
@@ -169,4 +176,38 @@ func cleanLinuxEnv(env []string) []string {
 		}
 	}
 	return clean
+}
+
+func linuxSystemReadPaths() []string {
+	return []string{
+		"/bin",
+		"/etc",
+		"/lib",
+		"/lib64",
+		"/nix/store",
+		"/opt",
+		"/run",
+		"/sbin",
+		"/usr",
+		"/usr/local",
+	}
+}
+
+func cleanLinuxMountPath(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return ""
+	}
+	if !filepath.IsAbs(p) {
+		return ""
+	}
+	if real, err := filepath.EvalSymlinks(p); err == nil {
+		p = real
+	}
+	return filepath.Clean(p)
+}
+
+func dirExists(p string) bool {
+	st, err := os.Stat(p)
+	return err == nil && st.IsDir()
 }

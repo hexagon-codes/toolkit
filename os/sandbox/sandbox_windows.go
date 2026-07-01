@@ -3,19 +3,16 @@
 package sandbox
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 )
 
 // windowsSandbox implements Sandbox using Win32 five-layer isolation:
 //  1. Restricted Token — strip privileges, Untrusted IL
-//  2. ACL — workspace-only read/write
+//  2. AppContainer ACL — workspace RW, ReadablePaths RO, DeniedPaths deny
 //  3. Job Object — memory/process limits + UI restrictions
 //  4. Low Box Token — kernel-level network isolation
 //  5. Alternate Desktop — GUI isolation
@@ -49,38 +46,58 @@ func (s *windowsSandbox) Exec(ctx context.Context, command string, args []string
 	defer cancel()
 
 	// Try full sandbox launch
-	proc, stdout, stderr, err := launchSandboxedProcess(s.cfg, command, args)
+	proc, err := launchSandboxedProcess(s.cfg, command, args)
 	if err != nil {
-		// Fallback: direct execution with environment cleanup
-		return s.execFallback(ctx, command, args)
+		return nil, fmt.Errorf("sandbox unavailable: windows sandbox backend failed: %w", err)
 	}
 
 	// Wait for process
-	done := make(chan error, 1)
+	type waitResult struct {
+		state *os.ProcessState
+		err   error
+	}
+	done := make(chan waitResult, 1)
 	go func() {
-		_, err := proc.Wait()
-		done <- err
+		state, err := proc.Wait()
+		done <- waitResult{state: state, err: err}
 	}()
 
 	select {
-	case err := <-done:
+	case wait := <-done:
 		exitCode := 0
-		if err != nil {
-			if exitErr, ok := err.(*os.SyscallError); ok {
-				_ = exitErr
-				exitCode = 1
-			}
+		if wait.state != nil {
+			exitCode = wait.state.ExitCode()
+		} else if wait.err != nil {
+			exitCode = 1
 		}
 		return &ExecResult{
-			Stdout:   stdout.String(),
-			Stderr:   stderr.String(),
-			ExitCode: exitCode,
+			Stdout:          proc.stdout.String(),
+			Stderr:          proc.stderr.String(),
+			ExitCode:        exitCode,
+			StdoutBytes:     proc.stdout.BytesSeen(),
+			StderrBytes:     proc.stderr.BytesSeen(),
+			StdoutTruncated: proc.stdout.Truncated(),
+			StderrTruncated: proc.stderr.Truncated(),
 		}, nil
 	case <-ctx.Done():
-		proc.Kill()
+		_ = proc.Kill()
+		<-done
+		stderr := proc.stderr.String()
+		if stderr == "" {
+			stderr = "process timed out"
+		}
+		stderrBytes := proc.stderr.BytesSeen()
+		if stderrBytes == 0 {
+			stderrBytes = int64(len(stderr))
+		}
 		return &ExecResult{
-			Stderr:   "process timed out",
-			ExitCode: -1,
+			Stdout:          proc.stdout.String(),
+			Stderr:          stderr,
+			ExitCode:        -1,
+			StdoutBytes:     proc.stdout.BytesSeen(),
+			StderrBytes:     stderrBytes,
+			StdoutTruncated: proc.stdout.Truncated(),
+			StderrTruncated: proc.stderr.Truncated(),
 		}, ctx.Err()
 	}
 }
@@ -98,9 +115,9 @@ func (s *windowsSandbox) ExecCode(ctx context.Context, language, code string) (*
 		return nil, fmt.Errorf("unsupported language: %s", language)
 	}
 
-	tmpFile := filepath.Join(s.cfg.Workspace, fmt.Sprintf("_exec_%d%s", time.Now().UnixNano(), ext))
-	if err := os.WriteFile(tmpFile, []byte(code), 0644); err != nil {
-		return nil, fmt.Errorf("write code: %w", err)
+	tmpFile, err := newUniqueCodeFile(s.cfg.Workspace, ext, code)
+	if err != nil {
+		return nil, err
 	}
 	defer os.Remove(tmpFile)
 
@@ -111,29 +128,4 @@ func (s *windowsSandbox) ExecCode(ctx context.Context, language, code string) (*
 		args = []string{tmpFile}
 	}
 	return s.Exec(ctx, runner, args)
-}
-
-// execFallback runs without Win32 sandbox APIs (degraded mode).
-func (s *windowsSandbox) execFallback(ctx context.Context, command string, args []string) (*ExecResult, error) {
-	cmd := exec.CommandContext(ctx, command, args...)
-	cmd.Dir = s.cfg.Workspace
-	cmd.Env = cleanWindowsEnv(s.cfg.Workspace)
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-	exitCode := 0
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		}
-	}
-
-	return &ExecResult{
-		Stdout:   stdout.String(),
-		Stderr:   stderr.String(),
-		ExitCode: exitCode,
-	}, nil
 }
