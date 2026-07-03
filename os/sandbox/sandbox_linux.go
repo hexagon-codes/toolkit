@@ -48,6 +48,10 @@ func (s *linuxSandbox) Exec(ctx context.Context, command string, args []string) 
 	ctx, cancel := withTimeout(ctx, s.cfg.Timeout)
 	defer cancel()
 
+	if err := enforceSandboxStorageLimits(s.cfg); err != nil {
+		return nil, err
+	}
+
 	runner, runnerArgs, env, containment, err := s.linuxSandboxRunner(command, args)
 	if err != nil {
 		return nil, err
@@ -120,7 +124,7 @@ func runLinuxBwrapProbe(bwrap string, network bool) bool {
 	if err != nil {
 		return false
 	}
-	defer os.RemoveAll(ws)
+	defer func() { _ = os.RemoveAll(ws) }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

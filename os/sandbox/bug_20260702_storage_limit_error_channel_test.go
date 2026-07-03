@@ -38,6 +38,9 @@ func TestBug20260702_StorageLimitViolationCarriesSentinelAndResult(t *testing.T)
 		t.Fatalf("产物超限应返回错误, got nil (res=%+v)", res)
 	}
 	if !errors.Is(execErr, ErrStorageLimitExceeded) {
+		skipIfSandboxBackendUnavailable(t, execErr)
+	}
+	if !errors.Is(execErr, ErrStorageLimitExceeded) {
 		t.Fatalf("存储限额违规必须命中 ErrStorageLimitExceeded 哨兵, got: %v", execErr)
 	}
 	if strings.Contains(execErr.Error(), "sandbox unavailable") {

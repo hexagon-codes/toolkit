@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -25,6 +26,7 @@ func TestBug20260702_LimitReportMatchesPlatformCapability(t *testing.T) {
 	}
 	res, err := sb.Exec(context.Background(), command, args)
 	if err != nil {
+		skipIfSandboxBackendUnavailable(t, err)
 		t.Fatalf("Exec: %v", err)
 	}
 	if res.ExitCode != 0 {
@@ -65,6 +67,7 @@ func TestBug20260702_LimitReportOutputEnforcedMatchesBehavior(t *testing.T) {
 
 	res, err := sb.Exec(context.Background(), "/bin/sh", []string{"-c", "printf '%0.s0' $(seq 1 4096)"})
 	if err != nil {
+		skipIfSandboxBackendUnavailable(t, err)
 		t.Fatalf("Exec: %v", err)
 	}
 	if res.ExitCode != 0 {
@@ -78,5 +81,12 @@ func TestBug20260702_LimitReportOutputEnforcedMatchesBehavior(t *testing.T) {
 	}
 	if int64(len(res.Stdout)) > 16 {
 		t.Fatalf("stdout 保留长度 %d 超过 MaxOutputBytes=16", len(res.Stdout))
+	}
+}
+
+func skipIfSandboxBackendUnavailable(t *testing.T, err error) {
+	t.Helper()
+	if runtime.GOOS == "linux" && strings.Contains(err.Error(), "sandbox unavailable") {
+		t.Skipf("linux runner 无可用 OS sandbox 后端, 跳过行为验证: %v", err)
 	}
 }
