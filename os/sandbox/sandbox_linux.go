@@ -124,7 +124,11 @@ func runLinuxBwrapProbe(bwrap string, network bool) bool {
 	if err != nil {
 		return false
 	}
-	defer func() { _ = os.RemoveAll(ws) }()
+	defer func() {
+		if err := os.RemoveAll(ws); err != nil {
+			fmt.Fprintf(os.Stderr, "sandbox: remove bwrap probe workspace %q: %v\n", ws, err)
+		}
+	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
