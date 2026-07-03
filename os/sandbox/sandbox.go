@@ -53,7 +53,9 @@ type Config struct {
 type LimitStatus string
 
 const (
-	LimitStatusEnforced    LimitStatus = "enforced"
+	// LimitStatusEnforced means the resource limit is actively enforced.
+	LimitStatusEnforced LimitStatus = "enforced"
+	// LimitStatusUnsupported means the current platform/backend cannot enforce it.
 	LimitStatusUnsupported LimitStatus = "unsupported"
 	// LimitStatusWeak 表示该项在当前后端「有部分约束但非强隔离」——
 	// 后端存在且执行了限制动作, 但不满足 deny-by-default 语义。
@@ -105,8 +107,8 @@ func New(cfg Config) (Sandbox, error) {
 	if cfg.Workspace == "" {
 		return nil, fmt.Errorf("sandbox workspace is required")
 	}
-	if real, err := filepath.EvalSymlinks(cfg.Workspace); err == nil {
-		cfg.Workspace = real
+	if resolved, err := filepath.EvalSymlinks(cfg.Workspace); err == nil {
+		cfg.Workspace = resolved
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 60

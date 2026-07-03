@@ -63,10 +63,10 @@ func (s *linuxSandbox) Exec(ctx context.Context, command string, args []string) 
 	return res, nil
 }
 
-func (s *linuxSandbox) linuxSandboxRunner(command string, args []string) (string, []string, []string, LimitStatus, error) {
-	env := cleanLinuxEnv(os.Environ())
-	_, bwrapErr := exec.LookPath("bwrap")
-	_, unshareErr := exec.LookPath("unshare")
+func (s *linuxSandbox) linuxSandboxRunner(command string, args []string) (runner string, runnerArgs []string, env []string, containment LimitStatus, err error) {
+	env = cleanLinuxEnv(os.Environ())
+	bwrap, bwrapErr := exec.LookPath("bwrap")
+	unshare, unshareErr := exec.LookPath("unshare")
 
 	// confidential: 调用方显式声明受保护路径即表明在意机密性; 弱兜底无法保证
 	// deny-by-default, 对其 fail-closed(详见 selectLinuxSandboxBackend)。
@@ -78,10 +78,8 @@ func (s *linuxSandbox) linuxSandboxRunner(command string, args []string) (string
 
 	switch backend {
 	case linuxBackendBwrap:
-		bwrap, _ := exec.LookPath("bwrap")
 		return bwrap, s.bwrapArgs(command, args), env, containment, nil
 	case linuxBackendUnshare:
-		unshare, _ := exec.LookPath("unshare")
 		return unshare, s.unshareArgs(command, args), env, containment, nil
 	default:
 		return "", nil, nil, containment, fmt.Errorf("sandbox unavailable: linux requires bubblewrap or unshare")
@@ -144,8 +142,7 @@ func (s *linuxSandbox) unshareArgs(command string, args []string) []string {
 	}
 
 	if len(s.cfg.ReadablePaths) > 0 || len(s.cfg.DeniedPaths) > 0 {
-		out = append(out, "--", "/bin/sh", "-eu", "-c", linuxUnsharePolicyScript, "hexclaw-unshare-policy")
-		out = append(out, "--readable")
+		out = append(out, "--", "/bin/sh", "-eu", "-c", linuxUnsharePolicyScript, "hexclaw-unshare-policy", "--readable")
 		for _, p := range s.cfg.ReadablePaths {
 			if p = cleanLinuxMountPath(p); p != "" && pathExists(p) {
 				out = append(out, p)
@@ -287,8 +284,8 @@ func cleanLinuxMountPath(p string) string {
 	if !filepath.IsAbs(p) {
 		return ""
 	}
-	if real, err := filepath.EvalSymlinks(p); err == nil {
-		p = real
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		p = resolved
 	}
 	return filepath.Clean(p)
 }

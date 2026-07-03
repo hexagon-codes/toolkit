@@ -68,8 +68,8 @@ func runBoundedCommand(ctx context.Context, command string, args []string, cfg C
 	select {
 	case err = <-done:
 	case <-ctx.Done():
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		err = <-done
+		killErr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		waitErr := <-done
 		res := &ExecResult{
 			Stdout:          stdout.String(),
 			Stderr:          stderr.String(),
@@ -83,6 +83,12 @@ func runBoundedCommand(ctx context.Context, command string, args []string, cfg C
 		if limitErr := enforceSandboxStorageLimits(cfg); limitErr != nil {
 			// 存储限额错误也用 %w 包装, 保证 ErrStorageLimitExceeded 哨兵可被 errors.Is 命中
 			return res, fmt.Errorf("sandbox exec terminated by timeout/cancel: %w; storage limit check failed: %w", ctx.Err(), limitErr)
+		}
+		if killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
+			return res, fmt.Errorf("sandbox exec terminated by timeout/cancel: %w; kill process group failed: %w", ctx.Err(), killErr)
+		}
+		if waitErr != nil {
+			return res, fmt.Errorf("sandbox exec terminated by timeout/cancel: %w; wait failed: %v", ctx.Err(), waitErr)
 		}
 		return res, fmt.Errorf("sandbox exec terminated by timeout/cancel: %w", ctx.Err())
 	}
@@ -112,9 +118,12 @@ func runBoundedCommand(ctx context.Context, command string, args []string, cfg C
 	return res, nil
 }
 
-func posixResourceLimitedCommand(command string, args []string, cfg Config, env []string) (string, []string, []string, error) {
+func posixResourceLimitedCommand(command string, args []string, cfg Config, env []string) (runner string, runnerArgs, runEnv []string, err error) {
 	if cfg.MaxMemoryBytes <= 0 && cfg.MaxProcesses <= 0 {
 		return command, args, env, nil
+	}
+	if runtime.GOOS == "linux" {
+		return linuxPrlimitCommand(command, args, cfg, env)
 	}
 
 	exe, err := os.Executable()
@@ -122,20 +131,41 @@ func posixResourceLimitedCommand(command string, args []string, cfg Config, env 
 		return "", nil, nil, fmt.Errorf("resolve sandbox rlimit helper executable: %w", err)
 	}
 
-	runArgs := make([]string, 0, len(args)+2)
-	runArgs = append(runArgs, posixRlimitHelperArg, command)
-	runArgs = append(runArgs, args...)
+	helperArgs := make([]string, 0, len(args)+2)
+	helperArgs = append(helperArgs, posixRlimitHelperArg, command)
+	helperArgs = append(helperArgs, args...)
 
-	runEnv := stripPosixRlimitEnv(env)
-	runEnv = append(runEnv, posixRlimitHelperEnv+"="+posixRlimitHelperExpectedMark)
+	helperEnv := stripPosixRlimitEnv(env)
+	helperEnv = append(helperEnv, posixRlimitHelperEnv+"="+posixRlimitHelperExpectedMark)
 	if cfg.MaxMemoryBytes > 0 {
-		runEnv = append(runEnv, fmt.Sprintf("%s=%d", posixRlimitMemoryBytesEnv, cfg.MaxMemoryBytes))
+		helperEnv = append(helperEnv, fmt.Sprintf("%s=%d", posixRlimitMemoryBytesEnv, cfg.MaxMemoryBytes))
 	}
 	if cfg.MaxProcesses > 0 {
-		runEnv = append(runEnv, fmt.Sprintf("%s=%d", posixRlimitMaxProcessesEnv, cfg.MaxProcesses))
+		helperEnv = append(helperEnv, fmt.Sprintf("%s=%d", posixRlimitMaxProcessesEnv, cfg.MaxProcesses))
 	}
 
-	return exe, runArgs, runEnv, nil
+	return exe, helperArgs, helperEnv, nil
+}
+
+func linuxPrlimitCommand(command string, args []string, cfg Config, env []string) (runner string, runnerArgs, runEnv []string, err error) {
+	prlimit, err := exec.LookPath("prlimit")
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("resolve POSIX rlimit helper prlimit: %w", err)
+	}
+
+	prlimitArgs := make([]string, 0, len(args)+4)
+	if cfg.MaxMemoryBytes > 0 {
+		prlimitArgs = append(prlimitArgs, fmt.Sprintf("--as=%d", cfg.MaxMemoryBytes))
+	}
+	if cfg.MaxProcesses > 0 {
+		prlimitArgs = append(prlimitArgs, fmt.Sprintf("--nproc=%d", processAwareMaxProcesses(uint64(cfg.MaxProcesses))))
+	}
+	prlimitArgs = append(prlimitArgs, "--", command)
+	prlimitArgs = append(prlimitArgs, args...)
+
+	prlimitEnv := stripPosixRlimitEnv(env)
+
+	return prlimit, prlimitArgs, prlimitEnv, nil
 }
 
 func runPosixRlimitHelper(argv []string) int {
@@ -206,7 +236,7 @@ func processAwareMaxProcesses(maxProcesses uint64) uint64 {
 func currentUIDProcessCount() (uint64, bool) {
 	psPath := ""
 	for _, candidate := range []string{"/bin/ps", "/usr/bin/ps"} {
-		if st, err := os.Stat(candidate); err == nil && !st.IsDir() && st.Mode()&0111 != 0 {
+		if st, err := os.Stat(candidate); err == nil && !st.IsDir() && st.Mode()&0o111 != 0 {
 			psPath = candidate
 			break
 		}
@@ -215,7 +245,7 @@ func currentUIDProcessCount() (uint64, bool) {
 		return 0, false
 	}
 
-	out, err := exec.Command(psPath, "-axo", "uid=").Output()
+	out, err := exec.CommandContext(context.Background(), psPath, "-axo", "uid=").Output()
 	if err != nil {
 		return 0, false
 	}
@@ -334,7 +364,9 @@ func probePosixMemoryLimitCapability() LimitStatus {
 		}
 		lim.Cur = probe
 		if err := unix.Setrlimit(resource, &lim); err == nil {
-			_ = unix.Setrlimit(resource, &orig)
+			if err := unix.Setrlimit(resource, &orig); err != nil {
+				continue
+			}
 			return LimitStatusEnforced
 		}
 	}

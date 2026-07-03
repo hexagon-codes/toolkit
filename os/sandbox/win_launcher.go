@@ -62,17 +62,7 @@ func launchSandboxedProcess(cfg Config, command string, args []string) (*windows
 		return nil, fmt.Errorf("create job object: %w", err)
 	}
 
-	// 5. Create isolated desktop
-	desktop, err := createIsolatedDesktop(fmt.Sprintf("hexclaw_sandbox_%d", os.Getpid()))
-	if err != nil {
-		syscall.CloseHandle(jobHandle)
-		_ = aclPolicy.restoreACL()
-		return nil, fmt.Errorf("create isolated desktop: %w", err)
-	} else {
-		defer desktop.Close()
-	}
-
-	// 6. Build command line
+	// 5. Build command line
 	cmdLine := buildCommandLine(command, args)
 	cmdLineW, _ := syscall.UTF16PtrFromString(cmdLine)
 	workspaceW, _ := syscall.UTF16PtrFromString(cfg.Workspace)
@@ -87,16 +77,17 @@ func launchSandboxedProcess(cfg Config, command string, args []string) (*windows
 		envPtr = uintptr(unsafe.Pointer(&envBlock[0]))
 	}
 
-	// 7. Setup STARTUPINFO with isolated desktop
+	// 6. Setup STARTUPINFO.
+	//
+	// Do not set lpDesktop until createIsolatedDesktop grants the LowBox SID
+	// access to the desktop object. Creating a process against an inaccessible
+	// alternate desktop succeeds, but console programs then fail during process
+	// initialization with STATUS_DLL_INIT_FAILED (0xC0000142).
 	var si syscall.StartupInfo
 	si.Cb = uint32(unsafe.Sizeof(si))
 	si.Flags = syscall.STARTF_USESTDHANDLES
-	if desktop != nil {
-		desktopNameW, _ := syscall.UTF16PtrFromString(desktop.DesktopName())
-		si.Desktop = desktopNameW
-	}
 
-	// 8. Create stdout/stderr pipes
+	// 7. Create stdout/stderr pipes
 	var stdoutR, stdoutW, stderrR, stderrW syscall.Handle
 	sa := syscall.SecurityAttributes{Length: uint32(unsafe.Sizeof(syscall.SecurityAttributes{})), InheritHandle: 1}
 	if err := syscall.CreatePipe(&stdoutR, &stdoutW, &sa, 0); err != nil {
@@ -114,7 +105,7 @@ func launchSandboxedProcess(cfg Config, command string, args []string) (*windows
 	si.StdOutput = stdoutW
 	si.StdErr = stderrW
 
-	// 9. CreateProcessAsUser
+	// 8. CreateProcessAsUser
 	var pi syscall.ProcessInformation
 	const CREATE_SUSPENDED = 0x00000004
 	const CREATE_NEW_CONSOLE = 0x00000010
@@ -146,7 +137,7 @@ func launchSandboxedProcess(cfg Config, command string, args []string) (*windows
 	syscall.CloseHandle(stdoutW)
 	syscall.CloseHandle(stderrW)
 
-	// 10. Assign to Job Object
+	// 9. Assign to Job Object
 	if err := assignProcessToJob(jobHandle, pi.Process); err != nil {
 		syscall.TerminateProcess(pi.Process, 1)
 		syscall.CloseHandle(pi.Thread)
@@ -158,7 +149,7 @@ func launchSandboxedProcess(cfg Config, command string, args []string) (*windows
 		return nil, err
 	}
 
-	// 11. Resume the process
+	// 10. Resume the process
 	procResumeThread.Call(uintptr(pi.Thread))
 	syscall.CloseHandle(pi.Thread)
 	syscall.CloseHandle(pi.Process)
