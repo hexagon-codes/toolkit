@@ -63,7 +63,7 @@ func (s *linuxSandbox) Exec(ctx context.Context, command string, args []string) 
 	return res, nil
 }
 
-func (s *linuxSandbox) linuxSandboxRunner(command string, args []string) (runner string, runnerArgs []string, env []string, containment LimitStatus, err error) {
+func (s *linuxSandbox) linuxSandboxRunner(command string, args []string) (runner string, runnerArgs, env []string, containment LimitStatus, err error) {
 	env = cleanLinuxEnv(os.Environ())
 	bwrap, bwrapErr := exec.LookPath("bwrap")
 	unshare, unshareErr := exec.LookPath("unshare")

@@ -234,6 +234,12 @@ func processAwareMaxProcesses(maxProcesses uint64) uint64 {
 }
 
 func currentUIDProcessCount() (uint64, bool) {
+	if runtime.GOOS == "linux" {
+		if count, ok := currentLinuxUIDTaskCount(); ok {
+			return count, true
+		}
+	}
+
 	psPath := ""
 	for _, candidate := range []string{"/bin/ps", "/usr/bin/ps"} {
 		if st, err := os.Stat(candidate); err == nil && !st.IsDir() && st.Mode()&0o111 != 0 {
@@ -257,6 +263,64 @@ func currentUIDProcessCount() (uint64, bool) {
 		}
 	}
 	return count, true
+}
+
+func currentLinuxUIDTaskCount() (uint64, bool) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return 0, false
+	}
+
+	uid := strconv.Itoa(os.Getuid())
+	var count uint64
+	var matched bool
+	for _, entry := range entries {
+		pid := entry.Name()
+		if !isDecimalString(pid) {
+			continue
+		}
+		status, err := os.ReadFile("/proc/" + pid + "/status")
+		if err != nil {
+			continue
+		}
+		if !linuxStatusMatchesUID(string(status), uid) {
+			continue
+		}
+		tasks, err := os.ReadDir("/proc/" + pid + "/task")
+		if err != nil {
+			continue
+		}
+		matched = true
+		if len(tasks) == 0 {
+			count++
+			continue
+		}
+		count += uint64(len(tasks))
+	}
+	return count, matched
+}
+
+func isDecimalString(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func linuxStatusMatchesUID(status, uid string) bool {
+	for _, line := range strings.Split(status, "\n") {
+		if !strings.HasPrefix(line, "Uid:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		return len(fields) > 1 && fields[1] == uid
+	}
+	return false
 }
 
 // setPosixMemoryRlimit 依次尝试用 RLIMIT_AS/DATA/RSS 下调内存软限。

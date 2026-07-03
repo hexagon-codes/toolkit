@@ -108,7 +108,7 @@ func launchSandboxedProcess(cfg Config, command string, args []string) (*windows
 	// 8. CreateProcessAsUser
 	var pi syscall.ProcessInformation
 	const CREATE_SUSPENDED = 0x00000004
-	const CREATE_NEW_CONSOLE = 0x00000010
+	const CREATE_NO_WINDOW = 0x08000000
 	const CREATE_UNICODE_ENVIRONMENT = 0x00000400
 
 	r, _, callErr := procCreateProcessAsUserW2.Call(
@@ -117,7 +117,7 @@ func launchSandboxedProcess(cfg Config, command string, args []string) (*windows
 		uintptr(unsafe.Pointer(cmdLineW)),
 		0, 0, // security attributes
 		1, // inherit handles
-		CREATE_SUSPENDED|CREATE_NEW_CONSOLE|CREATE_UNICODE_ENVIRONMENT,
+		CREATE_SUSPENDED|CREATE_NO_WINDOW|CREATE_UNICODE_ENVIRONMENT,
 		envPtr,
 		uintptr(unsafe.Pointer(workspaceW)),
 		uintptr(unsafe.Pointer(&si)),
