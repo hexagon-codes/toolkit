@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -29,36 +30,62 @@ func newPlatformSandbox(cfg Config) (Sandbox, error) {
 
 // Exec 在沙箱内执行命令。
 //
-// Linux 优先使用 bubblewrap，因为它能在普通桌面/CI Linux 上提供接近
-// macOS Seatbelt 的 deny-by-default 文件系统视图：workspace 读写、系统运行时
-// 只读、ReadablePaths 只读、Network=false 时 unshare net。若 bubblewrap 不可用，
-// 再使用 util-linux unshare 作为较弱但仍 fail-closed 的 namespace 后端；两者都
-// 不存在或启动失败时直接返回 sandbox unavailable，不做裸 exec fallback。
+// Linux 优先使用 bubblewrap，因为它在普通桌面/CI Linux 上提供接近 macOS Seatbelt 的
+// deny-by-default 文件系统视图：workspace 读写、系统运行时只读、ReadablePaths 只读、
+// Network=false 时 unshare net。
+//
+// 若 bubblewrap 不可用，仅剩 util-linux unshare 弱兜底：它用 user+mount namespace，
+// 但不 pivot_root 到最小 rootfs，宿主完整挂载视图对载荷仍可见/可写，策略脚本只掩蔽
+// DeniedPaths、ro-bind ReadablePaths——属 allow-first / fail-open 的弱隔离，并非
+// deny-by-default。因此：配置带机密性要求（DeniedPaths 非空）时对 unshare 兜底
+// fail-closed 拒绝执行，不静默降级；无机密性要求时才用 unshare，并在
+// ExecResult.Limits.Filesystem 上标 weak 把降级信号交给上层决策。两者都不存在或
+// 启动失败时直接返回 sandbox unavailable，不做裸 exec fallback。
 func (s *linuxSandbox) Exec(ctx context.Context, command string, args []string) (*ExecResult, error) {
 	// 应用 cfg.Timeout: 调用方 ctx 无更早 deadline 时按配置强制超时。
 	ctx, cancel := withTimeout(ctx, s.cfg.Timeout)
 	defer cancel()
 
-	runner, runnerArgs, env, err := s.linuxSandboxRunner(command, args)
+	runner, runnerArgs, env, containment, err := s.linuxSandboxRunner(command, args)
 	if err != nil {
 		return nil, err
 	}
-	res, err := runBoundedCommand(ctx, runner, runnerArgs, s.cfg.Workspace, env, s.cfg.MaxOutputBytes, s.cfg.MaxStderrBytes)
+	res, err := runBoundedCommand(ctx, runner, runnerArgs, s.cfg, env, containment)
 	if err != nil {
+		// 存储限额违规是策略结果而非后端故障: 执行本身可能已成功, 必须保留
+		// ExecResult(stdout/stderr)并原样透传携带 ErrStorageLimitExceeded 哨兵
+		// 的错误, 不得误包装成 sandbox unavailable。
+		if errors.Is(err, ErrStorageLimitExceeded) {
+			return res, err
+		}
 		return nil, fmt.Errorf("sandbox unavailable: linux backend failed: %w", err)
 	}
 	return res, nil
 }
 
-func (s *linuxSandbox) linuxSandboxRunner(command string, args []string) (string, []string, []string, error) {
+func (s *linuxSandbox) linuxSandboxRunner(command string, args []string) (string, []string, []string, LimitStatus, error) {
 	env := cleanLinuxEnv(os.Environ())
-	if bwrap, err := exec.LookPath("bwrap"); err == nil {
-		return bwrap, s.bwrapArgs(command, args), env, nil
+	_, bwrapErr := exec.LookPath("bwrap")
+	_, unshareErr := exec.LookPath("unshare")
+
+	// confidential: 调用方显式声明受保护路径即表明在意机密性; 弱兜底无法保证
+	// deny-by-default, 对其 fail-closed(详见 selectLinuxSandboxBackend)。
+	confidential := len(s.cfg.DeniedPaths) > 0
+	backend, containment, err := selectLinuxSandboxBackend(bwrapErr == nil, unshareErr == nil, confidential)
+	if err != nil {
+		return "", nil, nil, containment, err
 	}
-	if unshare, err := exec.LookPath("unshare"); err == nil {
-		return unshare, s.unshareArgs(command, args), env, nil
+
+	switch backend {
+	case linuxBackendBwrap:
+		bwrap, _ := exec.LookPath("bwrap")
+		return bwrap, s.bwrapArgs(command, args), env, containment, nil
+	case linuxBackendUnshare:
+		unshare, _ := exec.LookPath("unshare")
+		return unshare, s.unshareArgs(command, args), env, containment, nil
+	default:
+		return "", nil, nil, containment, fmt.Errorf("sandbox unavailable: linux requires bubblewrap or unshare")
 	}
-	return "", nil, nil, fmt.Errorf("sandbox unavailable: linux requires bubblewrap or unshare")
 }
 
 func (s *linuxSandbox) bwrapArgs(command string, args []string) []string {
@@ -73,14 +100,15 @@ func (s *linuxSandbox) bwrapArgs(command string, args []string) []string {
 		"--setenv", "TMP", "/tmp",
 		"--setenv", "TEMP", "/tmp",
 	}
-	if dirExists("/tmp") {
-		out = append(out, "--bind", "/tmp", "/tmp")
-	} else {
-		out = append(out, "--dir", "/tmp")
-	}
+	out = append(out, "--tmpfs", "/tmp")
 	if !s.cfg.Network {
 		out = append(out, "--unshare-net")
 	}
+	// 能力缺口（诚实标注）：DenyLoopback 在 linux 尚未实现。Network=true 时进程
+	// 共享宿主 net namespace，回环仍可达——细粒度「允许外网、禁回环」需 unshare-net +
+	// slirp/pasta 或 nftables 出站过滤，本平台暂缺。调用方（如 hexclaw code_exec）在
+	// linux 上不能依赖沙箱屏蔽本机管理端口；darwin 经 seatbelt 已强制。
+	_ = s.cfg.DenyLoopback
 	for _, p := range linuxSystemReadPaths() {
 		if dirExists(p) {
 			out = append(out, "--ro-bind", p, p)
@@ -114,10 +142,68 @@ func (s *linuxSandbox) unshareArgs(command string, args []string) []string {
 	if !s.cfg.Network {
 		out = append(out, "--net")
 	}
+
+	if len(s.cfg.ReadablePaths) > 0 || len(s.cfg.DeniedPaths) > 0 {
+		out = append(out, "--", "/bin/sh", "-eu", "-c", linuxUnsharePolicyScript, "hexclaw-unshare-policy")
+		out = append(out, "--readable")
+		for _, p := range s.cfg.ReadablePaths {
+			if p = cleanLinuxMountPath(p); p != "" && pathExists(p) {
+				out = append(out, p)
+			}
+		}
+		out = append(out, "--denied")
+		for _, p := range s.cfg.DeniedPaths {
+			if p = cleanLinuxMountPath(p); p != "" && p != "/" && pathExists(p) {
+				out = append(out, p)
+			}
+		}
+		out = append(out, "--cmd", command)
+		out = append(out, args...)
+		return out
+	}
+
 	out = append(out, "--", command)
 	out = append(out, args...)
 	return out
 }
+
+const linuxUnsharePolicyScript = `
+mode=
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+	--readable|--denied)
+		mode="$1"
+		shift
+		;;
+	--cmd)
+		shift
+		exec "$@"
+		;;
+	*)
+		case "$mode" in
+		--readable)
+			if [ -e "$1" ]; then
+				mount --bind "$1" "$1"
+				mount -o remount,bind,ro "$1"
+			fi
+			;;
+		--denied)
+			if [ -d "$1" ]; then
+				mount -t tmpfs -o size=1m,mode=000 tmpfs "$1"
+			elif [ -e "$1" ]; then
+				mount --bind /dev/null "$1"
+			fi
+			;;
+		*)
+			exit 126
+			;;
+		esac
+		shift
+		;;
+	esac
+done
+exit 127
+`
 
 // ExecCode 在沙箱内执行代码
 func (s *linuxSandbox) ExecCode(ctx context.Context, language, code string) (*ExecResult, error) {
@@ -210,4 +296,9 @@ func cleanLinuxMountPath(p string) string {
 func dirExists(p string) bool {
 	st, err := os.Stat(p)
 	return err == nil && st.IsDir()
+}
+
+func pathExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }

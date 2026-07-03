@@ -27,6 +27,12 @@ type Config struct {
 	// 不授予写权限（写仅限 Workspace）。DeniedPaths 的 deny 规则写在放行之后、保持优先。
 	ReadablePaths []string `yaml:"readable_paths"`
 	Network       bool     `yaml:"network"` // 是否允许网络，默认 false
+	// DenyLoopback 在 Network=true 时额外禁止访问本机回环地址（127.0.0.1 / ::1 /
+	// localhost）。用途：无人值守面的 code_exec 需要外网（抓网页/调 API）但绝不该
+	// 打本机管理端口——沙箱内代码经 loopback 触达本机 API server / Ollama / 其它
+	// sidecar 会构成 SSRF 与权限自提升面。默认 false 保持向后兼容；安全敏感的
+	// agent 代码执行应显式置 true。
+	DenyLoopback bool `yaml:"deny_loopback"`
 
 	// Baseline resource limits. These are intentionally conservative defaults
 	// for agent-facing code execution rather than full enterprise resource
@@ -37,7 +43,37 @@ type Config struct {
 	MaxWorkspaceBytes int64 `yaml:"max_workspace_bytes"`
 	MaxArtifactBytes  int64 `yaml:"max_artifact_bytes"`
 	MaxMemoryBytes    int64 `yaml:"max_memory_bytes"`
-	MaxProcesses      int   `yaml:"max_processes"`
+	// MaxProcesses 进程数上限。注意语义差异: POSIX 上通过 RLIMIT_NPROC 实现,
+	// 是「per-UID 进程总数 ≤ 当前同 UID 进程数 + MaxProcesses」的浮动增量,
+	// 与 Windows Job Object 的 per-job 精确上限语义不同。
+	MaxProcesses int `yaml:"max_processes"`
+}
+
+// LimitStatus 标记某项资源限制在当前平台/后端是否真实生效
+type LimitStatus string
+
+const (
+	LimitStatusEnforced    LimitStatus = "enforced"
+	LimitStatusUnsupported LimitStatus = "unsupported"
+	// LimitStatusWeak 表示该项在当前后端「有部分约束但非强隔离」——
+	// 后端存在且执行了限制动作, 但不满足 deny-by-default 语义。
+	// 典型: linux unshare 兜底不 pivot_root, 仅掩蔽 DeniedPaths, 其余宿主
+	// 文件系统对载荷仍可见/可写。上层应据此判定是否可承载机密任务。
+	LimitStatusWeak LimitStatus = "weak"
+)
+
+// LimitReport 逐项报告资源限制的实际执行状态（能力缺口显式上报，不许静默假装）
+type LimitReport struct {
+	Memory    LimitStatus
+	Processes LimitStatus
+	Storage   LimitStatus // MaxWorkspaceBytes/MaxArtifactBytes 的 walk 检查
+	Output    LimitStatus // stdout/stderr 有界缓冲
+	// Filesystem 文件系统隔离(deny-by-default containment)的实际强度:
+	//   enforced    — 强隔离(darwin Seatbelt / linux bubblewrap / windows ACL);
+	//   weak        — 弱隔离(linux unshare 兜底: 仅掩蔽 DeniedPaths, 非 deny-by-default);
+	//   unsupported — 无 OS 级文件系统隔离(basic 后端)。
+	// 降级(weak/unsupported)信号供上层(code_exec)决策是否拒载机密任务。
+	Filesystem LimitStatus
 }
 
 // ExecResult 沙箱执行结果
@@ -49,6 +85,10 @@ type ExecResult struct {
 	StderrBytes     int64
 	StdoutTruncated bool
 	StderrTruncated bool
+	// Limits 逐项报告本次执行中资源限制的实际执行状态。
+	// 平台不支持的项(如 darwin 无法下调内存 rlimit)标 unsupported,
+	// 由调用方作为能力缺口显式上报, 不许静默假装已生效。
+	Limits LimitReport
 }
 
 // Sandbox 沙箱接口

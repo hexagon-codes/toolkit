@@ -28,7 +28,8 @@ func (s *basicSandbox) Exec(ctx context.Context, command string, args []string) 
 	ctx, cancel := withTimeout(ctx, s.cfg.Timeout)
 	defer cancel()
 
-	return runBoundedCommand(ctx, command, args, s.cfg.Workspace, cleanBasicEnv(os.Environ()), s.cfg.MaxOutputBytes, s.cfg.MaxStderrBytes)
+	// basic 后端无 OS 级文件系统隔离 → unsupported(降级信号如实上报)。
+	return runBoundedCommand(ctx, command, args, s.cfg, cleanBasicEnv(os.Environ()), LimitStatusUnsupported)
 }
 
 func (s *basicSandbox) ExecCode(ctx context.Context, language, code string) (*ExecResult, error) {

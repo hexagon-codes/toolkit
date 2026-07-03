@@ -111,6 +111,12 @@ func (s *darwinSandbox) generateSBPL() string {
 	// 网络控制
 	if s.cfg.Network {
 		sb.WriteString("(allow network*)\n")
+		// DenyLoopback：允许外网但禁止本机回环——seatbelt last-match-wins，deny 规则
+		// 写在 allow 之后覆盖 loopback 目标。防沙箱内代码经 127.0.0.1/::1 打本机
+		// 管理端口（API server 自提权 / Ollama / 其它 sidecar）构成 SSRF/提权面。
+		if s.cfg.DenyLoopback {
+			sb.WriteString("(deny network-outbound (remote ip \"localhost:*\"))\n")
+		}
 	} else {
 		sb.WriteString("(deny network*)\n")
 		// 允许本地 DNS 和 loopback (某些运行时需要)
@@ -131,8 +137,8 @@ func (s *darwinSandbox) Exec(ctx context.Context, command string, args []string)
 	sandboxArgs := []string{"-p", sbpl, command}
 	sandboxArgs = append(sandboxArgs, args...)
 
-	// 清理危险环境变量
-	return runBoundedCommand(ctx, "sandbox-exec", sandboxArgs, s.cfg.Workspace, cleanEnv(os.Environ()), s.cfg.MaxOutputBytes, s.cfg.MaxStderrBytes)
+	// 清理危险环境变量。Seatbelt (deny default SBPL) 提供强文件系统隔离 → enforced。
+	return runBoundedCommand(ctx, "sandbox-exec", sandboxArgs, s.cfg, cleanEnv(os.Environ()), LimitStatusEnforced)
 }
 
 // ExecCode 在沙箱内执行代码

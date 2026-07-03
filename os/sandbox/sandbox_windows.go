@@ -33,6 +33,10 @@ func newPlatformSandbox(cfg Config) (Sandbox, error) {
 }
 
 func (s *windowsSandbox) Exec(ctx context.Context, command string, args []string) (*ExecResult, error) {
+	if err := enforceSandboxStorageLimits(s.cfg); err != nil {
+		return nil, err
+	}
+
 	// Validate escape vectors
 	if err := validateWindowsEscapeVectors(command, args); err != nil {
 		return nil, fmt.Errorf("security check failed: %w", err)
@@ -70,7 +74,7 @@ func (s *windowsSandbox) Exec(ctx context.Context, command string, args []string
 		} else if wait.err != nil {
 			exitCode = 1
 		}
-		return &ExecResult{
+		res := &ExecResult{
 			Stdout:          proc.stdout.String(),
 			Stderr:          proc.stderr.String(),
 			ExitCode:        exitCode,
@@ -78,7 +82,12 @@ func (s *windowsSandbox) Exec(ctx context.Context, command string, args []string
 			StderrBytes:     proc.stderr.BytesSeen(),
 			StdoutTruncated: proc.stdout.Truncated(),
 			StderrTruncated: proc.stderr.Truncated(),
-		}, nil
+			Limits:          windowsLimitReport(),
+		}
+		if err := enforceSandboxStorageLimits(s.cfg); err != nil {
+			return res, err
+		}
+		return res, nil
 	case <-ctx.Done():
 		_ = proc.Kill()
 		<-done
@@ -90,7 +99,7 @@ func (s *windowsSandbox) Exec(ctx context.Context, command string, args []string
 		if stderrBytes == 0 {
 			stderrBytes = int64(len(stderr))
 		}
-		return &ExecResult{
+		res := &ExecResult{
 			Stdout:          proc.stdout.String(),
 			Stderr:          stderr,
 			ExitCode:        -1,
@@ -98,7 +107,29 @@ func (s *windowsSandbox) Exec(ctx context.Context, command string, args []string
 			StderrBytes:     stderrBytes,
 			StdoutTruncated: proc.stdout.Truncated(),
 			StderrTruncated: proc.stderr.Truncated(),
-		}, ctx.Err()
+			Limits:          windowsLimitReport(),
+		}
+		if limitErr := enforceSandboxStorageLimits(s.cfg); limitErr != nil {
+			// 存储限额错误也用 %w 包装, 保证 ErrStorageLimitExceeded 哨兵可被 errors.Is 命中
+			return res, fmt.Errorf("sandbox exec terminated by timeout/cancel: %w; storage limit check failed: %w", ctx.Err(), limitErr)
+		}
+		return res, ctx.Err()
+	}
+}
+
+// windowsLimitReport 报告 Windows 后端各资源限制项的实际执行状态。
+//
+// Job Object 真实执行 memory/processes 上限(创建失败时 Exec 直接报错, 不会
+// 走到结果构造), Storage walk 检查与有界输出缓冲由本包纯用户态实现,
+// 受限令牌 + ACL(workspace RW / ReadablePaths RO / DeniedPaths deny)提供
+// deny-by-default 文件系统隔离, 均恒 enforced。
+func windowsLimitReport() LimitReport {
+	return LimitReport{
+		Memory:     LimitStatusEnforced,
+		Processes:  LimitStatusEnforced,
+		Storage:    LimitStatusEnforced,
+		Output:     LimitStatusEnforced,
+		Filesystem: LimitStatusEnforced,
 	}
 }
 
