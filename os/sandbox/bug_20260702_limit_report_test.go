@@ -27,6 +27,9 @@ func TestBug20260702_LimitReportMatchesPlatformCapability(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Exec: %v", err)
 	}
+	if res.ExitCode != 0 {
+		t.Fatalf("Exec exit code = %d, stderr=%q", res.ExitCode, res.Stderr)
+	}
 
 	wantMemory := LimitStatusEnforced
 	if runtime.GOOS == "darwin" {
@@ -62,6 +65,9 @@ func TestBug20260702_LimitReportOutputEnforcedMatchesBehavior(t *testing.T) {
 	res, err := sb.Exec(context.Background(), "/bin/sh", []string{"-c", "printf '%0.s0' $(seq 1 4096)"})
 	if err != nil {
 		t.Fatalf("Exec: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("Exec exit code = %d, stderr=%q", res.ExitCode, res.Stderr)
 	}
 	if res.Limits.Output != LimitStatusEnforced {
 		t.Fatalf("Limits.Output = %q, want enforced", res.Limits.Output)

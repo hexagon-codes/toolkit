@@ -16,6 +16,10 @@ jobs:
         with:
           # 浮动到 1.25 线最新补丁: stdlib 安全修复(govulncheck)自动吸收, 勿钉死具体补丁号
           go-version: '1.25.x'
+      - name: Install Linux sandbox dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap util-linux
       - run: go mod download
       - name: Build
         run: go build ./...

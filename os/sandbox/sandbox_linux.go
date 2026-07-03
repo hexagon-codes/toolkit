@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 )
 
 // linuxSandbox Linux Namespace + seccomp 沙箱
@@ -67,11 +69,12 @@ func (s *linuxSandbox) linuxSandboxRunner(command string, args []string) (runner
 	env = cleanLinuxEnv(os.Environ())
 	bwrap, bwrapErr := exec.LookPath("bwrap")
 	unshare, unshareErr := exec.LookPath("unshare")
+	unshareAvailable := unshareErr == nil && linuxUnshareBackendUsable(unshare)
 
 	// confidential: 调用方显式声明受保护路径即表明在意机密性; 弱兜底无法保证
 	// deny-by-default, 对其 fail-closed(详见 selectLinuxSandboxBackend)。
 	confidential := len(s.cfg.DeniedPaths) > 0
-	backend, containment, err := selectLinuxSandboxBackend(bwrapErr == nil, unshareErr == nil, confidential)
+	backend, containment, err := selectLinuxSandboxBackend(bwrapErr == nil, unshareAvailable, confidential)
 	if err != nil {
 		return "", nil, nil, containment, err
 	}
@@ -84,6 +87,37 @@ func (s *linuxSandbox) linuxSandboxRunner(command string, args []string) (runner
 	default:
 		return "", nil, nil, containment, fmt.Errorf("sandbox unavailable: linux requires bubblewrap or unshare")
 	}
+}
+
+var (
+	linuxUnshareProbeOnce sync.Once
+	linuxUnshareProbeOK   bool
+)
+
+func linuxUnshareBackendUsable(unshare string) bool {
+	if unshare == "" {
+		return false
+	}
+	linuxUnshareProbeOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		cmd := exec.CommandContext(ctx, unshare,
+			"--user",
+			"--map-root-user",
+			"--mount",
+			"--pid",
+			"--fork",
+			"--mount-proc",
+			"--",
+			"/bin/sh",
+			"-c",
+			"exit 0",
+		)
+		cmd.Env = cleanLinuxEnv(os.Environ())
+		linuxUnshareProbeOK = cmd.Run() == nil
+	})
+	return linuxUnshareProbeOK
 }
 
 func (s *linuxSandbox) bwrapArgs(command string, args []string) []string {

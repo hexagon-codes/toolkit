@@ -17,8 +17,12 @@ func TestBug20260702_LinuxRunnerFailsClosedWhenOnlyUnshareAndConfidential(t *tes
 	if _, err := exec.LookPath("bwrap"); err == nil {
 		t.Skip("bubblewrap 可用, 强隔离路径生效, 无需触发弱兜底 fail-closed")
 	}
-	if _, err := exec.LookPath("unshare"); err != nil {
+	unshare, err := exec.LookPath("unshare")
+	if err != nil {
 		t.Skip("unshare 亦不可用, 无弱兜底路径可测")
+	}
+	if !linuxUnshareBackendUsable(unshare) {
+		t.Skip("unshare 二进制存在但当前 runner 禁止 user namespace, 无弱兜底路径可测")
 	}
 
 	s := &linuxSandbox{cfg: Config{
@@ -43,8 +47,12 @@ func TestBug20260702_LinuxUnshareExecReportsWeakFilesystem(t *testing.T) {
 	if _, err := exec.LookPath("bwrap"); err == nil {
 		t.Skip("bubblewrap 可用, 走 enforced 强隔离路径")
 	}
-	if _, err := exec.LookPath("unshare"); err != nil {
+	unshare, err := exec.LookPath("unshare")
+	if err != nil {
 		t.Skip("unshare 不可用")
+	}
+	if !linuxUnshareBackendUsable(unshare) {
+		t.Skip("unshare 二进制存在但当前 runner 禁止 user namespace")
 	}
 
 	s := &linuxSandbox{cfg: Config{Workspace: t.TempDir()}} // 无 DeniedPaths → 非机密

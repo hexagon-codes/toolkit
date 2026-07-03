@@ -6,6 +6,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -135,7 +137,8 @@ func windowsLimitReport() LimitReport {
 
 func (s *windowsSandbox) ExecCode(ctx context.Context, language, code string) (*ExecResult, error) {
 	var ext, runner string
-	switch strings.ToLower(language) {
+	lang := strings.ToLower(language)
+	switch lang {
 	case "python", "python3":
 		ext, runner = ".py", "python"
 	case "javascript", "js", "node":
@@ -153,10 +156,47 @@ func (s *windowsSandbox) ExecCode(ctx context.Context, language, code string) (*
 	defer os.Remove(tmpFile)
 
 	var args []string
-	if language == "go" || language == "golang" {
+	if lang == "go" || lang == "golang" {
 		args = []string{"run", tmpFile}
 	} else {
 		args = []string{tmpFile}
 	}
-	return s.Exec(ctx, runner, args)
+
+	runCfg := s.cfg
+	if resolvedRunner, runtimePath := resolveWindowsRuntimeForExecCode(runner); resolvedRunner != "" {
+		runner = resolvedRunner
+		if runtimePath != "" {
+			runCfg.ReadablePaths = appendUniqueWindowsPath(runCfg.ReadablePaths, runtimePath)
+		}
+	}
+
+	runSandbox := *s
+	runSandbox.cfg = runCfg
+	return runSandbox.Exec(ctx, runner, args)
+}
+
+func resolveWindowsRuntimeForExecCode(runner string) (resolvedRunner string, readablePath string) {
+	resolvedRunner = runner
+	path, err := exec.LookPath(runner)
+	if err != nil {
+		return resolvedRunner, ""
+	}
+	if path == "" {
+		return resolvedRunner, ""
+	}
+	resolvedRunner = path
+	return resolvedRunner, filepath.Dir(path)
+}
+
+func appendUniqueWindowsPath(paths []string, path string) []string {
+	if path == "" {
+		return paths
+	}
+	clean := filepath.Clean(path)
+	for _, existing := range paths {
+		if strings.EqualFold(filepath.Clean(existing), clean) {
+			return paths
+		}
+	}
+	return append(paths, clean)
 }

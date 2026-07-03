@@ -63,7 +63,7 @@ func selectLinuxSandboxBackend(bwrapAvailable, unshareAvailable, confidential bo
 		}
 		return linuxBackendUnshare, LimitStatusWeak, nil
 	}
-	return linuxBackendNone, LimitStatusUnsupported, errors.New("sandbox unavailable: linux requires bubblewrap or unshare")
+	return linuxBackendNone, LimitStatusUnsupported, errors.New("sandbox unavailable: linux requires bubblewrap or usable unshare")
 }
 
 // storageWalkVisitHook 仅供测试注入(模拟 walk 期间文件被并发删除的竞态窗口), 生产恒为 nil。
