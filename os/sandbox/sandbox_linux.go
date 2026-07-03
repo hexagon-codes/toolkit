@@ -69,12 +69,13 @@ func (s *linuxSandbox) linuxSandboxRunner(command string, args []string) (runner
 	env = cleanLinuxEnv(os.Environ())
 	bwrap, bwrapErr := exec.LookPath("bwrap")
 	unshare, unshareErr := exec.LookPath("unshare")
+	bwrapAvailable := bwrapErr == nil && linuxBwrapBackendUsable(bwrap, s.cfg.Network)
 	unshareAvailable := unshareErr == nil && linuxUnshareBackendUsable(unshare)
 
 	// confidential: 调用方显式声明受保护路径即表明在意机密性; 弱兜底无法保证
 	// deny-by-default, 对其 fail-closed(详见 selectLinuxSandboxBackend)。
 	confidential := len(s.cfg.DeniedPaths) > 0
-	backend, containment, err := selectLinuxSandboxBackend(bwrapErr == nil, unshareAvailable, confidential)
+	backend, containment, err := selectLinuxSandboxBackend(bwrapAvailable, unshareAvailable, confidential)
 	if err != nil {
 		return "", nil, nil, containment, err
 	}
@@ -90,9 +91,45 @@ func (s *linuxSandbox) linuxSandboxRunner(command string, args []string) (runner
 }
 
 var (
-	linuxUnshareProbeOnce sync.Once
-	linuxUnshareProbeOK   bool
+	linuxBwrapOnlineProbeOnce  sync.Once
+	linuxBwrapOnlineProbeOK    bool
+	linuxBwrapOfflineProbeOnce sync.Once
+	linuxBwrapOfflineProbeOK   bool
+	linuxUnshareProbeOnce      sync.Once
+	linuxUnshareProbeOK        bool
 )
+
+func linuxBwrapBackendUsable(bwrap string, network bool) bool {
+	if bwrap == "" {
+		return false
+	}
+	if network {
+		linuxBwrapOnlineProbeOnce.Do(func() {
+			linuxBwrapOnlineProbeOK = runLinuxBwrapProbe(bwrap, true)
+		})
+		return linuxBwrapOnlineProbeOK
+	}
+	linuxBwrapOfflineProbeOnce.Do(func() {
+		linuxBwrapOfflineProbeOK = runLinuxBwrapProbe(bwrap, false)
+	})
+	return linuxBwrapOfflineProbeOK
+}
+
+func runLinuxBwrapProbe(bwrap string, network bool) bool {
+	ws, err := os.MkdirTemp("", "toolkit-bwrap-probe-*")
+	if err != nil {
+		return false
+	}
+	defer os.RemoveAll(ws)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	s := &linuxSandbox{cfg: Config{Workspace: ws, Network: network}}
+	cmd := exec.CommandContext(ctx, bwrap, s.bwrapArgs("/bin/sh", []string{"-c", "exit 0"})...)
+	cmd.Env = cleanLinuxEnv(os.Environ())
+	return cmd.Run() == nil
+}
 
 func linuxUnshareBackendUsable(unshare string) bool {
 	if unshare == "" {

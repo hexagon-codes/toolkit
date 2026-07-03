@@ -14,7 +14,7 @@ import (
 //   - windows: Job Object 真实执行 → Memory/Processes 均 enforced;
 //   - 所有平台: Storage(walk 检查)/Output(有界缓冲)恒 enforced。
 func TestBug20260702_LimitReportMatchesPlatformCapability(t *testing.T) {
-	sb, err := New(Config{Workspace: t.TempDir()})
+	sb, err := New(Config{Workspace: t.TempDir(), Network: true})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -56,6 +56,7 @@ func TestBug20260702_LimitReportOutputEnforcedMatchesBehavior(t *testing.T) {
 	}
 	sb, err := New(Config{
 		Workspace:      t.TempDir(),
+		Network:        true,
 		MaxOutputBytes: 16,
 	})
 	if err != nil {

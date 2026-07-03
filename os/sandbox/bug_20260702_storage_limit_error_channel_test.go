@@ -25,6 +25,7 @@ func TestBug20260702_StorageLimitViolationCarriesSentinelAndResult(t *testing.T)
 	ws := t.TempDir()
 	sb, err := New(Config{
 		Workspace:         ws,
+		Network:           true,
 		MaxWorkspaceBytes: 5, // 执行会写 10 字节 → 后置检查违规
 	})
 	if err != nil {
