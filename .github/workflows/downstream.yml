@@ -11,7 +11,9 @@ on:
 jobs:
   downstream:
     name: ai-core + hexagon + hexclaw against this toolkit
-    runs-on: ubuntu-latest
+    # hexclaw exercises toolkit/os/sandbox for real code_exec coverage. Keep this
+    # aligned with sandbox-code-exec.yml's Linux runner where bubblewrap works.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
         with: { path: toolkit }

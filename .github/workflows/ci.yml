@@ -9,7 +9,9 @@ on:
 jobs:
   test:
     name: Test
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 hosted runners currently disable the namespace features that
+    # bubblewrap/unshare need. Keep sandbox-bearing tests on the known-good image.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
