@@ -74,6 +74,14 @@ func ValidateLocalURL(rawURL string) error {
 // 用于接受用户/模型提供的 URL 再发起请求的场景（抓取、浏览器、MCP HTTP 等）。
 // 通过 DNS 解析后逐一检查解析 IP，抵御 DNS rebinding。
 func ValidateURL(rawURL string) error {
+	return validateURLWithResolver(rawURL, net.LookupHost)
+}
+
+// lookupHostFunc is the narrow DNS seam used by deterministic tests. Production
+// always enters through ValidateURL and therefore uses the process' real resolver.
+type lookupHostFunc func(host string) ([]string, error)
+
+func validateURLWithResolver(rawURL string, lookupHost lookupHostFunc) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("invalid URL: %w", err)
@@ -90,7 +98,7 @@ func ValidateURL(rawURL string) error {
 	}
 
 	// 解析 IP
-	ips, err := net.LookupHost(host)
+	ips, err := lookupHost(host)
 	if err != nil {
 		// DNS 解析失败时拒绝请求，防止 DNS rebinding 攻击
 		return fmt.Errorf("DNS lookup failed for %s: %w", host, err)
