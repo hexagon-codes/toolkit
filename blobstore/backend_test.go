@@ -5,9 +5,12 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestSaveStream_RoundTrip 验证流式保存大内容后可经 OpenReader 完整读回。
@@ -58,6 +61,45 @@ func TestSaveStream_Empty(t *testing.T) {
 	s := newTestStore(t)
 	if _, err := s.SaveStream(context.Background(), strings.NewReader(""), "bin"); err == nil {
 		t.Error("空内容应返回错误")
+	}
+}
+
+func TestSaveStream_RejectsUnsafeExtension(t *testing.T) {
+	s := newTestStore(t)
+	for _, ext := range []string{"../../outside", "png/child", `png\\child`, "/tmp/png", "图片", strings.Repeat("a", 17)} {
+		t.Run(ext, func(t *testing.T) {
+			if rel, err := s.SaveStream(context.Background(), strings.NewReader("stream"), ext); err == nil {
+				t.Fatalf("SaveStream(%q) returned unsafe path %q; want error", ext, rel)
+			}
+		})
+	}
+}
+
+func TestSaveStream_RejectsEscapingSymlinkedStorageSubdirectory(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "store")
+	s, err := NewStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(parent, "outside")
+	if err := os.Mkdir(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	monthDir := filepath.Join(root, time.Now().Format("200601"))
+	if err := os.Symlink(outside, monthDir); err != nil {
+		t.Skipf("symlink unavailable on this platform: %v", err)
+	}
+
+	if rel, err := s.SaveStream(context.Background(), strings.NewReader("stream"), "png"); err == nil {
+		t.Fatalf("SaveStream followed an escaping symlink: %q", rel)
+	}
+	entries, err := os.ReadDir(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("SaveStream wrote outside root through symlink: %v", entries)
 	}
 }
 

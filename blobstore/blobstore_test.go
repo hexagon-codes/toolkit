@@ -100,6 +100,95 @@ func TestSaveBytes_Empty(t *testing.T) {
 	}
 }
 
+// TestSaveBytes_RejectsUnsafeExtension verifies that an extension can never
+// introduce another path component or an OS-dependent path interpretation.
+func TestSaveBytes_RejectsUnsafeExtension(t *testing.T) {
+	s := newTestStore(t)
+	tests := []struct {
+		name string
+		ext  string
+	}{
+		{name: "parent traversal", ext: "../../outside"},
+		{name: "forward separator", ext: "png/child"},
+		{name: "backward separator", ext: `png\\child`},
+		{name: "unix absolute", ext: "/tmp/png"},
+		{name: "windows absolute", ext: `C:\\temp\\png`},
+		{name: "dot component", ext: ".."},
+		{name: "unicode confusable", ext: "ｐｎｇ"},
+		{name: "unicode letters", ext: "图片"},
+		{name: "embedded nul", ext: "png\x00jpg"},
+		{name: "too long", ext: strings.Repeat("a", 17)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if rel, err := s.SaveBytes([]byte("untrusted extension"), tt.ext); err == nil {
+				t.Fatalf("SaveBytes(%q) returned unsafe path %q; want error", tt.ext, rel)
+			}
+		})
+	}
+}
+
+func TestSaveBytes_ReturnedPathIsContainedByRoot(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "store")
+	s, err := NewStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.SaveBytes([]byte("containment"), "../../escaped"); err == nil {
+		t.Fatal("path-escaping extension must be rejected")
+	}
+	if _, err := os.Stat(filepath.Join(parent, "escaped")); !os.IsNotExist(err) {
+		t.Fatalf("extension escaped store root: stat error = %v", err)
+	}
+
+	rel, err := s.SaveBytes([]byte("containment"), ".PNG")
+	if err != nil {
+		t.Fatalf("safe extension rejected: %v", err)
+	}
+	abs := filepath.Join(root, filepath.FromSlash(rel))
+	relToRoot, err := filepath.Rel(root, abs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if relToRoot == ".." || strings.HasPrefix(relToRoot, ".."+string(filepath.Separator)) || filepath.IsAbs(relToRoot) {
+		t.Fatalf("returned path %q escapes root %q", rel, root)
+	}
+	if !strings.HasSuffix(rel, ".png") {
+		t.Fatalf("extension must be canonical lowercase, got %q", rel)
+	}
+}
+
+func TestSaveBytes_RejectsSymlinkedStorageSubdirectory(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "store")
+	s, err := NewStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(parent, "outside")
+	if err := os.Mkdir(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	monthDir := filepath.Join(root, time.Now().Format("200601"))
+	if err := os.Symlink(outside, monthDir); err != nil {
+		t.Skipf("symlink unavailable on this platform: %v", err)
+	}
+
+	if rel, err := s.SaveBytes([]byte("must stay contained"), "png"); err == nil {
+		t.Fatalf("SaveBytes followed a symlinked storage directory: %q", rel)
+	}
+	entries, err := os.ReadDir(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("SaveBytes wrote outside root through symlink: %v", entries)
+	}
+}
+
 // TestOpen_PathTraversalBlocked 安全：路径穿越必须被拒绝
 //
 // 这是 Critical 安全测试 — 如果 Open 接受 "../xxx"，
@@ -149,6 +238,30 @@ func TestOpen_ValidPath(t *testing.T) {
 	n, _ := f.Read(buf)
 	if string(buf[:n]) != "content" {
 		t.Errorf("content mismatch: got %q want %q", buf[:n], "content")
+	}
+}
+
+func TestOpen_BlocksEscapingSymlink(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "store")
+	s, err := NewStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(parent, "outside")
+	if err := os.Mkdir(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "secret"), []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "link")); err != nil {
+		t.Skipf("symlink unavailable on this platform: %v", err)
+	}
+
+	if f, err := s.Open("link/secret"); err == nil {
+		_ = f.Close()
+		t.Fatal("Open followed a symlink outside the store root")
 	}
 }
 

@@ -13,6 +13,7 @@ package blobstore
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -37,8 +38,12 @@ func NewStore(root string) (*Store, error) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", root, err)
 	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve root %s: %w", root, err)
+	}
 	return &Store{
-		root: root,
+		root: rootAbs,
 		// 远程下载可能较慢（如视频）
 		httpc: httpx.RawClient(httpx.WithRawTimeout(5 * time.Minute)),
 	}, nil
@@ -54,35 +59,44 @@ func (s *Store) SaveBytes(data []byte, ext string) (string, error) {
 	if len(data) == 0 {
 		return "", fmt.Errorf("empty data")
 	}
-	if ext == "" {
-		ext = "bin"
+	var err error
+	ext, err = normalizeExtension(ext)
+	if err != nil {
+		return "", err
 	}
-	ext = strings.TrimPrefix(ext, ".")
 
 	sum := sha256.Sum256(data)
 	hash := hex.EncodeToString(sum[:])
 
 	subdir := time.Now().Format("200601") // YYYYMM
 	relPath := filepath.Join(subdir, hash+"."+ext)
-	abs := filepath.Join(s.root, relPath)
+	if _, err := containedPath(s.root, relPath); err != nil {
+		return "", err
+	}
+	root, err := os.OpenRoot(s.root)
+	if err != nil {
+		return "", fmt.Errorf("open blob root: %w", err)
+	}
+	defer root.Close()
 
 	// 已存在（同内容）则跳过写入
-	if _, err := os.Stat(abs); err == nil {
+	if _, err := root.Stat(relPath); err == nil {
 		return filepath.ToSlash(relPath), nil
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("stat blob: %w", err)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+	if err := root.MkdirAll(subdir, 0o755); err != nil {
 		return "", fmt.Errorf("mkdir: %w", err)
 	}
 	// 原子写入：唯一 tmp + rename，避免并发写入者（或多进程共享目录）互相覆盖
-	// 对方仍在写的 tmp。CreateTemp 保证文件名唯一，rename 是 POSIX 原子操作。
-	tmp, err := os.CreateTemp(filepath.Dir(abs), filepath.Base(abs)+".tmp.*")
+	// 对方仍在写的 tmp。所有操作都经 os.Root 完成，符号链接不能把文件写出 root。
+	tmp, tmpPath, err := createRootTemp(root, subdir, filepath.Base(relPath)+".tmp.")
 	if err != nil {
 		return "", fmt.Errorf("create tmp: %w", err)
 	}
-	tmpPath := tmp.Name()
 	// 写 + 正确 close；失败路径下 best-effort 清理
-	cleanupTmp := func() { _ = os.Remove(tmpPath) }
+	cleanupTmp := func() { _ = root.Remove(tmpPath) }
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
 		cleanupTmp()
@@ -93,11 +107,63 @@ func (s *Store) SaveBytes(data []byte, ext string) (string, error) {
 		return "", fmt.Errorf("close tmp %s: %w", tmpPath, err)
 	}
 	// Rename 成功即视为落盘；若另一并发写者先完成，此处 Rename 覆盖，内容等价（SHA-256 一致）
-	if err := os.Rename(tmpPath, abs); err != nil {
+	if err := root.Rename(tmpPath, relPath); err != nil {
+		// Windows 不允许 Rename 覆盖已存在目标；并发写入同一内容时目标等价。
+		if _, statErr := root.Stat(relPath); statErr == nil {
+			cleanupTmp()
+			return filepath.ToSlash(relPath), nil
+		}
 		cleanupTmp()
-		return "", fmt.Errorf("rename %s→%s: %w", tmpPath, abs, err)
+		return "", fmt.Errorf("rename %s→%s: %w", tmpPath, relPath, err)
 	}
 	return filepath.ToSlash(relPath), nil
+}
+
+func createRootTemp(root *os.Root, dir, prefix string) (*os.File, string, error) {
+	for range 10 {
+		random := make([]byte, 16)
+		if _, err := cryptorand.Read(random); err != nil {
+			return nil, "", err
+		}
+		name := filepath.Join(dir, prefix+hex.EncodeToString(random))
+		f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			return f, name, nil
+		}
+		if !os.IsExist(err) {
+			return nil, "", err
+		}
+	}
+	return nil, "", fmt.Errorf("temporary filename collisions exhausted")
+}
+
+func normalizeExtension(ext string) (string, error) {
+	if ext == "" {
+		return "bin", nil
+	}
+	ext = strings.TrimPrefix(ext, ".")
+	if len(ext) == 0 || len(ext) > 16 {
+		return "", fmt.Errorf("invalid extension")
+	}
+	for i := 0; i < len(ext); i++ {
+		c := ext[i]
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') {
+			return "", fmt.Errorf("invalid extension")
+		}
+	}
+	return strings.ToLower(ext), nil
+}
+
+func containedPath(root, relPath string) (string, error) {
+	abs := filepath.Join(root, relPath)
+	relToRoot, err := filepath.Rel(root, abs)
+	if err != nil {
+		return "", fmt.Errorf("resolve blob path: %w", err)
+	}
+	if relToRoot == ".." || strings.HasPrefix(relToRoot, ".."+string(filepath.Separator)) || filepath.IsAbs(relToRoot) {
+		return "", fmt.Errorf("blob path escapes root")
+	}
+	return abs, nil
 }
 
 // SaveFromURL 下载远程 URL 并落盘，返回相对路径。
@@ -134,17 +200,14 @@ func (s *Store) SaveFromURL(ctx context.Context, url, ext string) (string, error
 // relPath 必须是 SaveBytes 返回的相对路径形式（forward slash + 子目录/哈希名）。
 func (s *Store) Open(relPath string) (*os.File, error) {
 	relPath = filepath.FromSlash(strings.TrimLeft(relPath, "/"))
-	abs, err := filepath.Abs(filepath.Join(s.root, relPath))
-	if err != nil {
+	if _, err := containedPath(s.root, relPath); err != nil {
 		return nil, err
 	}
-	rootAbs, err := filepath.Abs(s.root)
+	root, err := os.OpenRoot(s.root)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open blob root: %w", err)
 	}
-	// 防止 ../../../etc/passwd 穿越
-	if !strings.HasPrefix(abs, rootAbs+string(filepath.Separator)) && abs != rootAbs {
-		return nil, fmt.Errorf("path escape blocked: %s", relPath)
-	}
-	return os.Open(abs)
+	f, err := root.Open(relPath)
+	_ = root.Close()
+	return f, err
 }

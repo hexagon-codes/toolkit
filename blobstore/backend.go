@@ -15,7 +15,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 )
 
@@ -44,18 +43,23 @@ var _ Blobstore = (*Store)(nil)
 // 内容读进内存：边读边写临时文件、同时计算哈希，读完后按哈希 rename 到最终路径。
 // 适合视频等大文件。ext 不带点；空内容返回错误；ctx 取消会中断读取。
 func (s *Store) SaveStream(ctx context.Context, r io.Reader, ext string) (string, error) {
-	if ext == "" {
-		ext = "bin"
+	var err error
+	ext, err = normalizeExtension(ext)
+	if err != nil {
+		return "", err
 	}
-	ext = strings.TrimPrefix(ext, ".")
+	root, err := os.OpenRoot(s.root)
+	if err != nil {
+		return "", fmt.Errorf("open blob root: %w", err)
+	}
+	defer root.Close()
 
 	// 临时文件落在根目录下，确保与最终路径同一文件系统（rename 原子）。
-	tmp, err := os.CreateTemp(s.root, ".stream.*.tmp")
+	tmp, tmpPath, err := createRootTemp(root, ".", ".stream.")
 	if err != nil {
 		return "", fmt.Errorf("create tmp: %w", err)
 	}
-	tmpPath := tmp.Name()
-	cleanupTmp := func() { _ = os.Remove(tmpPath) }
+	cleanupTmp := func() { _ = root.Remove(tmpPath) }
 
 	h := sha256.New()
 	// 边写临时文件边计算哈希；ctxReader 让取消能中断长时间拷贝。
@@ -77,20 +81,30 @@ func (s *Store) SaveStream(ctx context.Context, r io.Reader, ext string) (string
 	hash := hex.EncodeToString(h.Sum(nil))
 	subdir := time.Now().Format("200601") // YYYYMM
 	relPath := filepath.Join(subdir, hash+"."+ext)
-	abs := filepath.Join(s.root, relPath)
+	if _, err := containedPath(s.root, relPath); err != nil {
+		cleanupTmp()
+		return "", err
+	}
 
 	// 同内容已存在则丢弃临时文件、复用既有。
-	if _, statErr := os.Stat(abs); statErr == nil {
+	if _, statErr := root.Stat(relPath); statErr == nil {
 		cleanupTmp()
 		return filepath.ToSlash(relPath), nil
+	} else if !os.IsNotExist(statErr) {
+		cleanupTmp()
+		return "", fmt.Errorf("stat blob: %w", statErr)
 	}
-	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+	if err := root.MkdirAll(subdir, 0o755); err != nil {
 		cleanupTmp()
 		return "", fmt.Errorf("mkdir: %w", err)
 	}
-	if err := os.Rename(tmpPath, abs); err != nil {
+	if err := root.Rename(tmpPath, relPath); err != nil {
+		if _, statErr := root.Stat(relPath); statErr == nil {
+			cleanupTmp()
+			return filepath.ToSlash(relPath), nil
+		}
 		cleanupTmp()
-		return "", fmt.Errorf("rename %s→%s: %w", tmpPath, abs, err)
+		return "", fmt.Errorf("rename %s→%s: %w", tmpPath, relPath, err)
 	}
 	return filepath.ToSlash(relPath), nil
 }
