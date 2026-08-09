@@ -17,6 +17,8 @@ Redis-based distributed cache providing two caching strategies: **StableCache** 
 - **Timeout Control**: Configurable read/write timeouts
 - **Error Fallback**: Automatically falls back to DB on Redis error
 
+The caller owns the connection. In production, open and probe it with `infra/redisconn.Factory.Open` during readiness, then inject the returned `redis.UniversalClient` into the cache. The current security policy accepts either no static authentication or a username/password pair; password-only configuration is intentionally rejected.
+
 ## Installation
 
 ```bash
@@ -33,11 +35,13 @@ package main
 
 import (
     "context"
+    "crypto/tls"
     "fmt"
+    "os"
     "time"
 
     "github.com/hexagon-codes/toolkit/cache/redis"
-    goredis "github.com/redis/go-redis/v9"
+    "github.com/hexagon-codes/toolkit/infra/redisconn"
 )
 
 type User struct {
@@ -46,19 +50,36 @@ type User struct {
 }
 
 func main() {
-    // Create Redis client
-    rdb := goredis.NewClient(&goredis.Options{
-        Addr: "localhost:6379",
-    })
+    ctx := context.Background()
+    connection := redisconn.DefaultConfig(redisconn.ModeSingle, os.Getenv("REDIS_ADDR"))
+    connection.DataCredentials = redisconn.Credentials{
+        Username: os.Getenv("REDIS_USERNAME"),
+        Password: os.Getenv("REDIS_PASSWORD"),
+    }
+    if serverName := os.Getenv("REDIS_TLS_SERVER_NAME"); serverName != "" {
+        connection.TLSConfig = &tls.Config{
+            MinVersion: tls.VersionTLS12,
+            ServerName: serverName,
+        }
+    }
+    factory, err := redisconn.NewFactory(connection)
+    if err != nil {
+        panic(err)
+    }
+    startupCtx, cancelStartup := context.WithTimeout(ctx, 5*time.Second)
+    rdb, err := factory.Open(startupCtx) // Verify topology, TLS, and ACL during startup.
+    cancelStartup()
+    if err != nil {
+        panic(err)
+    }
+    defer rdb.Close()
 
     // Create stable-key cache
     cache := redis.NewStableCache(rdb)
 
-    ctx := context.Background()
-
     // Get or load data
     var user User
-    err := cache.GetOrLoad(ctx, "user:123", 60*time.Minute, &user,
+    err = cache.GetOrLoad(ctx, "user:123", 60*time.Minute, &user,
         func(ctx context.Context) (any, error) {
             return fetchUserFromDB(ctx, 123)
         },
@@ -120,7 +141,7 @@ func NewStableCache(client redis.UniversalClient, opts ...Option) *StableCache
 **Example**:
 
 ```go
-rdb := goredis.NewClient(&goredis.Options{Addr: "localhost:6379"})
+// rdb is opened and probed by redisconn.Factory during startup.
 cache := redis.NewStableCache(rdb)
 ```
 
@@ -217,7 +238,7 @@ func NewUnstableCache(client redis.UniversalClient, versionKey string, opts ...O
 **Example**:
 
 ```go
-rdb := goredis.NewClient(&goredis.Options{Addr: "localhost:6379"})
+// rdb is opened and probed by redisconn.Factory during startup.
 cache := redis.NewUnstableCache(rdb, "ability:version")
 ```
 
@@ -583,8 +604,7 @@ import (
 // Create local cache
 localCache := local.NewCache(1000)
 
-// Create Redis cache
-rdb := goredis.NewClient(&goredis.Options{Addr: "localhost:6379"})
+// rdb comes from redisconn.Factory.Open; do not duplicate auth in the cache layer.
 redisCache := redis.NewStableCache(rdb)
 
 // Combine into multi-level cache

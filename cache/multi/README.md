@@ -15,6 +15,8 @@
 
 ## 使用示例
 
+Redis 客户端由 `infra/redisconn` 创建后注入本缓存；静态认证只接受“无认证”或完整的用户名、密码对，password-only 会被主动拒绝。
+
 ### 基本用法
 
 ```go
@@ -22,19 +24,43 @@ package main
 
 import (
     "context"
+    "crypto/tls"
+    "os"
     "time"
 
     "github.com/hexagon-codes/toolkit/cache/local"
-    "github.com/hexagon-codes/toolkit/cache/redis"
     "github.com/hexagon-codes/toolkit/cache/multi"
-    goredis "github.com/redis/go-redis/v9"
+    "github.com/hexagon-codes/toolkit/cache/redis"
+    "github.com/hexagon-codes/toolkit/infra/redisconn"
 )
+
+type User struct {
+    ID int
+}
 
 func main() {
     // 1. 创建各层缓存
     localCache := local.NewCache(1000)
 
-    rdb := goredis.NewClient(&goredis.Options{Addr: "localhost:6379"})
+    ctx := context.Background()
+    connection := redisconn.DefaultConfig(redisconn.ModeSingle, os.Getenv("REDIS_ADDR"))
+    connection.DataCredentials = redisconn.Credentials{
+        Username: os.Getenv("REDIS_USERNAME"),
+        Password: os.Getenv("REDIS_PASSWORD"),
+    }
+    if serverName := os.Getenv("REDIS_TLS_SERVER_NAME"); serverName != "" {
+        connection.TLSConfig = &tls.Config{
+            MinVersion: tls.VersionTLS12,
+            ServerName: serverName,
+        }
+    }
+    factory, err := redisconn.NewFactory(connection)
+    if err != nil { panic(err) }
+    startupCtx, cancelStartup := context.WithTimeout(ctx, 5*time.Second)
+    rdb, err := factory.Open(startupCtx)
+    cancelStartup()
+    if err != nil { panic(err) }
+    defer rdb.Close()
     redisCache := redis.NewStableCache(rdb)
 
     // 2. 组合为多层缓存
@@ -45,10 +71,10 @@ func main() {
 
     // 3. 使用（自动处理三层：local -> redis -> db）
     var user User
-    err := cache.GetOrLoad(context.Background(), "user:123", &user,
+    err = cache.GetOrLoad(ctx, "user:123", &user,
         func(ctx context.Context) (any, error) {
             // 只需关心 DB 查询
-            return db.FindUserByID(ctx, 123)
+            return findUserByID(ctx, 123)
         },
     )
     if err == multi.ErrNotFound {
@@ -59,6 +85,10 @@ func main() {
 
     // 删除缓存（所有层）
     cache.Del(context.Background(), "user:123")
+}
+
+func findUserByID(context.Context, int) (User, error) {
+    return User{ID: 123}, nil
 }
 ```
 

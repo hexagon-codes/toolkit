@@ -131,6 +131,12 @@ jobs:
       - name: Create Go workspace
         run: go work init ./toolkit ./hexclaw
 
+      - name: Pre-download release deps（嵌套 go test 沙箱内 module cache 只读，须预先落盘）
+        working-directory: hexclaw
+        env:
+          GOWORK: "off"
+        run: go mod download all
+
       - name: Verify toolchain
         run: |
           go version

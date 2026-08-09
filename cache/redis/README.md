@@ -17,6 +17,8 @@ Redis 分布式缓存，提供 **StableCache**（稳定 key）和 **UnstableCach
 - **超时控制**：支持读写超时配置
 - **错误降级**：Redis 错误时自动降级到 DB
 
+连接由调用方负责。生产环境建议统一使用 `infra/redisconn.Factory.Open` 在 readiness 阶段校验拓扑、TLS 与 ACL，再把返回的 `redis.UniversalClient` 注入缓存。当前安全策略只接受“无认证”或“用户名 + 密码”两种静态配置；password-only 会被主动拒绝。
+
 ## 安装
 
 ```bash
@@ -33,11 +35,13 @@ package main
 
 import (
     "context"
+    "crypto/tls"
     "fmt"
+    "os"
     "time"
 
     "github.com/hexagon-codes/toolkit/cache/redis"
-    goredis "github.com/redis/go-redis/v9"
+    "github.com/hexagon-codes/toolkit/infra/redisconn"
 )
 
 type User struct {
@@ -46,19 +50,36 @@ type User struct {
 }
 
 func main() {
-    // 创建 Redis 客户端
-    rdb := goredis.NewClient(&goredis.Options{
-        Addr: "localhost:6379",
-    })
+    ctx := context.Background()
+    connection := redisconn.DefaultConfig(redisconn.ModeSingle, os.Getenv("REDIS_ADDR"))
+    connection.DataCredentials = redisconn.Credentials{
+        Username: os.Getenv("REDIS_USERNAME"),
+        Password: os.Getenv("REDIS_PASSWORD"),
+    }
+    if serverName := os.Getenv("REDIS_TLS_SERVER_NAME"); serverName != "" {
+        connection.TLSConfig = &tls.Config{
+            MinVersion: tls.VersionTLS12,
+            ServerName: serverName,
+        }
+    }
+    factory, err := redisconn.NewFactory(connection)
+    if err != nil {
+        panic(err)
+    }
+    startupCtx, cancelStartup := context.WithTimeout(ctx, 5*time.Second)
+    rdb, err := factory.Open(startupCtx) // 启动阶段验证拓扑、TLS 和 ACL
+    cancelStartup()
+    if err != nil {
+        panic(err)
+    }
+    defer rdb.Close()
 
     // 创建稳定 key 缓存
     cache := redis.NewStableCache(rdb)
 
-    ctx := context.Background()
-
     // 获取或加载数据
     var user User
-    err := cache.GetOrLoad(ctx, "user:123", 60*time.Minute, &user,
+    err = cache.GetOrLoad(ctx, "user:123", 60*time.Minute, &user,
         func(ctx context.Context) (any, error) {
             return fetchUserFromDB(ctx, 123)
         },
@@ -120,7 +141,7 @@ func NewStableCache(client redis.UniversalClient, opts ...Option) *StableCache
 **示例**：
 
 ```go
-rdb := goredis.NewClient(&goredis.Options{Addr: "localhost:6379"})
+// rdb 由 redisconn.Factory.Open 在启动阶段创建并探活。
 cache := redis.NewStableCache(rdb)
 ```
 
@@ -217,7 +238,7 @@ func NewUnstableCache(client redis.UniversalClient, versionKey string, opts ...O
 **示例**：
 
 ```go
-rdb := goredis.NewClient(&goredis.Options{Addr: "localhost:6379"})
+// rdb 由 redisconn.Factory.Open 在启动阶段创建并探活。
 cache := redis.NewUnstableCache(rdb, "ability:version")
 ```
 
@@ -583,8 +604,7 @@ import (
 // 创建本地缓存
 localCache := local.NewCache(1000)
 
-// 创建 Redis 缓存
-rdb := goredis.NewClient(&goredis.Options{Addr: "localhost:6379"})
+// rdb 由统一的 redisconn.Factory.Open 创建；不要在缓存层重复认证配置。
 redisCache := redis.NewStableCache(rdb)
 
 // 组合为多层缓存

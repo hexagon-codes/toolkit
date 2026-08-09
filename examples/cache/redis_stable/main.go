@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"github.com/hexagon-codes/toolkit/cache/redis"
-	goredis "github.com/redis/go-redis/v9"
+	"github.com/hexagon-codes/toolkit/infra/redisconn"
 )
 
 type Product struct {
@@ -17,19 +19,30 @@ type Product struct {
 }
 
 func main() {
-	// 创建 Redis 客户端
-	rdb := goredis.NewClient(&goredis.Options{
-		Addr:     "localhost:6379",
-		Password: "",
-		DB:       0,
-	})
-	defer rdb.Close()
-
-	// 测试连接
 	ctx := context.Background()
-	if err := rdb.Ping(ctx).Err(); err != nil {
-		log.Fatalf("Redis 连接失败: %v\n提示: 请确保 Redis 运行在 localhost:6379", err)
+	addr := os.Getenv("REDIS_ADDR")
+	if addr == "" {
+		addr = "localhost:6379"
 	}
+	connection := redisconn.DefaultConfig(redisconn.ModeSingle, addr)
+	connection.DataCredentials = redisconn.Credentials{
+		Username: os.Getenv("REDIS_USERNAME"),
+		Password: os.Getenv("REDIS_PASSWORD"),
+	}
+	if serverName := os.Getenv("REDIS_TLS_SERVER_NAME"); serverName != "" {
+		connection.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, ServerName: serverName}
+	}
+	factory, err := redisconn.NewFactory(connection)
+	if err != nil {
+		log.Fatalf("Redis 配置无效: %v", err)
+	}
+	startupCtx, cancelStartup := context.WithTimeout(ctx, 5*time.Second)
+	rdb, err := factory.Open(startupCtx)
+	cancelStartup()
+	if err != nil {
+		log.Fatalf("Redis 连接失败: %v", err)
+	}
+	defer rdb.Close()
 
 	// 创建稳定 key 缓存
 	cache := redis.NewStableCache(rdb,
@@ -48,7 +61,7 @@ func main() {
 
 	// 示例 1: 获取产品（第一次从数据库，第二次从缓存）
 	var product Product
-	err := cache.GetOrLoad(
+	err = cache.GetOrLoad(
 		ctx,
 		"product:100",
 		10*time.Minute,

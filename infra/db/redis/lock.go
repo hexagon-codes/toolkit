@@ -39,6 +39,9 @@ func NewLock(client redis.UniversalClient, key string, expiration time.Duration)
 
 // Acquire 获取锁
 func (l *Lock) Acquire(ctx context.Context) error {
+	if l.expiration <= 0 {
+		return fmt.Errorf("%w: lock expiration must be positive", ErrInvalidConfig)
+	}
 	ok, err := l.client.SetNX(ctx, l.key, l.value, l.expiration).Result()
 	if err != nil {
 		return fmt.Errorf("failed to acquire lock: %w", err)
@@ -59,14 +62,21 @@ func (l *Lock) AcquireWithRetry(ctx context.Context, retryInterval time.Duration
 			return nil
 		}
 
-		if err != ErrLockFailed {
+		if !errors.Is(err, ErrLockFailed) {
 			return err
 		}
+		if i == maxRetries-1 {
+			return ErrLockFailed
+		}
 
+		timer := time.NewTimer(retryInterval)
 		select {
 		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
 			return ctx.Err()
-		case <-time.After(retryInterval):
+		case <-timer.C:
 			// 继续重试
 		}
 	}
@@ -147,19 +157,21 @@ func generateLockValue() string {
 }
 
 // WithLock 使用锁执行函数（自动获取和释放）
-func WithLock(ctx context.Context, client redis.UniversalClient, key string, expiration time.Duration, fn func() error) error {
+func WithLock(ctx context.Context, client redis.UniversalClient, key string, expiration time.Duration, fn func() error) (err error) {
 	lock := NewLock(client, key, expiration)
 
 	// 获取锁
-	if err := lock.Acquire(ctx); err != nil {
-		return err
+	if acquireErr := lock.Acquire(ctx); acquireErr != nil {
+		return acquireErr
 	}
 
 	// 确保释放锁
 	defer func() {
 		releaseCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		lock.Release(releaseCtx)
+		if releaseErr := lock.Release(releaseCtx); releaseErr != nil {
+			err = errors.Join(err, fmt.Errorf("release lock: %w", releaseErr))
+		}
 	}()
 
 	// 执行函数

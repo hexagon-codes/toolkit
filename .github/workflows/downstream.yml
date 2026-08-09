@@ -34,6 +34,11 @@ jobs:
           sudo apt-get install -y bubblewrap util-linux
       - name: go.work（下游用本 PR 的 toolkit）
         run: go work init ./toolkit ./ai-core ./hexagon ./hexclaw
+      - name: Pre-download release deps（嵌套 go test 沙箱内 module cache 只读，须预先落盘）
+        working-directory: hexclaw
+        env:
+          GOWORK: "off"
+        run: go mod download all
       - name: ai-core build + test
         run: (cd ai-core && go build ./... && go test ./...)
       - name: hexagon build + test

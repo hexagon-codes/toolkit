@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -11,598 +12,314 @@ import (
 func setupMiniRedis(t *testing.T) (*miniredis.Miniredis, *Client) {
 	t.Helper()
 
-	// 启动 miniredis
 	mr, err := miniredis.Run()
 	if err != nil {
-		t.Fatalf("failed to start miniredis: %v", err)
+		t.Fatalf("start miniredis: %v", err)
 	}
 
-	// 创建配置
-	cfg := DefaultConfig(mr.Addr())
-	cfg.DialTimeout = 1 * time.Second
-
-	// 创建客户端
-	client, err := New(cfg)
+	cfg := DefaultConfig(ModeSingle, mr.Addr())
+	cfg.DialTimeout = time.Second
+	client, err := New(context.Background(), cfg)
 	if err != nil {
 		mr.Close()
-		t.Fatalf("failed to create redis client: %v", err)
+		t.Fatalf("create redis client: %v", err)
 	}
 
+	t.Cleanup(func() {
+		_ = client.Close()
+		mr.Close()
+	})
 	return mr, client
 }
 
-func TestNew(t *testing.T) {
-	mr, client := setupMiniRedis(t)
-	defer mr.Close()
-	defer client.Close()
-
-	if client == nil {
-		t.Fatal("expected client to be created")
+func TestNewOpensHealthyConnection(t *testing.T) {
+	_, client := setupMiniRedis(t)
+	if client == nil || client.UniversalClient == nil {
+		t.Fatal("New returned a nil client")
 	}
-
-	if client.config == nil {
-		t.Fatal("expected config to be set")
+	if err := client.Health(context.Background()); err != nil {
+		t.Fatalf("Health() error = %v", err)
 	}
 }
 
-func TestNewWithNilConfig(t *testing.T) {
-	client, err := New(nil)
-	if err == nil {
-		t.Error("expected error for nil config")
-	}
-
-	if client != nil {
-		t.Error("expected nil client for nil config")
-	}
-}
-
-func TestNewWithInvalidMode(t *testing.T) {
-	cfg := DefaultConfig("localhost:6379")
-	cfg.Mode = "invalid"
-
-	client, err := New(cfg)
-	if err == nil {
-		t.Error("expected error for invalid mode")
-	}
-
-	if client != nil {
-		client.Close()
-		t.Error("expected nil client for invalid mode")
-	}
-}
-
-func TestHealth(t *testing.T) {
-	mr, client := setupMiniRedis(t)
-	defer mr.Close()
-	defer client.Close()
-
-	ctx := context.Background()
-
-	// 正常情况
-	err := client.Health(ctx)
+func TestNewRejectsNilContext(t *testing.T) {
+	mr, err := miniredis.Run()
 	if err != nil {
-		t.Errorf("expected health check to pass, got error: %v", err)
+		t.Fatalf("start miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	client, err := New(nil, DefaultConfig(ModeSingle, mr.Addr())) //nolint:staticcheck // Deliberately verify the nil-context guard.
+	if !errors.Is(err, ErrInvalidContext) {
+		if client != nil {
+			_ = client.Close()
+		}
+		t.Fatalf("New(nil, config) error = %v, want errors.Is(ErrInvalidContext)", err)
+	}
+	if client != nil {
+		_ = client.Close()
+		t.Fatal("New(nil, config) returned a client")
+	}
+}
+
+func TestNewUsesCallerContextForProbe(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("start miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	client, err := New(ctx, DefaultConfig(ModeSingle, mr.Addr()))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("New(canceled context) error = %v, want context.Canceled", err)
+	}
+	if client != nil {
+		_ = client.Close()
+		t.Fatal("New(canceled context) returned a client")
+	}
+}
+
+func TestNewRejectsInvalidConfig(t *testing.T) {
+	client, err := New(context.Background(), Config{})
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("New() error = %v, want errors.Is(ErrInvalidConfig)", err)
+	}
+	if client != nil {
+		_ = client.Close()
+		t.Fatal("New() returned a client for invalid config")
+	}
+}
+
+func TestNewRejectsIncompleteACLCredentials(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("start miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	cfg := DefaultConfig(ModeSingle, mr.Addr())
+	cfg.DataCredentials = Credentials{Password: "password-only-is-not-supported"}
+	client, err := New(context.Background(), cfg)
+	if !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("New() error = %v, want errors.Is(ErrInvalidCredentials)", err)
+	}
+	if client != nil {
+		_ = client.Close()
+		t.Fatal("New() returned a client for incomplete ACL credentials")
+	}
+}
+
+func TestNewAuthenticatesNamedACLUser(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("start miniredis: %v", err)
+	}
+	defer mr.Close()
+	mr.RequireUserAuth("application", "correct-secret")
+
+	cfg := DefaultConfig(ModeSingle, mr.Addr())
+	cfg.DataCredentials = Credentials{Username: "application", Password: "correct-secret"}
+	client, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer client.Close()
+
+	if err := client.Set(context.Background(), "acl-key", "value", 0).Err(); err != nil {
+		t.Fatalf("authenticated Set() error = %v", err)
+	}
+}
+
+func TestNewRejectsWrongNamedACLCredentials(t *testing.T) {
+	tests := []struct {
+		name        string
+		credentials Credentials
+	}{
+		{
+			name:        "wrong username",
+			credentials: Credentials{Username: "wrong-user", Password: "correct-secret"},
+		},
+		{
+			name:        "wrong password",
+			credentials: Credentials{Username: "application", Password: "wrong-secret"},
+		},
 	}
 
-	// 关闭 Redis
-	mr.Close()
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			mr, err := miniredis.Run()
+			if err != nil {
+				t.Fatalf("start miniredis: %v", err)
+			}
+			defer mr.Close()
+			mr.RequireUserAuth("application", "correct-secret")
 
-	// 健康检查应该失败
-	err = client.Health(ctx)
-	if err == nil {
-		t.Error("expected health check to fail after closing redis")
+			cfg := DefaultConfig(ModeSingle, mr.Addr())
+			cfg.DataCredentials = test.credentials
+			client, err := New(context.Background(), cfg)
+			if err == nil {
+				if client != nil {
+					_ = client.Close()
+				}
+				t.Fatal("New() error = nil")
+			}
+			if client != nil {
+				_ = client.Close()
+				t.Fatal("New() returned a client with invalid ACL credentials")
+			}
+		})
+	}
+}
+
+func TestNewCreatesIndependentClientLifecycles(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("start miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	cfg := DefaultConfig(ModeSingle, mr.Addr())
+	first, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("first New() error = %v", err)
+	}
+	second, err := New(context.Background(), cfg)
+	if err != nil {
+		_ = first.Close()
+		t.Fatalf("second New() error = %v", err)
+	}
+	defer second.Close()
+
+	if first.UniversalClient == second.UniversalClient {
+		t.Fatal("New reused a process-global Redis client")
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("first Close() error = %v", err)
+	}
+	if err := second.Set(context.Background(), "independent", "alive", 0).Err(); err != nil {
+		t.Fatalf("closing first client affected second client: %v", err)
+	}
+}
+
+func TestHealthRejectsNilContext(t *testing.T) {
+	_, client := setupMiniRedis(t)
+	if err := client.Health(nil); !errors.Is(err, ErrInvalidContext) { //nolint:staticcheck // Deliberately verify the nil-context guard.
+		t.Fatalf("Health(nil) error = %v, want errors.Is(ErrInvalidContext)", err)
 	}
 }
 
 func TestHealthWithNilClient(t *testing.T) {
 	var client *Client
-	ctx := context.Background()
-
-	err := client.Health(ctx)
-	if err == nil {
-		t.Error("expected error for nil client")
+	if err := client.Health(context.Background()); err == nil {
+		t.Fatal("nil Client.Health() error = nil")
 	}
 }
 
-func TestGetWithDefault(t *testing.T) {
-	mr, client := setupMiniRedis(t)
-	defer mr.Close()
-	defer client.Close()
-
+func TestGetWithDefaultDistinguishesMissingKeyFromFailure(t *testing.T) {
+	_, client := setupMiniRedis(t)
 	ctx := context.Background()
-
-	// 设置值
-	key := "test-key"
-	value := "test-value"
-	err := client.Set(ctx, key, value, 0).Err()
-	if err != nil {
-		t.Fatalf("failed to set key: %v", err)
+	if err := client.Set(ctx, "present", "value", 0).Err(); err != nil {
+		t.Fatalf("Set() error = %v", err)
 	}
 
-	// 获取存在的值
-	result := client.GetWithDefault(ctx, key, "default")
-	if result != value {
-		t.Errorf("expected %s, got %s", value, result)
+	got, err := client.GetWithDefault(ctx, "present", "fallback")
+	if err != nil || got != "value" {
+		t.Fatalf("GetWithDefault(present) = %q, %v; want value, nil", got, err)
+	}
+	got, err = client.GetWithDefault(ctx, "missing", "fallback")
+	if err != nil || got != "fallback" {
+		t.Fatalf("GetWithDefault(missing) = %q, %v; want fallback, nil", got, err)
 	}
 
-	// 获取不存在的值
-	defaultValue := "default-value"
-	result = client.GetWithDefault(ctx, "non-existent", defaultValue)
-	if result != defaultValue {
-		t.Errorf("expected %s, got %s", defaultValue, result)
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	got, err = client.GetWithDefault(canceled, "present", "fallback")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("GetWithDefault(canceled) = %q, %v; want context.Canceled", got, err)
 	}
 }
 
-func TestSetWithExpire(t *testing.T) {
-	mr, client := setupMiniRedis(t)
-	defer mr.Close()
-	defer client.Close()
-
+func TestClientValueConvenienceMethods(t *testing.T) {
+	_, client := setupMiniRedis(t)
 	ctx := context.Background()
 
-	key := "expire-key"
-	value := "expire-value"
-	expiration := 5 * time.Second // miniredis 的最小 TTL 是 1 秒
-
-	// 设置带过期时间的值
-	err := client.SetWithExpire(ctx, key, value, expiration)
+	if err := client.MSetValues(ctx, "one", "1", "two", "2"); err != nil {
+		t.Fatalf("MSetValues() error = %v", err)
+	}
+	values, err := client.MGetValues(ctx, "one", "two", "missing")
 	if err != nil {
-		t.Fatalf("failed to set key with expire: %v", err)
+		t.Fatalf("MGetValues() error = %v", err)
 	}
-
-	// 验证值存在
-	result, err := client.Get(ctx, key).Result()
-	if err != nil {
-		t.Fatalf("failed to get key: %v", err)
+	if len(values) != 3 || values[0] != "1" || values[1] != "2" || values[2] != nil {
+		t.Fatalf("MGetValues() = %#v", values)
 	}
-
-	if result != value {
-		t.Errorf("expected %s, got %s", value, result)
+	count, err := client.ExistsCount(ctx, "one", "two", "missing")
+	if err != nil || count != 2 {
+		t.Fatalf("ExistsCount() = %d, %v; want 2, nil", count, err)
 	}
-
-	// 验证 TTL
-	ttl, err := client.TTL(ctx, key).Result()
-	if err != nil {
-		t.Fatalf("failed to get TTL: %v", err)
-	}
-
-	if ttl <= 0 || ttl > expiration {
-		t.Errorf("expected TTL between 0 and %v, got %v", expiration, ttl)
+	if err := client.DeleteKeys(ctx, "one", "two"); err != nil {
+		t.Fatalf("DeleteKeys() error = %v", err)
 	}
 }
 
-func TestSetNX(t *testing.T) {
-	mr, client := setupMiniRedis(t)
-	defer mr.Close()
-	defer client.Close()
-
+func TestClientConditionalAndIncrementConvenienceMethods(t *testing.T) {
+	_, client := setupMiniRedis(t)
 	ctx := context.Background()
 
-	key := "nx-key"
-	value := "nx-value"
-
-	// 第一次设置应该成功
-	ok, err := client.SetNX(ctx, key, value, 0)
-	if err != nil {
-		t.Fatalf("failed to setnx: %v", err)
+	ok, err := client.SetNX(ctx, "conditional", "first", time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("first SetNX() = %t, %v; want true, nil", ok, err)
+	}
+	ok, err = client.SetNXEx(ctx, "conditional", "second", time.Minute)
+	if err != nil || ok {
+		t.Fatalf("second SetNXEx() = %t, %v; want false, nil", ok, err)
 	}
 
-	if !ok {
-		t.Error("expected setnx to succeed for non-existent key")
+	value, err := client.IncrByWithExpire(ctx, "counter", 5, time.Minute)
+	if err != nil || value != 5 {
+		t.Fatalf("IncrByWithExpire() = %d, %v; want 5, nil", value, err)
 	}
-
-	// 第二次设置应该失败
-	ok, err = client.SetNX(ctx, key, "new-value", 0)
-	if err != nil {
-		t.Fatalf("failed to setnx: %v", err)
-	}
-
-	if ok {
-		t.Error("expected setnx to fail for existing key")
-	}
-
-	// 验证值未被覆盖
-	result, err := client.Get(ctx, key).Result()
-	if err != nil {
-		t.Fatalf("failed to get key: %v", err)
-	}
-
-	if result != value {
-		t.Errorf("expected %s, got %s", value, result)
+	ttl, err := client.GetTTL(ctx, "counter")
+	if err != nil || ttl <= 0 {
+		t.Fatalf("GetTTL(counter) = %s, %v; want positive TTL", ttl, err)
 	}
 }
 
-func TestSetNXEx(t *testing.T) {
-	mr, client := setupMiniRedis(t)
-	defer mr.Close()
-	defer client.Close()
-
+func TestClientExpirationConvenienceMethods(t *testing.T) {
+	_, client := setupMiniRedis(t)
 	ctx := context.Background()
 
-	key := "nxex-key"
-	value := "nxex-value"
-	expiration := 5 * time.Second // miniredis 的最小 TTL 是 1 秒
-
-	// 设置成功
-	ok, err := client.SetNXEx(ctx, key, value, expiration)
-	if err != nil {
-		t.Fatalf("failed to setnxex: %v", err)
+	if err := client.SetWithExpire(ctx, "expiring", "value", time.Minute); err != nil {
+		t.Fatalf("SetWithExpire() error = %v", err)
+	}
+	if ttl, err := client.GetTTL(ctx, "expiring"); err != nil || ttl <= 0 {
+		t.Fatalf("GetTTL(expiring) = %s, %v; want positive TTL", ttl, err)
 	}
 
-	if !ok {
-		t.Error("expected setnxex to succeed")
+	if err := client.Set(ctx, "expire-at", "value", 0).Err(); err != nil {
+		t.Fatalf("Set() error = %v", err)
 	}
-
-	// 验证 TTL
-	ttl, err := client.TTL(ctx, key).Result()
-	if err != nil {
-		t.Fatalf("failed to get TTL: %v", err)
+	if err := client.SetExpireAt(ctx, "expire-at", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("SetExpireAt() error = %v", err)
 	}
-
-	if ttl <= 0 || ttl > expiration {
-		t.Errorf("expected TTL between 0 and %v, got %v", expiration, ttl)
+	if ttl, err := client.GetTTL(ctx, "expire-at"); err != nil || ttl <= 0 || ttl > time.Hour {
+		t.Fatalf("GetTTL(expire-at) = %s, %v; want (0, 1h]", ttl, err)
 	}
 }
 
-func TestMGetValues(t *testing.T) {
-	mr, client := setupMiniRedis(t)
-	defer mr.Close()
-	defer client.Close()
-
-	ctx := context.Background()
-
-	// 设置多个值
-	keys := []string{"mget-key1", "mget-key2", "mget-key3"}
-	values := []string{"value1", "value2", "value3"}
-
-	for i, key := range keys {
-		err := client.Set(ctx, key, values[i], 0).Err()
-		if err != nil {
-			t.Fatalf("failed to set key %s: %v", key, err)
-		}
-	}
-
-	// 批量获取
-	results, err := client.MGetValues(ctx, keys...)
-	if err != nil {
-		t.Fatalf("failed to mget: %v", err)
-	}
-
-	if len(results) != len(keys) {
-		t.Errorf("expected %d results, got %d", len(keys), len(results))
-	}
-
-	for i, result := range results {
-		if result == nil {
-			t.Errorf("expected result[%d] to be non-nil", i)
-			continue
-		}
-
-		if result.(string) != values[i] {
-			t.Errorf("expected result[%d] %s, got %s", i, values[i], result)
-		}
-	}
-}
-
-func TestMSetValues(t *testing.T) {
-	mr, client := setupMiniRedis(t)
-	defer mr.Close()
-	defer client.Close()
-
-	ctx := context.Background()
-
-	// 批量设置
-	err := client.MSetValues(ctx, "mset-key1", "value1", "mset-key2", "value2")
-	if err != nil {
-		t.Fatalf("failed to mset: %v", err)
-	}
-
-	// 验证值
-	val1, err := client.Get(ctx, "mset-key1").Result()
-	if err != nil {
-		t.Fatalf("failed to get mset-key1: %v", err)
-	}
-
-	if val1 != "value1" {
-		t.Errorf("expected value1, got %s", val1)
-	}
-
-	val2, err := client.Get(ctx, "mset-key2").Result()
-	if err != nil {
-		t.Fatalf("failed to get mset-key2: %v", err)
-	}
-
-	if val2 != "value2" {
-		t.Errorf("expected value2, got %s", val2)
-	}
-}
-
-func TestIncrByWithExpire(t *testing.T) {
-	mr, client := setupMiniRedis(t)
-	defer mr.Close()
-	defer client.Close()
-
-	ctx := context.Background()
-
-	key := "incr-key"
-	expiration := 100 * time.Millisecond
-
-	// 第一次自增
-	val, err := client.IncrByWithExpire(ctx, key, 5, expiration)
-	if err != nil {
-		t.Fatalf("failed to incr: %v", err)
-	}
-
-	if val != 5 {
-		t.Errorf("expected 5, got %d", val)
-	}
-
-	// 第二次自增
-	val, err = client.IncrByWithExpire(ctx, key, 3, expiration)
-	if err != nil {
-		t.Fatalf("failed to incr: %v", err)
-	}
-
-	if val != 8 {
-		t.Errorf("expected 8, got %d", val)
-	}
-
-	// 验证 TTL
-	ttl, err := client.TTL(ctx, key).Result()
-	if err != nil {
-		t.Fatalf("failed to get TTL: %v", err)
-	}
-
-	if ttl <= 0 {
-		t.Errorf("expected positive TTL, got %v", ttl)
-	}
-}
-
-func TestExistsCount(t *testing.T) {
-	mr, client := setupMiniRedis(t)
-	defer mr.Close()
-	defer client.Close()
-
-	ctx := context.Background()
-
-	// 设置一些键
-	keys := []string{"exists-key1", "exists-key2"}
-	for _, key := range keys {
-		err := client.Set(ctx, key, "value", 0).Err()
-		if err != nil {
-			t.Fatalf("failed to set key %s: %v", key, err)
-		}
-	}
-
-	// 检查存在
-	count, err := client.ExistsCount(ctx, keys...)
-	if err != nil {
-		t.Fatalf("failed to check exists: %v", err)
-	}
-
-	if count != int64(len(keys)) {
-		t.Errorf("expected count %d, got %d", len(keys), count)
-	}
-
-	// 检查不存在的键
-	count, err = client.ExistsCount(ctx, "non-existent")
-	if err != nil {
-		t.Fatalf("failed to check exists: %v", err)
-	}
-
-	if count != 0 {
-		t.Errorf("expected count 0, got %d", count)
-	}
-}
-
-func TestDeleteKeys(t *testing.T) {
-	mr, client := setupMiniRedis(t)
-	defer mr.Close()
-	defer client.Close()
-
-	ctx := context.Background()
-
-	// 设置键
-	key := "delete-key"
-	err := client.Set(ctx, key, "value", 0).Err()
-	if err != nil {
-		t.Fatalf("failed to set key: %v", err)
-	}
-
-	// 删除键
-	err = client.DeleteKeys(ctx, key)
-	if err != nil {
-		t.Fatalf("failed to delete key: %v", err)
-	}
-
-	// 验证键不存在
-	_, err = client.Get(ctx, key).Result()
-	if err == nil {
-		t.Error("expected key to be deleted")
-	}
-}
-
-func TestSetExpireAt(t *testing.T) {
-	mr, client := setupMiniRedis(t)
-	defer mr.Close()
-	defer client.Close()
-
-	ctx := context.Background()
-
-	key := "expireat-key"
-	value := "expireat-value"
-
-	// 设置键
-	err := client.Set(ctx, key, value, 0).Err()
-	if err != nil {
-		t.Fatalf("failed to set key: %v", err)
-	}
-
-	// 设置过期时间戳
-	expireAt := time.Now().Add(1 * time.Hour)
-	err = client.SetExpireAt(ctx, key, expireAt)
-	if err != nil {
-		t.Fatalf("failed to set expireat: %v", err)
-	}
-
-	// 验证 TTL
-	ttl, err := client.TTL(ctx, key).Result()
-	if err != nil {
-		t.Fatalf("failed to get TTL: %v", err)
-	}
-
-	if ttl <= 0 || ttl > 1*time.Hour {
-		t.Errorf("expected TTL around 1 hour, got %v", ttl)
-	}
-}
-
-func TestGetTTL(t *testing.T) {
-	mr, client := setupMiniRedis(t)
-	defer mr.Close()
-	defer client.Close()
-
-	ctx := context.Background()
-
-	key := "ttl-key"
-	expiration := 1 * time.Hour
-
-	// 设置带过期时间的键
-	err := client.Set(ctx, key, "value", expiration).Err()
-	if err != nil {
-		t.Fatalf("failed to set key: %v", err)
-	}
-
-	// 获取 TTL
-	ttl, err := client.GetTTL(ctx, key)
-	if err != nil {
-		t.Fatalf("failed to get TTL: %v", err)
-	}
-
-	if ttl <= 0 || ttl > expiration {
-		t.Errorf("expected TTL around %v, got %v", expiration, ttl)
-	}
-
-	// 不存在的键
-	ttl, err = client.GetTTL(ctx, "non-existent")
-	if err != nil {
-		t.Fatalf("failed to get TTL for non-existent key: %v", err)
-	}
-
-	if ttl >= 0 {
-		t.Errorf("expected negative TTL for non-existent key, got %v", ttl)
-	}
-}
-
-func TestClose(t *testing.T) {
-	mr, client := setupMiniRedis(t)
-	defer mr.Close()
-
-	err := client.Close()
-	if err != nil {
-		t.Errorf("expected close to succeed, got error: %v", err)
-	}
-
-	// 关闭后操作应该失败
-	ctx := context.Background()
-	err = client.Set(ctx, "key", "value", 0).Err()
-	if err == nil {
-		t.Error("expected error after closing client")
-	}
-}
-
-func TestCloseNilClient(t *testing.T) {
+func TestClientCloseAndStatsNilSafety(t *testing.T) {
 	var client *Client
-	err := client.Close()
-	if err != nil {
-		t.Errorf("expected no error for nil client, got: %v", err)
+	if err := client.Close(); err != nil {
+		t.Fatalf("nil Client.Close() error = %v", err)
 	}
-}
-
-func TestStats(t *testing.T) {
-	mr, client := setupMiniRedis(t)
-	defer mr.Close()
-	defer client.Close()
-
-	stats := client.Stats()
-	if stats == nil {
-		t.Error("expected stats to be non-nil")
-	}
-}
-
-func TestStatsNilClient(t *testing.T) {
-	var client *Client
-	stats := client.Stats()
-	if stats != nil {
-		t.Error("expected nil stats for nil client")
-	}
-}
-
-func TestNewClusterMode(t *testing.T) {
-	// 集群模式需要多个节点，这里只测试配置转换
-	cfg := DefaultClusterConfig([]string{"localhost:7000", "localhost:7001"})
-
-	// 由于没有真实的集群环境，我们只验证配置
-	if cfg.Mode != ModeCluster {
-		t.Errorf("expected mode %s, got %s", ModeCluster, cfg.Mode)
+	if stats := client.Stats(); stats != nil {
+		t.Fatalf("nil Client.Stats() = %#v, want nil", stats)
 	}
 
-	if len(cfg.Addrs) != 2 {
-		t.Errorf("expected 2 addrs, got %d", len(cfg.Addrs))
+	_, live := setupMiniRedis(t)
+	if stats := live.Stats(); stats == nil {
+		t.Fatal("live Client.Stats() = nil")
 	}
-}
-
-func TestNewSentinelMode(t *testing.T) {
-	// 哨兵模式需要特殊设置，这里只测试配置
-	cfg := DefaultConfig("localhost:6379")
-	cfg.Mode = ModeSentinel
-	cfg.MasterName = "mymaster"
-	cfg.SentinelAddrs = []string{"localhost:26379"}
-
-	if cfg.Mode != ModeSentinel {
-		t.Errorf("expected mode %s, got %s", ModeSentinel, cfg.Mode)
-	}
-
-	if cfg.MasterName != "mymaster" {
-		t.Errorf("expected MasterName mymaster, got %s", cfg.MasterName)
-	}
-}
-
-func TestPipeline(t *testing.T) {
-	mr, client := setupMiniRedis(t)
-	defer mr.Close()
-	defer client.Close()
-
-	ctx := context.Background()
-
-	// 使用 pipeline 批量操作
-	pipe := client.Pipeline()
-	pipe.Set(ctx, "pipe-key1", "value1", 0)
-	pipe.Set(ctx, "pipe-key2", "value2", 0)
-	pipe.Incr(ctx, "pipe-counter")
-
-	cmds, err := pipe.Exec(ctx)
-	if err != nil {
-		t.Fatalf("failed to exec pipeline: %v", err)
-	}
-
-	if len(cmds) != 3 {
-		t.Errorf("expected 3 commands, got %d", len(cmds))
-	}
-
-	// 验证结果
-	val1, err := client.Get(ctx, "pipe-key1").Result()
-	if err != nil {
-		t.Fatalf("failed to get pipe-key1: %v", err)
-	}
-
-	if val1 != "value1" {
-		t.Errorf("expected value1, got %s", val1)
-	}
-}
-
-func TestGetGlobal(t *testing.T) {
-	// 由于 Init 使用 sync.Once，我们无法重置全局状态
-	// 这里只测试 GetGlobal 不会 panic
-	client := GetGlobal()
-	_ = client // 可能为 nil，但不应该 panic
 }

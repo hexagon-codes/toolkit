@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"github.com/hexagon-codes/toolkit/infra/db/mysql"
@@ -50,18 +52,15 @@ func mysqlExample() {
 func redisExample() {
 	fmt.Println("📦 Redis 示例:")
 
-	// 初始化 Redis（实际使用时需要有效的 Redis 地址）
-	config := redis.DefaultConfig("localhost:6379")
-
-	// 注意：这里会连接失败，因为没有真实的 Redis 服务
-	// 实际使用时请提供有效的 Redis 地址
-	client, err := redis.New(config)
+	// 默认连接 localhost:6379；可通过环境变量提供实际地址和 ACL/TLS 配置。
+	connectCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	client, err := newRedisClient(connectCtx)
+	cancel()
 	if err != nil {
-		fmt.Printf("  ⚠️  Redis 连接失败（预期行为）: %v\n", err)
+		fmt.Printf("  ⚠️  Redis 连接失败: %v\n", err)
 		return
 	}
 	defer client.Close()
-
 	ctx := context.Background()
 
 	// Set
@@ -90,14 +89,14 @@ func redisExample() {
 func lockExample() {
 	fmt.Println("🔒 分布式锁示例:")
 
-	config := redis.DefaultConfig("localhost:6379")
-	client, err := redis.New(config)
+	connectCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	client, err := newRedisClient(connectCtx)
+	cancel()
 	if err != nil {
-		fmt.Printf("  ⚠️  Redis 连接失败（预期行为）: %v\n", err)
+		fmt.Printf("  ⚠️  Redis 连接失败: %v\n", err)
 		return
 	}
 	defer client.Close()
-
 	ctx := context.Background()
 
 	// 使用 WithLock 自动管理锁（使用 UniversalClient）
@@ -116,4 +115,20 @@ func lockExample() {
 
 	fmt.Println("  - 锁已自动释放")
 	fmt.Println()
+}
+
+func newRedisClient(ctx context.Context) (*redis.Client, error) {
+	addr := os.Getenv("REDIS_ADDR")
+	if addr == "" {
+		addr = "localhost:6379"
+	}
+	config := redis.DefaultConfig(redis.ModeSingle, addr)
+	config.DataCredentials = redis.Credentials{
+		Username: os.Getenv("REDIS_USERNAME"),
+		Password: os.Getenv("REDIS_PASSWORD"),
+	}
+	if serverName := os.Getenv("REDIS_TLS_SERVER_NAME"); serverName != "" {
+		config.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, ServerName: serverName}
+	}
+	return redis.New(ctx, config)
 }

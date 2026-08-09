@@ -1,6 +1,7 @@
 // examples 是独立模块，不属于 toolkit 库的发布表面。
 // 这样 go get github.com/hexagon-codes/toolkit 不会拉入示例及其依赖图。
-// 本地开发经仓库根的 go.work 解析依赖；发版时 go.work 移除，示例按版本号构建。
+// 源码树验证由 ../scripts/verify-examples.sh 创建临时 go.work 并绑定当前 toolkit。
+// 独立构建仅面向已发布版本；toolkit 新版本发布后需同步更新下方版本号。
 module github.com/hexagon-codes/toolkit/examples
 
 go 1.25.5

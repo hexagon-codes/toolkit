@@ -27,6 +27,8 @@ go get github.com/hexagon-codes/toolkit/cache
 
 ## 快速开始
 
+Redis 连接应由 `infra/redisconn.Factory.Open` 在启动阶段统一创建并探活，再注入缓存层；缓存包不会复制或重建认证配置。静态认证必须是“无认证”或完整的用户名、密码对；password-only 会被本项目主动拒绝。
+
 ### 方案 1: 多层缓存（推荐）⭐
 
 最简单的方式，自动处理 Local + Redis + DB 三层缓存：
@@ -36,18 +38,43 @@ package main
 
 import (
     "context"
+    "crypto/tls"
+    "os"
     "time"
 
     "github.com/hexagon-codes/toolkit/cache/local"
-    "github.com/hexagon-codes/toolkit/cache/redis"
     "github.com/hexagon-codes/toolkit/cache/multi"
-    goredis "github.com/redis/go-redis/v9"
+    "github.com/hexagon-codes/toolkit/cache/redis"
+    "github.com/hexagon-codes/toolkit/infra/redisconn"
 )
+
+type User struct {
+    ID int
+}
 
 func main() {
     // 1. 创建各层缓存
     localCache := local.NewCache(1000)
-    rdb := goredis.NewClient(&goredis.Options{Addr: "localhost:6379"})
+    defer localCache.Stop()
+    ctx := context.Background()
+    connection := redisconn.DefaultConfig(redisconn.ModeSingle, os.Getenv("REDIS_ADDR"))
+    connection.DataCredentials = redisconn.Credentials{
+        Username: os.Getenv("REDIS_USERNAME"),
+        Password: os.Getenv("REDIS_PASSWORD"),
+    }
+    if serverName := os.Getenv("REDIS_TLS_SERVER_NAME"); serverName != "" {
+        connection.TLSConfig = &tls.Config{
+            MinVersion: tls.VersionTLS12,
+            ServerName: serverName,
+        }
+    }
+    factory, err := redisconn.NewFactory(connection)
+    if err != nil { panic(err) }
+    startupCtx, cancelStartup := context.WithTimeout(ctx, 5*time.Second)
+    rdb, err := factory.Open(startupCtx)
+    cancelStartup()
+    if err != nil { panic(err) }
+    defer rdb.Close()
     redisCache := redis.NewStableCache(rdb)
 
     // 2. 组合为多层缓存（Builder 模式）
@@ -58,11 +85,16 @@ func main() {
 
     // 3. 使用（自动处理三层：local -> redis -> db）
     var user User
-    err := cache.GetOrLoad(context.Background(), "user:123", &user,
+    err = cache.GetOrLoad(ctx, "user:123", &user,
         func(ctx context.Context) (any, error) {
-            return db.FindUserByID(ctx, 123)  // 只需关心 DB 查询
+            return findUserByID(ctx, 123)  // 只需关心 DB 查询
         },
     )
+    if err != nil { panic(err) }
+}
+
+func findUserByID(context.Context, int) (User, error) {
+    return User{ID: 123}, nil
 }
 ```
 
@@ -83,6 +115,10 @@ import (
     "github.com/hexagon-codes/toolkit/cache/local"
 )
 
+type User struct {
+    ID int
+}
+
 func main() {
     // 创建本地缓存（最多 1000 条）
     cache := local.NewCache(1000,
@@ -100,7 +136,7 @@ func main() {
         &user,
         func(ctx context.Context) (any, error) {
             // 从数据库加载
-            return db.FindUserByID(ctx, 123)
+            return findUserByID(ctx, 123)
         },
     )
     if err == local.ErrNotFound {
@@ -114,6 +150,10 @@ func main() {
 
     fmt.Printf("用户: %+v\n", user)
 }
+
+func findUserByID(context.Context, int) (User, error) {
+    return User{ID: 123}, nil
+}
 ```
 
 ### Redis StableCache（稳定 key）
@@ -121,43 +161,43 @@ func main() {
 适用场景：单条记录查询，key 确定性强
 
 ```go
-package main
+package example
 
 import (
     "context"
-    "fmt"
     "time"
 
-    "github.com/hexagon-codes/toolkit/cache/redis"
+    cacheredis "github.com/hexagon-codes/toolkit/cache/redis"
     goredis "github.com/redis/go-redis/v9"
 )
 
-func main() {
-    // 创建 Redis 客户端
-    rdb := goredis.NewClient(&goredis.Options{
-        Addr: "localhost:6379",
-    })
+type User struct {
+    ID int
+}
 
+func useStableCache(ctx context.Context, rdb goredis.UniversalClient) error {
     // 创建稳定 key 缓存
-    cache := redis.NewStableCache(rdb,
-        redis.WithPrefix("myapp"),
-        redis.WithRedisTimeout(50*time.Millisecond, 50*time.Millisecond),
+    cache := cacheredis.NewStableCache(rdb,
+        cacheredis.WithPrefix("myapp"),
+        cacheredis.WithRedisTimeout(50*time.Millisecond, 50*time.Millisecond),
     )
 
     // 获取或加载单条记录
     var user User
-    err := cache.GetOrLoad(
-        context.Background(),
+    if err := cache.GetOrLoad(
+        ctx,
         "user:123",
         10*time.Minute,
         &user,
         func(ctx context.Context) (any, error) {
-            return db.FindUserByID(ctx, 123)
+            return User{ID: 123}, nil
         },
-    )
+    ); err != nil {
+        return err
+    }
 
     // 更新后删除缓存
-    cache.Del(context.Background(), "user:123")
+    return cache.Del(ctx, "user:123")
 }
 ```
 
@@ -166,45 +206,44 @@ func main() {
 适用场景：聚合查询、JOIN、列表查询
 
 ```go
-package main
+package example
 
 import (
     "context"
-    "fmt"
     "time"
 
-    "github.com/hexagon-codes/toolkit/cache/redis"
+    cacheredis "github.com/hexagon-codes/toolkit/cache/redis"
     goredis "github.com/redis/go-redis/v9"
 )
 
-func main() {
-    rdb := goredis.NewClient(&goredis.Options{
-        Addr: "localhost:6379",
-    })
-
+func useUnstableCache(ctx context.Context, rdb goredis.UniversalClient) error {
     // 创建不稳定 key 缓存（带版本号）
-    cache := redis.NewUnstableCache(rdb, "myapp:version",
-        redis.WithPrefix("myapp"),
-        redis.WithMaxTTL(15*time.Minute),
+    cache := cacheredis.NewUnstableCache(rdb, "myapp:version",
+        cacheredis.WithPrefix("myapp"),
+        cacheredis.WithMaxTTL(15*time.Minute),
     )
 
     // 获取聚合数据（自动加版本号）
     var models []string
-    err := cache.GetOrLoad(
-        context.Background(),
+    if err := cache.GetOrLoad(
+        ctx,
         "models:group:chat",
         5*time.Minute,
         &models,
         func(ctx context.Context) (any, error) {
-            return db.GetGroupEnabledModels(ctx, "chat")
+            return []string{"chat"}, nil
         },
-    )
+    ); err != nil {
+        return err
+    }
 
     // 数据更新后，递增版本号（使所有相关缓存失效）
-    cache.InvalidateVersion(context.Background())
+    if err := cache.InvalidateVersion(ctx); err != nil {
+        return err
+    }
 
     // 或者批量删除匹配的 key
-    cache.InvalidatePattern(context.Background(), "models:group:*")
+    return cache.InvalidatePattern(ctx, "models:group:*")
 }
 ```
 
@@ -284,4 +323,3 @@ if err == redis.ErrNotFound {
 
 - `github.com/redis/go-redis/v9` - Redis 客户端
 - `golang.org/x/sync/singleflight` - 防击穿
-

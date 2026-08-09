@@ -431,8 +431,7 @@ import (
 // Create local cache
 localCache := local.NewCache(1000)
 
-// Create Redis cache
-rdb := goredis.NewClient(&goredis.Options{Addr: "localhost:6379"})
+// rdb is a UniversalClient opened and probed by redisconn.Factory at startup.
 redisCache := redis.NewStableCache(rdb)
 
 // Combine into multi-level cache

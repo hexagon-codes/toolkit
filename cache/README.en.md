@@ -27,6 +27,8 @@ go get github.com/hexagon-codes/toolkit/cache
 
 ## Quick Start
 
+Create and probe the Redis connection once with `infra/redisconn.Factory.Open` during startup, then inject it into the cache layer. Cache packages do not copy or reconstruct authentication settings. Static authentication must be either completely empty or a complete username/password pair; this project intentionally rejects password-only configuration.
+
 ### Option 1: Multi-Level Cache (Recommended) ⭐
 
 The simplest way, automatically handles Local + Redis + DB three-layer caching:
@@ -36,18 +38,43 @@ package main
 
 import (
     "context"
+    "crypto/tls"
+    "os"
     "time"
 
     "github.com/hexagon-codes/toolkit/cache/local"
-    "github.com/hexagon-codes/toolkit/cache/redis"
     "github.com/hexagon-codes/toolkit/cache/multi"
-    goredis "github.com/redis/go-redis/v9"
+    "github.com/hexagon-codes/toolkit/cache/redis"
+    "github.com/hexagon-codes/toolkit/infra/redisconn"
 )
+
+type User struct {
+    ID int
+}
 
 func main() {
     // 1. Create each cache layer
     localCache := local.NewCache(1000)
-    rdb := goredis.NewClient(&goredis.Options{Addr: "localhost:6379"})
+    defer localCache.Stop()
+    ctx := context.Background()
+    connection := redisconn.DefaultConfig(redisconn.ModeSingle, os.Getenv("REDIS_ADDR"))
+    connection.DataCredentials = redisconn.Credentials{
+        Username: os.Getenv("REDIS_USERNAME"),
+        Password: os.Getenv("REDIS_PASSWORD"),
+    }
+    if serverName := os.Getenv("REDIS_TLS_SERVER_NAME"); serverName != "" {
+        connection.TLSConfig = &tls.Config{
+            MinVersion: tls.VersionTLS12,
+            ServerName: serverName,
+        }
+    }
+    factory, err := redisconn.NewFactory(connection)
+    if err != nil { panic(err) }
+    startupCtx, cancelStartup := context.WithTimeout(ctx, 5*time.Second)
+    rdb, err := factory.Open(startupCtx)
+    cancelStartup()
+    if err != nil { panic(err) }
+    defer rdb.Close()
     redisCache := redis.NewStableCache(rdb)
 
     // 2. Combine into multi-level cache (Builder pattern)
@@ -58,11 +85,16 @@ func main() {
 
     // 3. Use (automatically handles three layers: local -> redis -> db)
     var user User
-    err := cache.GetOrLoad(context.Background(), "user:123", &user,
+    err = cache.GetOrLoad(ctx, "user:123", &user,
         func(ctx context.Context) (any, error) {
-            return db.FindUserByID(ctx, 123)  // Only need to care about DB query
+            return findUserByID(ctx, 123)  // Only need to care about DB query
         },
     )
+    if err != nil { panic(err) }
+}
+
+func findUserByID(context.Context, int) (User, error) {
+    return User{ID: 123}, nil
 }
 ```
 
@@ -83,6 +115,10 @@ import (
     "github.com/hexagon-codes/toolkit/cache/local"
 )
 
+type User struct {
+    ID int
+}
+
 func main() {
     // Create local cache (max 1000 entries)
     cache := local.NewCache(1000,
@@ -100,7 +136,7 @@ func main() {
         &user,
         func(ctx context.Context) (any, error) {
             // Load from database
-            return db.FindUserByID(ctx, 123)
+            return findUserByID(ctx, 123)
         },
     )
     if err == local.ErrNotFound {
@@ -114,6 +150,10 @@ func main() {
 
     fmt.Printf("User: %+v\n", user)
 }
+
+func findUserByID(context.Context, int) (User, error) {
+    return User{ID: 123}, nil
+}
 ```
 
 ### Redis StableCache (Stable Key)
@@ -121,43 +161,43 @@ func main() {
 Use case: Single-record queries with deterministic keys
 
 ```go
-package main
+package example
 
 import (
     "context"
-    "fmt"
     "time"
 
-    "github.com/hexagon-codes/toolkit/cache/redis"
+    cacheredis "github.com/hexagon-codes/toolkit/cache/redis"
     goredis "github.com/redis/go-redis/v9"
 )
 
-func main() {
-    // Create Redis client
-    rdb := goredis.NewClient(&goredis.Options{
-        Addr: "localhost:6379",
-    })
+type User struct {
+    ID int
+}
 
+func useStableCache(ctx context.Context, rdb goredis.UniversalClient) error {
     // Create stable-key cache
-    cache := redis.NewStableCache(rdb,
-        redis.WithPrefix("myapp"),
-        redis.WithRedisTimeout(50*time.Millisecond, 50*time.Millisecond),
+    cache := cacheredis.NewStableCache(rdb,
+        cacheredis.WithPrefix("myapp"),
+        cacheredis.WithRedisTimeout(50*time.Millisecond, 50*time.Millisecond),
     )
 
     // Get or load a single record
     var user User
-    err := cache.GetOrLoad(
-        context.Background(),
+    if err := cache.GetOrLoad(
+        ctx,
         "user:123",
         10*time.Minute,
         &user,
         func(ctx context.Context) (any, error) {
-            return db.FindUserByID(ctx, 123)
+            return User{ID: 123}, nil
         },
-    )
+    ); err != nil {
+        return err
+    }
 
     // Delete cache after update
-    cache.Del(context.Background(), "user:123")
+    return cache.Del(ctx, "user:123")
 }
 ```
 
@@ -166,45 +206,44 @@ func main() {
 Use case: Aggregate queries, JOINs, list queries
 
 ```go
-package main
+package example
 
 import (
     "context"
-    "fmt"
     "time"
 
-    "github.com/hexagon-codes/toolkit/cache/redis"
+    cacheredis "github.com/hexagon-codes/toolkit/cache/redis"
     goredis "github.com/redis/go-redis/v9"
 )
 
-func main() {
-    rdb := goredis.NewClient(&goredis.Options{
-        Addr: "localhost:6379",
-    })
-
+func useUnstableCache(ctx context.Context, rdb goredis.UniversalClient) error {
     // Create unstable-key cache (with version number)
-    cache := redis.NewUnstableCache(rdb, "myapp:version",
-        redis.WithPrefix("myapp"),
-        redis.WithMaxTTL(15*time.Minute),
+    cache := cacheredis.NewUnstableCache(rdb, "myapp:version",
+        cacheredis.WithPrefix("myapp"),
+        cacheredis.WithMaxTTL(15*time.Minute),
     )
 
     // Get aggregate data (version number added automatically)
     var models []string
-    err := cache.GetOrLoad(
-        context.Background(),
+    if err := cache.GetOrLoad(
+        ctx,
         "models:group:chat",
         5*time.Minute,
         &models,
         func(ctx context.Context) (any, error) {
-            return db.GetGroupEnabledModels(ctx, "chat")
+            return []string{"chat"}, nil
         },
-    )
+    ); err != nil {
+        return err
+    }
 
     // After data update, increment version (invalidates all related caches)
-    cache.InvalidateVersion(context.Background())
+    if err := cache.InvalidateVersion(ctx); err != nil {
+        return err
+    }
 
     // Or batch delete matching keys
-    cache.InvalidatePattern(context.Background(), "models:group:*")
+    return cache.InvalidatePattern(ctx, "models:group:*")
 }
 ```
 

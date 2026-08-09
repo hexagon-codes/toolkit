@@ -2,15 +2,17 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"github.com/hexagon-codes/toolkit/cache/local"
 	"github.com/hexagon-codes/toolkit/cache/multi"
 	"github.com/hexagon-codes/toolkit/cache/redis"
-	goredis "github.com/redis/go-redis/v9"
+	"github.com/hexagon-codes/toolkit/infra/redisconn"
 )
 
 type User struct {
@@ -35,23 +37,33 @@ func main() {
 	)
 	defer localCache.Stop()
 
-	// 2. 创建 Redis 缓存
-	rdb := goredis.NewClient(&goredis.Options{
-		Addr:     "localhost:6379",
-		Password: "",
-		DB:       0,
-	})
-	defer rdb.Close()
-
 	ctx := context.Background()
-
-	// 测试 Redis 连接
-	if err := rdb.Ping(ctx).Err(); err != nil {
+	addr := os.Getenv("REDIS_ADDR")
+	if addr == "" {
+		addr = "localhost:6379"
+	}
+	connection := redisconn.DefaultConfig(redisconn.ModeSingle, addr)
+	connection.DataCredentials = redisconn.Credentials{
+		Username: os.Getenv("REDIS_USERNAME"),
+		Password: os.Getenv("REDIS_PASSWORD"),
+	}
+	if serverName := os.Getenv("REDIS_TLS_SERVER_NAME"); serverName != "" {
+		connection.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, ServerName: serverName}
+	}
+	factory, err := redisconn.NewFactory(connection)
+	if err != nil {
+		log.Fatalf("Redis 配置无效: %v", err)
+	}
+	startupCtx, cancelStartup := context.WithTimeout(ctx, 5*time.Second)
+	rdb, err := factory.Open(startupCtx)
+	cancelStartup()
+	if err != nil {
 		log.Printf("警告: Redis 未连接 (%v)，将只使用本地缓存\n\n", err)
 		// 只使用本地缓存继续演示
 		demonstrateLocalOnly(localCache)
 		return
 	}
+	defer rdb.Close()
 
 	redisCache := redis.NewStableCache(rdb,
 		redis.WithPrefix("myapp"),
@@ -71,7 +83,7 @@ func main() {
 	// === 示例 1: 首次查询（三层穿透）===
 	fmt.Println("--- 示例 1: 首次查询 ---")
 	var user1 User
-	err := cache.GetOrLoad(ctx, "user:123", &user1, func(ctx context.Context) (any, error) {
+	err = cache.GetOrLoad(ctx, "user:123", &user1, func(ctx context.Context) (any, error) {
 		loadCount++
 		fmt.Printf("  [DB] 查询数据库 (第 %d 次)\n", loadCount)
 		time.Sleep(100 * time.Millisecond) // 模拟 DB 查询延迟

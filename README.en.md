@@ -1070,6 +1070,7 @@ s.All(func(n int) bool { return n > 0 })
 
 ## Recent Changes
 
+- **infra/redisconn**: Added one Redis connection factory for Single, Cluster, and Sentinel with ACL username/password, separate Sentinel credentials, TLS, dynamic credentials, and startup probing; project policy intentionally rejects password-only configuration
 - **net/httpx**: `RateLimitedPool` now implements `io.Closer` with `Close() error`, idempotent via `sync.Once` (safe to call multiple times)
 - **util/poolx**: `AwaitFirst` now uses a cancellable context to release waiting goroutines once the first result arrives, preventing goroutine leaks
 - **util/poolx**: Fixed `workerStack.retrieveExpiry` ring buffer compaction logic to correctly rebuild the surviving worker queue after expiry cleanup
@@ -1099,6 +1100,7 @@ toolkit/
 │   └── sign/          # HMAC sign/verify
 │
 ├── infra/              # Infrastructure
+│   ├── redisconn/     # Unified Redis factory (explicit topology / ACL / TLS)
 │   ├── db/            # Databases
 │   │   ├── mysql/
 │   │   ├── redis/
@@ -1209,6 +1211,7 @@ toolkit/
 | infra/db | 75.8% |
 | infra/db/mysql | 51.7% |
 | infra/db/redis | 79.8% |
+| infra/redisconn | 98.0% |
 | infra/observe | 66.7% |
 | infra/otel | 29.7% |
 | infra/prometheus | 85.0% |
@@ -1264,7 +1267,7 @@ All collection and utility functions prefer generic implementations for type saf
 Core dependencies (pulled in on demand — only the relevant sub-package brings its dependency):
 ```
 github.com/hibiken/asynq                  # task queue (infra/queue/asynq)
-github.com/redis/go-redis/v9              # Redis client (cache/redis, infra/db/redis)
+github.com/redis/go-redis/v9              # Redis client (infra/redisconn, cache/redis, infra/db/redis)
 github.com/go-sql-driver/mysql            # MySQL driver (infra/db/mysql)
 go.mongodb.org/mongo-driver               # MongoDB driver (infra/db/mongodb)
 github.com/ClickHouse/clickhouse-go/v2    # ClickHouse driver (infra/db/clickhouse)

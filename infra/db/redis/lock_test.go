@@ -2,12 +2,31 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	goredis "github.com/redis/go-redis/v9"
 )
+
+type releaseFailingClient struct {
+	goredis.UniversalClient
+	releaseErr error
+}
+
+func (c *releaseFailingClient) Eval(
+	ctx context.Context,
+	script string,
+	keys []string,
+	args ...any,
+) *goredis.Cmd {
+	if c.releaseErr != nil {
+		return goredis.NewCmdResult(nil, c.releaseErr)
+	}
+	return c.UniversalClient.Eval(ctx, script, keys, args...)
+}
 
 func setupLockTest(t *testing.T) (*miniredis.Miniredis, *Client) {
 	t.Helper()
@@ -17,10 +36,10 @@ func setupLockTest(t *testing.T) (*miniredis.Miniredis, *Client) {
 		t.Fatalf("failed to start miniredis: %v", err)
 	}
 
-	cfg := DefaultConfig(mr.Addr())
+	cfg := DefaultConfig(ModeSingle, mr.Addr())
 	cfg.DialTimeout = 1 * time.Second
 
-	client, err := New(cfg)
+	client, err := New(context.Background(), cfg)
 	if err != nil {
 		mr.Close()
 		t.Fatalf("failed to create redis client: %v", err)
@@ -41,6 +60,7 @@ func TestNewLock(t *testing.T) {
 
 	if lock == nil {
 		t.Fatal("expected lock to be created")
+		return
 	}
 
 	if lock.key != key {
@@ -100,6 +120,34 @@ func TestLockAcquire(t *testing.T) {
 
 	if val != lock.value {
 		t.Errorf("expected lock value %s, got %s", lock.value, val)
+	}
+}
+
+func TestLockAcquireRejectsNonPositiveExpiration(t *testing.T) {
+	tests := []struct {
+		name       string
+		expiration time.Duration
+	}{
+		{name: "zero", expiration: 0},
+		{name: "negative", expiration: -time.Second},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			mr, client := setupLockTest(t)
+			defer mr.Close()
+			defer client.Close()
+
+			const key = "invalid-expiration-lock"
+			lock := NewLock(client.UniversalClient, key, test.expiration)
+			err := lock.Acquire(context.Background())
+			if !errors.Is(err, ErrInvalidConfig) {
+				t.Fatalf("Acquire() error = %v, want errors.Is(ErrInvalidConfig)", err)
+			}
+			if mr.Exists(key) {
+				t.Fatal("Acquire() created a Redis key for an invalid expiration")
+			}
+		})
 	}
 }
 
@@ -180,6 +228,27 @@ func TestLockAcquireWithRetryFailure(t *testing.T) {
 
 	if err != ErrLockFailed {
 		t.Errorf("expected ErrLockFailed, got %v", err)
+	}
+}
+
+func TestLockAcquireWithRetryDoesNotWaitAfterLastAttempt(t *testing.T) {
+	mr, client := setupLockTest(t)
+	defer mr.Close()
+	defer client.Close()
+
+	key := "retry-last-attempt-lock"
+	held := NewLock(client.UniversalClient, key, time.Minute)
+	if err := held.Acquire(context.Background()); err != nil {
+		t.Fatalf("acquire held lock: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	contender := NewLock(client.UniversalClient, key, time.Minute)
+	err := contender.AcquireWithRetry(ctx, time.Hour, 1)
+	if !errors.Is(err, ErrLockFailed) {
+		t.Fatalf("expected final attempt to return ErrLockFailed without waiting, got %v", err)
 	}
 }
 
@@ -465,6 +534,27 @@ func TestWithLock(t *testing.T) {
 	}
 }
 
+func TestWithLockRejectsNonPositiveExpirationBeforeCallback(t *testing.T) {
+	mr, client := setupLockTest(t)
+	defer mr.Close()
+	defer client.Close()
+
+	called := false
+	err := WithLock(context.Background(), client.UniversalClient, "invalid-with-lock", 0, func() error {
+		called = true
+		return nil
+	})
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("WithLock() error = %v, want errors.Is(ErrInvalidConfig)", err)
+	}
+	if called {
+		t.Fatal("WithLock() invoked callback for an invalid expiration")
+	}
+	if mr.Exists("invalid-with-lock") {
+		t.Fatal("WithLock() created a Redis key for an invalid expiration")
+	}
+}
+
 func TestWithLockFunctionError(t *testing.T) {
 	mr, client := setupLockTest(t)
 	defer mr.Close()
@@ -489,6 +579,23 @@ func TestWithLockFunctionError(t *testing.T) {
 	_, err = client.Get(ctx, key).Result()
 	if err == nil {
 		t.Error("expected lock to be released after WithLock error")
+	}
+}
+
+func TestWithLockReportsReleaseFailure(t *testing.T) {
+	mr, client := setupLockTest(t)
+	defer mr.Close()
+	defer client.Close()
+
+	releaseErr := errors.New("release unavailable")
+	wrapped := &releaseFailingClient{UniversalClient: client.UniversalClient}
+
+	err := WithLock(context.Background(), wrapped, "release-failure-lock", time.Minute, func() error {
+		wrapped.releaseErr = releaseErr
+		return nil
+	})
+	if !errors.Is(err, releaseErr) {
+		t.Fatalf("expected release error, got %v", err)
 	}
 }
 

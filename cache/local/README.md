@@ -431,8 +431,7 @@ import (
 // 创建本地缓存
 localCache := local.NewCache(1000)
 
-// 创建 Redis 缓存
-rdb := goredis.NewClient(&goredis.Options{Addr: "localhost:6379"})
+// rdb 是启动阶段由 redisconn.Factory.Open 返回并完成探活的 UniversalClient。
 redisCache := redis.NewStableCache(rdb)
 
 // 组合为多层缓存

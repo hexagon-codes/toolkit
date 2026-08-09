@@ -2,126 +2,46 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"sync"
 	"time"
 
-	"github.com/redis/go-redis/v9"
-)
+	goredis "github.com/redis/go-redis/v9"
 
-var (
-	// 全局实例（使用 mutex + 双重检查替代 sync.Once，允许初始化失败后重试）
-	globalClient redis.UniversalClient
-	globalMu     sync.Mutex
+	"github.com/hexagon-codes/toolkit/infra/redisconn"
 )
 
 // Client Redis 客户端封装
 type Client struct {
-	redis.UniversalClient
-	config *Config
-}
-
-// Init 初始化全局 Redis 客户端
-// 使用 mutex + 双重检查替代 sync.Once，初始化失败后可重试
-func Init(config *Config) (*Client, error) {
-	globalMu.Lock()
-	defer globalMu.Unlock()
-
-	if globalClient != nil {
-		return &Client{
-			UniversalClient: globalClient,
-			config:          config,
-		}, nil
-	}
-
-	client, err := newUniversalClient(config)
-	if err != nil {
-		return nil, err
-	}
-	globalClient = client
-
-	return &Client{
-		UniversalClient: globalClient,
-		config:          config,
-	}, nil
-}
-
-// GetGlobal 获取全局 Redis 客户端
-func GetGlobal() redis.UniversalClient {
-	return globalClient
+	goredis.UniversalClient
 }
 
 // New 创建新的 Redis 客户端
-func New(config *Config) (*Client, error) {
-	if config == nil {
-		return nil, fmt.Errorf("redis config is nil")
-	}
-
-	client, err := newUniversalClient(config)
+func New(ctx context.Context, config Config) (*Client, error) {
+	factory, err := redisconn.NewFactory(config)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create redis connection factory: %w", err)
 	}
 
-	return &Client{
-		UniversalClient: client,
-		config:          config,
-	}, nil
+	client, err := factory.Open(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("open redis connection: %w", err)
+	}
+
+	return newClient(client), nil
 }
 
-// newUniversalClient 根据配置创建客户端
-func newUniversalClient(config *Config) (redis.UniversalClient, error) {
-	var client redis.UniversalClient
-
-	switch config.Mode {
-	case ModeSingle:
-		client = redis.NewClient(config.ToClientOptions())
-
-	case ModeCluster:
-		client = redis.NewClusterClient(config.ToClusterOptions())
-
-	case ModeSentinel:
-		client = redis.NewFailoverClient(&redis.FailoverOptions{
-			MasterName:      config.MasterName,
-			SentinelAddrs:   config.SentinelAddrs,
-			Password:        config.Password,
-			DB:              config.DB,
-			PoolSize:        config.PoolSize,
-			MinIdleConns:    config.MinIdleConns,
-			MaxRetries:      config.MaxRetries,
-			PoolTimeout:     config.PoolTimeout,
-			DialTimeout:     config.DialTimeout,
-			ReadTimeout:     config.ReadTimeout,
-			WriteTimeout:    config.WriteTimeout,
-			ConnMaxIdleTime: config.IdleTimeout,
-		})
-
-	default:
-		return nil, fmt.Errorf("unsupported redis mode: %s", config.Mode)
-	}
-
-	// 测试连接
-	ctx, cancel := context.WithTimeout(context.Background(), config.DialTimeout)
-	defer cancel()
-
-	if err := client.Ping(ctx).Err(); err != nil {
-		client.Close()
-		if config.Logger != nil {
-			config.Logger.Error("failed to ping redis", err)
-		}
-		return nil, fmt.Errorf("failed to ping redis: %w", err)
-	}
-
-	if config.Logger != nil {
-		config.Logger.Printf("redis connected successfully (mode: %s)", config.Mode)
-	}
-
-	return client, nil
+func newClient(client goredis.UniversalClient) *Client {
+	return &Client{UniversalClient: client}
 }
 
 // Health 健康检查
 func (c *Client) Health(ctx context.Context) error {
 	if c == nil || c.UniversalClient == nil {
 		return fmt.Errorf("redis client is nil")
+	}
+	if ctx == nil {
+		return fmt.Errorf("%w: health check", ErrInvalidContext)
 	}
 
 	if err := c.Ping(ctx).Err(); err != nil {
@@ -132,12 +52,15 @@ func (c *Client) Health(ctx context.Context) error {
 }
 
 // GetWithDefault 获取值，不存在时返回默认值
-func (c *Client) GetWithDefault(ctx context.Context, key string, defaultValue string) string {
+func (c *Client) GetWithDefault(ctx context.Context, key, defaultValue string) (string, error) {
 	val, err := c.Get(ctx, key).Result()
-	if err != nil {
-		return defaultValue
+	if err == nil {
+		return val, nil
 	}
-	return val
+	if errors.Is(err, goredis.Nil) {
+		return defaultValue, nil
+	}
+	return "", fmt.Errorf("get redis value: %w", err)
 }
 
 // SetWithExpire 设置值并指定过期时间
@@ -217,7 +140,7 @@ func (c *Client) Close() error {
 }
 
 // Stats 返回连接池统计信息
-func (c *Client) Stats() *redis.PoolStats {
+func (c *Client) Stats() *goredis.PoolStats {
 	if c == nil || c.UniversalClient == nil {
 		return nil
 	}

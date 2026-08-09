@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"github.com/hexagon-codes/toolkit/infra/db/redis"
@@ -51,28 +53,17 @@ func main() {
 
 // initSingleRedis 初始化单机模式 Redis
 func initSingleRedis() *redis.Client {
-	// 方式1: 使用默认配置
-	config := redis.DefaultConfig("localhost:6379")
-
-	// 方式2: 自定义配置
-	config = &redis.Config{
-		Mode:               redis.ModeSingle,
-		Addr:               "localhost:6379",
-		Password:           "", // 密码
-		DB:                 0,  // 数据库编号 (0-15)
-		PoolSize:           10, // 连接池大小
-		MinIdleConns:       2,  // 最小空闲连接
-		MaxRetries:         3,  // 最大重试次数
-		PoolTimeout:        4 * time.Second,
-		DialTimeout:        5 * time.Second,
-		ReadTimeout:        3 * time.Second,
-		WriteTimeout:       3 * time.Second,
-		IdleTimeout:        5 * time.Minute,
-		IdleCheckFrequency: time.Minute,
-		Logger:             &redis.StdLogger{},
+	addr := os.Getenv("REDIS_ADDR")
+	if addr == "" {
+		addr = "localhost:6379"
 	}
+	config := redis.DefaultConfig(redis.ModeSingle, addr)
+	config.DataCredentials = dataCredentials()
+	config.TLSConfig = redisTLSConfig()
 
-	client, err := redis.New(config)
+	connectCtx, cancelConnect := context.WithTimeout(context.Background(), 5*time.Second)
+	client, err := redis.New(connectCtx, config)
+	cancelConnect()
 	if err != nil {
 		log.Fatalf("Failed to connect to Redis: %v", err)
 	}
@@ -80,10 +71,9 @@ func initSingleRedis() *redis.Client {
 	fmt.Printf("✓ Redis 单机模式连接成功\n")
 
 	// 健康检查
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	if err := client.Health(ctx); err != nil {
+	healthCtx, cancelHealth := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancelHealth()
+	if err := client.Health(healthCtx); err != nil {
 		log.Fatalf("Health check failed: %v", err)
 	}
 
@@ -94,18 +84,20 @@ func initSingleRedis() *redis.Client {
 
 // initClusterRedis 初始化集群模式 Redis
 func initClusterRedis() *redis.Client {
-	config := redis.DefaultClusterConfig([]string{
+	config := redis.DefaultConfig(redis.ModeCluster,
 		"localhost:7000",
 		"localhost:7001",
 		"localhost:7002",
-	})
+	)
 
-	// 自定义集群配置
-	config.Password = ""
+	config.DataCredentials = dataCredentials()
+	config.TLSConfig = redisTLSConfig()
 	config.PoolSize = 20
 	config.MinIdleConns = 5
 
-	client, err := redis.New(config)
+	connectCtx, cancelConnect := context.WithTimeout(context.Background(), 5*time.Second)
+	client, err := redis.New(connectCtx, config)
+	cancelConnect()
 	if err != nil {
 		log.Fatalf("Failed to connect to Redis cluster: %v", err)
 	}
@@ -116,30 +108,43 @@ func initClusterRedis() *redis.Client {
 
 // initSentinelRedis 初始化哨兵模式 Redis
 func initSentinelRedis() *redis.Client {
-	config := &redis.Config{
-		Mode:       redis.ModeSentinel,
-		MasterName: "mymaster",
-		SentinelAddrs: []string{
-			"localhost:26379",
-			"localhost:26380",
-			"localhost:26381",
-		},
-		Password:     "",
-		DB:           0,
-		PoolSize:     10,
-		MinIdleConns: 2,
-		DialTimeout:  5 * time.Second,
-		ReadTimeout:  3 * time.Second,
-		WriteTimeout: 3 * time.Second,
+	config := redis.DefaultConfig(redis.ModeSentinel,
+		"localhost:26379",
+		"localhost:26380",
+		"localhost:26381",
+	)
+	config.MasterName = "mymaster"
+	config.DataCredentials = dataCredentials()
+	config.SentinelCredentials = redis.Credentials{
+		Username: os.Getenv("REDIS_SENTINEL_USERNAME"),
+		Password: os.Getenv("REDIS_SENTINEL_PASSWORD"),
 	}
+	config.TLSConfig = redisTLSConfig()
 
-	client, err := redis.New(config)
+	connectCtx, cancelConnect := context.WithTimeout(context.Background(), 5*time.Second)
+	client, err := redis.New(connectCtx, config)
+	cancelConnect()
 	if err != nil {
 		log.Fatalf("Failed to connect to Redis sentinel: %v", err)
 	}
 
 	fmt.Printf("✓ Redis 哨兵模式连接成功\n")
 	return client
+}
+
+func dataCredentials() redis.Credentials {
+	return redis.Credentials{
+		Username: os.Getenv("REDIS_USERNAME"),
+		Password: os.Getenv("REDIS_PASSWORD"),
+	}
+}
+
+func redisTLSConfig() *tls.Config {
+	serverName := os.Getenv("REDIS_TLS_SERVER_NAME")
+	if serverName == "" {
+		return nil
+	}
+	return &tls.Config{MinVersion: tls.VersionTLS12, ServerName: serverName}
 }
 
 // demonstrateBasicOps 演示基本操作

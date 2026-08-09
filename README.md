@@ -1070,6 +1070,7 @@ s.All(func(n int) bool { return n > 0 })
 
 ## 近期更新
 
+- **infra/redisconn**: 新增 Single / Cluster / Sentinel 统一 Redis 连接工厂，支持 ACL 账号密码、Sentinel 双凭据、TLS、动态凭据与启动探活；项目级策略主动拒绝 password-only
 - **net/httpx**: `RateLimitedPool` 实现 `io.Closer` 接口，`Close() error` 方法通过 `sync.Once` 保证幂等，多次调用安全
 - **util/poolx**: `AwaitFirst` 使用可取消 context，首个结果返回后自动取消剩余等待，防止 goroutine 泄漏
 - **util/poolx**: 修复 `workerStack.retrieveExpiry` 环形缓冲区压缩逻辑，过期回收后正确重建存活 worker 队列
@@ -1099,6 +1100,7 @@ toolkit/
 │   └── sign/          # HMAC 签名验签
 │
 ├── infra/              # 基础设施
+│   ├── redisconn/     # Redis 统一连接工厂（显式拓扑 / ACL / TLS）
 │   ├── db/            # 数据库
 │   │   ├── mysql/
 │   │   ├── redis/
@@ -1209,6 +1211,7 @@ toolkit/
 | infra/db | 75.8% |
 | infra/db/mysql | 51.7% |
 | infra/db/redis | 79.8% |
+| infra/redisconn | 98.0% |
 | infra/observe | 66.7% |
 | infra/otel | 29.7% |
 | infra/prometheus | 85.0% |
@@ -1264,7 +1267,7 @@ crypto (加密) → util (工具) → collection (数据结构) → lang (零依
 核心依赖（按需引入，仅相关子包才会拉取对应依赖）：
 ```
 github.com/hibiken/asynq                  # 任务队列（infra/queue/asynq）
-github.com/redis/go-redis/v9              # Redis 客户端（cache/redis、infra/db/redis）
+github.com/redis/go-redis/v9              # Redis 客户端（infra/redisconn、cache/redis、infra/db/redis）
 github.com/go-sql-driver/mysql            # MySQL 驱动（infra/db/mysql）
 go.mongodb.org/mongo-driver               # MongoDB 驱动（infra/db/mongodb）
 github.com/ClickHouse/clickhouse-go/v2    # ClickHouse 驱动（infra/db/clickhouse）
