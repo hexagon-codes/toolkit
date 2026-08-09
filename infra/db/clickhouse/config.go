@@ -3,6 +3,7 @@ package clickhouse
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -40,9 +41,8 @@ type Config struct {
 	// Compression: none, lz4, zstd
 	Compression string `json:"compression" yaml:"compression" mapstructure:"compression"`
 
-	// TLS
-	TLS                bool `json:"tls" yaml:"tls" mapstructure:"tls"`
-	InsecureSkipVerify bool `json:"insecure_skip_verify" yaml:"insecure_skip_verify" mapstructure:"insecure_skip_verify"`
+	// TLS 表示是否启用服务端证书与主机名校验。
+	TLS bool `json:"tls" yaml:"tls" mapstructure:"tls"`
 
 	// Debug enables debug logging.
 	Debug bool `json:"debug" yaml:"debug" mapstructure:"debug"`
@@ -71,11 +71,33 @@ func DefaultConfig() *Config {
 
 // Validate validates the configuration.
 func (c *Config) Validate() error {
+	if c == nil {
+		return errors.New("clickhouse: config must not be nil")
+	}
 	if len(c.Addrs) == 0 {
 		return ErrEmptyAddrs
 	}
-	if c.Database == "" {
+	for _, address := range c.Addrs {
+		if strings.TrimSpace(address) == "" {
+			return errors.New("clickhouse: addresses must not contain empty values")
+		}
+	}
+	if strings.TrimSpace(c.Database) == "" {
 		return ErrEmptyDatabase
+	}
+	if c.MaxOpenConns < 0 || c.MaxIdleConns < 0 {
+		return errors.New("clickhouse: connection pool sizes must not be negative")
+	}
+	if c.MaxOpenConns > 0 && c.MaxIdleConns > c.MaxOpenConns {
+		return errors.New("clickhouse: max idle connections must not exceed max open connections")
+	}
+	if c.ConnMaxLifetime < 0 || c.DialTimeout < 0 || c.ReadTimeout < 0 {
+		return errors.New("clickhouse: timeouts must not be negative")
+	}
+	switch c.Compression {
+	case "", "none", "lz4", "zstd":
+	default:
+		return fmt.Errorf("clickhouse: unsupported compression %q", c.Compression)
 	}
 	return nil
 }
@@ -127,11 +149,10 @@ func WithCompression(method string) Option {
 	return func(c *Config) { c.Compression = method }
 }
 
-// WithTLS enables TLS.
-func WithTLS(insecureSkipVerify bool) Option {
+// WithTLS 启用 TLS 证书校验。
+func WithTLS() Option {
 	return func(c *Config) {
 		c.TLS = true
-		c.InsecureSkipVerify = insecureSkipVerify
 	}
 }
 
@@ -148,7 +169,25 @@ func WithSettings(settings map[string]any) Option {
 // Apply applies options to the config.
 func (c *Config) Apply(opts ...Option) *Config {
 	for _, opt := range opts {
-		opt(c)
+		if opt != nil {
+			opt(c)
+		}
 	}
 	return c
+}
+
+// cloneConfig 复制配置中的可变字段，避免连接实例与调用方共享切片或 map。
+func cloneConfig(config *Config) *Config {
+	if config == nil {
+		return DefaultConfig()
+	}
+	cloned := *config
+	cloned.Addrs = append([]string(nil), config.Addrs...)
+	if config.Settings != nil {
+		cloned.Settings = make(map[string]any, len(config.Settings))
+		for key, value := range config.Settings {
+			cloned.Settings[key] = value
+		}
+	}
+	return &cloned
 }

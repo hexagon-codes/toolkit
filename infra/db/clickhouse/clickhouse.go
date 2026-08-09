@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"log"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -38,7 +37,10 @@ var (
 // 可安全多次调用，仅首次调用生效。使用 atomic.Bool + sync.Mutex 双重检查，线程安全。
 func Init(ctx context.Context, cfg *Config, opts ...Option) error {
 	if initialized.Load() {
-		return initErr
+		mu.RLock()
+		err := initErr
+		mu.RUnlock()
+		return err
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -55,19 +57,44 @@ func Init(ctx context.Context, cfg *Config, opts ...Option) error {
 // New creates a new ClickHouse client (non-singleton).
 // Use this when you need multiple clients or dependency injection.
 func New(ctx context.Context, cfg *Config, opts ...Option) (*Client, error) {
-	if cfg == nil {
-		cfg = DefaultConfig()
+	if ctx == nil {
+		return nil, errors.New("clickhouse: context must not be nil")
 	}
+	cfg = cloneConfig(cfg)
 
 	// Apply options
 	cfg.Apply(opts...)
+	cfg = cloneConfig(cfg)
 
 	// Validate
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
 
-	// Build options
+	chOpts := buildClickHouseOptions(cfg)
+
+	// 建立连接
+	conn, err := clickhouse.Open(chOpts)
+	if err != nil {
+		return nil, err
+	}
+
+	// 校验连接
+	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	if err := conn.Ping(pingCtx); err != nil {
+		return nil, errors.Join(err, conn.Close())
+	}
+
+	return &Client{
+		conn:   conn,
+		config: cfg,
+	}, nil
+}
+
+// buildClickHouseOptions 将领域配置转换为驱动配置，不执行网络操作。
+func buildClickHouseOptions(cfg *Config) *clickhouse.Options {
 	chOpts := &clickhouse.Options{
 		Addr: cfg.Addrs,
 		Auth: clickhouse.Auth{
@@ -76,6 +103,7 @@ func New(ctx context.Context, cfg *Config, opts ...Option) (*Client, error) {
 			Password: cfg.Password,
 		},
 		DialTimeout:     cfg.DialTimeout,
+		ReadTimeout:     cfg.ReadTimeout,
 		MaxOpenConns:    cfg.MaxOpenConns,
 		MaxIdleConns:    cfg.MaxIdleConns,
 		ConnMaxLifetime: cfg.ConnMaxLifetime,
@@ -103,33 +131,12 @@ func New(ctx context.Context, cfg *Config, opts ...Option) (*Client, error) {
 
 	// TLS
 	if cfg.TLS {
-		if cfg.InsecureSkipVerify {
-			log.Printf("[WARNING] clickhouse: InsecureSkipVerify 已启用，TLS 证书验证被跳过，不建议在生产环境使用")
-		}
 		chOpts.TLS = &tls.Config{
-			InsecureSkipVerify: cfg.InsecureSkipVerify,
+			MinVersion: tls.VersionTLS12,
 		}
 	}
 
-	// Connect
-	conn, err := clickhouse.Open(chOpts)
-	if err != nil {
-		return nil, err
-	}
-
-	// Verify connection
-	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	if err := conn.Ping(pingCtx); err != nil {
-		_ = conn.Close()
-		return nil, err
-	}
-
-	return &Client{
-		conn:   conn,
-		config: cfg,
-	}, nil
+	return chOpts
 }
 
 // GetClient returns the global singleton client.
@@ -169,21 +176,25 @@ func Close() error {
 	}
 	err := instance.Close()
 	instance = nil
+	initialized.Store(false)
+	initErr = nil
 	return err
 }
 
 // Reset 重置单例，允许重新初始化。
 // 主要用于测试场景。
-func Reset() {
+func Reset() error {
 	mu.Lock()
 	defer mu.Unlock()
 
+	var closeErr error
 	if instance != nil {
-		_ = instance.Close()
+		closeErr = instance.Close()
 		instance = nil
 	}
 	initialized.Store(false)
 	initErr = nil
+	return closeErr
 }
 
 // --- Client methods ---
@@ -216,7 +227,7 @@ func (c *Client) RawConn() driver.Conn {
 
 // Config returns a copy of the client configuration.
 func (c *Client) Config() Config {
-	return *c.config
+	return *cloneConfig(c.config)
 }
 
 // IsClosed returns true if the client has been closed.

@@ -75,7 +75,7 @@ type Manager struct {
 // ManagerOption configures a Manager.
 type ManagerOption func(*Manager)
 
-// WithLogger sets the logger for the Manager.
+// WithManagerLogger 设置 Manager 使用的日志器。
 func WithManagerLogger(l Logger) ManagerOption {
 	return func(m *Manager) {
 		if l != nil {
@@ -108,7 +108,9 @@ func (m *Manager) Register(c Client) {
 	name := c.Name()
 	if old, exists := m.clients[name]; exists {
 		m.logger.Warn("replacing existing client", "name", name)
-		_ = old.Close()
+		if err := old.Close(); err != nil {
+			m.logger.Error("failed to close replaced client", "name", name, "error", err)
+		}
 	}
 	m.clients[name] = c
 	m.logger.Info("registered client", "name", name)

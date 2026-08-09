@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -28,41 +27,53 @@ var (
 
 // Client wraps the Elasticsearch client with additional functionality.
 type Client struct {
-	client *elasticsearch.Client
-	config *Config
-	closed atomic.Bool
+	client    *elasticsearch.Client
+	transport *http.Transport
+	config    *Config
+	closed    atomic.Bool
 }
 
 // Global singleton.
 var (
-	instance *Client
-	once     sync.Once
-	initErr  error
-	mu       sync.RWMutex
+	instance    *Client
+	initialized atomic.Bool
+	initErr     error
+	mu          sync.RWMutex
 )
 
 // Init initializes the global Elasticsearch client singleton.
 // It is safe to call multiple times; only the first call takes effect.
 func Init(cfg *Config, opts ...Option) error {
-	once.Do(func() {
-		instance, initErr = New(cfg, opts...)
-	})
+	if initialized.Load() {
+		mu.RLock()
+		err := initErr
+		mu.RUnlock()
+		return err
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if initialized.Load() {
+		return initErr
+	}
+	instance, initErr = New(cfg, opts...)
+	if initErr == nil {
+		initialized.Store(true)
+	}
 	return initErr
 }
 
 // New creates a new Elasticsearch client (non-singleton).
 // Use this when you need multiple clients or dependency injection.
-func New(cfg *Config, opts ...Option) (*Client, error) {
-	if cfg == nil {
-		cfg = DefaultConfig()
-	}
+func New(cfg *Config, opts ...Option) (result *Client, err error) {
+	cfg = cloneConfig(cfg)
 
 	// Apply options
 	cfg.Apply(opts...)
+	cfg = cloneConfig(cfg)
 
 	// Validate
-	if err := cfg.Validate(); err != nil {
-		return nil, err
+	if validationErr := cfg.Validate(); validationErr != nil {
+		return nil, validationErr
 	}
 
 	// Build ES config
@@ -79,9 +90,55 @@ func New(cfg *Config, opts ...Option) (*Client, error) {
 		CompressRequestBody:   cfg.CompressRequestBody,
 		DiscoverNodesOnStart:  cfg.DiscoverNodesOnStart,
 		DiscoverNodesInterval: cfg.DiscoverNodesInterval,
+		EnableDebugLogger:     cfg.EnableDebugLogger,
 	}
 
-	// Custom transport
+	transport, err := buildHTTPTransport(cfg)
+	if err != nil {
+		return nil, err
+	}
+	esCfg.Transport = transport
+
+	// Create client
+	client, err := elasticsearch.NewClient(esCfg)
+	if err != nil {
+		transport.CloseIdleConnections()
+		return nil, err
+	}
+	defer func() {
+		if err == nil {
+			return
+		}
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		err = errors.Join(err, client.Close(closeCtx))
+		transport.CloseIdleConnections()
+		result = nil
+	}()
+
+	// 校验连接
+	res, err := client.Info()
+	if err != nil {
+		return nil, err
+	}
+	if res == nil || res.Body == nil {
+		return nil, errors.New("elasticsearch: connection verification returned an empty response")
+	}
+	defer func() { err = errors.Join(err, res.Body.Close()) }()
+
+	if res.IsError() {
+		return nil, errors.New("elasticsearch: connection failed - " + res.String())
+	}
+
+	return &Client{
+		client:    client,
+		transport: transport,
+		config:    cfg,
+	}, nil
+}
+
+// buildHTTPTransport 构造启用 TLS 1.2 下限和可选自定义 CA 的 HTTP 传输层。
+func buildHTTPTransport(cfg *Config) (*http.Transport, error) {
 	transport := &http.Transport{
 		MaxIdleConnsPerHost: cfg.MaxIdleConnsPerHost,
 		DialContext: (&net.Dialer{
@@ -91,54 +148,23 @@ func New(cfg *Config, opts ...Option) (*Client, error) {
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: cfg.RequestTimeout,
 		IdleConnTimeout:       90 * time.Second,
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
 	}
 
-	// TLS
-	if cfg.InsecureSkipVerify || cfg.CACert != "" {
-		if cfg.InsecureSkipVerify {
-			log.Printf("[WARNING] elasticsearch: InsecureSkipVerify 已启用，TLS 证书验证被跳过，不建议在生产环境使用")
+	if cfg.CACert != "" {
+		caCert, readErr := os.ReadFile(cfg.CACert) // #nosec G304 -- CA 路径来自显式连接配置。
+		if readErr != nil {
+			return nil, fmt.Errorf("elasticsearch: failed to read CA cert: %w", readErr)
 		}
-		tlsConfig := &tls.Config{
-			InsecureSkipVerify: cfg.InsecureSkipVerify,
+		caCertPool := x509.NewCertPool()
+		if !caCertPool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("elasticsearch: failed to parse CA cert")
 		}
-		// 加载 CA 证书
-		if cfg.CACert != "" {
-			caCert, err := os.ReadFile(cfg.CACert)
-			if err != nil {
-				return nil, fmt.Errorf("elasticsearch: failed to read CA cert: %w", err)
-			}
-			caCertPool := x509.NewCertPool()
-			if !caCertPool.AppendCertsFromPEM(caCert) {
-				return nil, fmt.Errorf("elasticsearch: failed to parse CA cert")
-			}
-			tlsConfig.RootCAs = caCertPool
-		}
-		transport.TLSClientConfig = tlsConfig
+		transport.TLSClientConfig.RootCAs = caCertPool
 	}
-
-	esCfg.Transport = transport
-
-	// Create client
-	client, err := elasticsearch.NewClient(esCfg)
-	if err != nil {
-		return nil, err
-	}
-
-	// Verify connection
-	res, err := client.Info()
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-
-	if res.IsError() {
-		return nil, errors.New("elasticsearch: connection failed - " + res.String())
-	}
-
-	return &Client{
-		client: client,
-		config: cfg,
-	}, nil
+	return transport, nil
 }
 
 // GetClient returns the global singleton client.
@@ -178,27 +204,31 @@ func Close() error {
 	}
 	err := instance.Close()
 	instance = nil
+	initialized.Store(false)
+	initErr = nil
 	return err
 }
 
 // Reset resets the singleton, allowing re-initialization.
 // This is primarily useful for testing.
-func Reset() {
+func Reset() error {
 	mu.Lock()
 	defer mu.Unlock()
 
+	var closeErr error
 	if instance != nil {
-		_ = instance.Close()
+		closeErr = instance.Close()
 		instance = nil
 	}
-	once = sync.Once{}
+	initialized.Store(false)
 	initErr = nil
+	return closeErr
 }
 
 // --- Client methods ---
 
 // Ping performs a health check.
-func (c *Client) Ping(ctx context.Context) error {
+func (c *Client) Ping(ctx context.Context) (err error) {
 	if c.closed.Load() {
 		return ErrAlreadyClosed
 	}
@@ -207,7 +237,7 @@ func (c *Client) Ping(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer res.Body.Close()
+	defer func() { err = errors.Join(err, res.Body.Close()) }()
 
 	if res.IsError() {
 		return ErrPingFailed
@@ -215,14 +245,18 @@ func (c *Client) Ping(ctx context.Context) error {
 	return nil
 }
 
-// Close closes the Elasticsearch client.
-// Note: ES client uses HTTP and doesn't maintain persistent connections.
+// Close 关闭 Elasticsearch 客户端及底层 HTTP 连接池。
 func (c *Client) Close() error {
 	if c.closed.Swap(true) {
 		return ErrAlreadyClosed
 	}
-	// ES client uses HTTP, no explicit close needed
-	return nil
+	closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := c.client.Close(closeCtx)
+	if c.transport != nil {
+		c.transport.CloseIdleConnections()
+	}
+	return err
 }
 
 // Name returns the client name for the db.Client interface.
@@ -237,7 +271,7 @@ func (c *Client) RawClient() *elasticsearch.Client {
 
 // Config returns a copy of the client configuration.
 func (c *Client) Config() Config {
-	return *c.config
+	return *cloneConfig(c.config)
 }
 
 // IsClosed returns true if the client has been closed.
@@ -266,12 +300,12 @@ type ClusterInfo struct {
 }
 
 // InfoParsed 返回解析后的集群信息（推荐使用，无需手动关闭 Body）
-func (c *Client) InfoParsed(ctx context.Context) (*ClusterInfo, error) {
+func (c *Client) InfoParsed(ctx context.Context) (_ *ClusterInfo, err error) {
 	res, err := c.Info(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer res.Body.Close()
+	defer func() { err = errors.Join(err, res.Body.Close()) }()
 
 	if res.IsError() {
 		return nil, fmt.Errorf("elasticsearch: info request failed: %s", res.Status())
@@ -308,12 +342,12 @@ type ClusterHealth struct {
 }
 
 // HealthParsed 返回解析后的集群健康状态（推荐使用，无需手动关闭 Body）
-func (c *Client) HealthParsed(ctx context.Context) (*ClusterHealth, error) {
+func (c *Client) HealthParsed(ctx context.Context) (_ *ClusterHealth, err error) {
 	res, err := c.Health(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer res.Body.Close()
+	defer func() { err = errors.Join(err, res.Body.Close()) }()
 
 	if res.IsError() {
 		return nil, fmt.Errorf("elasticsearch: health request failed: %s", res.Status())

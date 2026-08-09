@@ -3,6 +3,7 @@ package mongodb
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"time"
 )
 
@@ -66,11 +67,24 @@ func DefaultConfig() *Config {
 
 // Validate validates the configuration and returns an error if invalid.
 func (c *Config) Validate() error {
+	if c == nil {
+		return errors.New("mongodb: config must not be nil")
+	}
 	if c.URI == "" {
 		return ErrEmptyURI
 	}
 	if c.Database == "" {
 		return ErrEmptyDatabase
+	}
+	if c.MaxPoolSize > 0 && c.MinPoolSize > c.MaxPoolSize {
+		return errors.New("mongodb: min pool size must not exceed max pool size")
+	}
+	if c.MaxConnIdleTime < 0 || c.ConnectTimeout < 0 || c.SocketTimeout < 0 ||
+		c.ServerSelectionTimeout < 0 || c.HeartbeatInterval < 0 {
+		return errors.New("mongodb: timeouts must not be negative")
+	}
+	if c.ReadPreference != "" && parseReadPref(c.ReadPreference) == nil {
+		return fmt.Errorf("mongodb: unsupported read preference %q", c.ReadPreference)
 	}
 	return nil
 }
@@ -83,10 +97,11 @@ func (c *Config) String() string {
 
 // maskURI masks sensitive parts of the URI.
 func maskURI(uri string) string {
-	if len(uri) <= 20 {
+	parsed, err := url.Parse(uri)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return "***"
 	}
-	return uri[:20] + "***"
+	return parsed.Scheme + "://" + parsed.Host + "/***"
 }
 
 // Option is a functional option for Config.
@@ -141,7 +156,19 @@ func WithReadPreference(pref string) Option {
 // Apply applies options to the config.
 func (c *Config) Apply(opts ...Option) *Config {
 	for _, opt := range opts {
-		opt(c)
+		if opt != nil {
+			opt(c)
+		}
 	}
 	return c
+}
+
+// cloneConfig 复制配置中的可变字段，避免客户端与调用方共享切片。
+func cloneConfig(config *Config) *Config {
+	if config == nil {
+		return DefaultConfig()
+	}
+	cloned := *config
+	cloned.Compressors = append([]string(nil), config.Compressors...)
+	return &cloned
 }

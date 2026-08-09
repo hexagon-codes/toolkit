@@ -94,8 +94,13 @@ for rows.Next() {
 ctx := context.Background()
 
 // 5秒超时查询
-rows, err := db.QueryWithTimeout(ctx, 5*time.Second,
+rows, cancel, err := db.QueryWithTimeout(ctx, 5*time.Second,
     "SELECT * FROM large_table")
+if err != nil {
+    log.Fatal(err)
+}
+defer cancel()
+defer rows.Close()
 ```
 
 ### 执行语句

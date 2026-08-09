@@ -94,8 +94,13 @@ for rows.Next() {
 ctx := context.Background()
 
 // Query with 5-second timeout
-rows, err := db.QueryWithTimeout(ctx, 5*time.Second,
+rows, cancel, err := db.QueryWithTimeout(ctx, 5*time.Second,
     "SELECT * FROM large_table")
+if err != nil {
+    log.Fatal(err)
+}
+defer cancel()
+defer rows.Close()
 ```
 
 ### Execute Statement

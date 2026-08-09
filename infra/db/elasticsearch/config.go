@@ -3,6 +3,7 @@ package elasticsearch
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"time"
 )
 
@@ -38,9 +39,8 @@ type Config struct {
 	// Timeout
 	RequestTimeout time.Duration `json:"request_timeout" yaml:"request_timeout" mapstructure:"request_timeout"`
 
-	// TLS
-	CACert             string `json:"ca_cert" yaml:"ca_cert" mapstructure:"ca_cert"`
-	InsecureSkipVerify bool   `json:"insecure_skip_verify" yaml:"insecure_skip_verify" mapstructure:"insecure_skip_verify"`
+	// CACert 是用于校验服务端证书的自定义 CA 证书路径。
+	CACert string `json:"ca_cert" yaml:"ca_cert" mapstructure:"ca_cert"`
 
 	// Pool
 	MaxIdleConnsPerHost int `json:"max_idle_conns_per_host" yaml:"max_idle_conns_per_host" mapstructure:"max_idle_conns_per_host"`
@@ -65,8 +65,20 @@ func DefaultConfig() *Config {
 
 // Validate validates the configuration.
 func (c *Config) Validate() error {
+	if c == nil {
+		return errors.New("elasticsearch: config must not be nil")
+	}
 	if len(c.Addresses) == 0 && c.CloudID == "" {
 		return ErrEmptyAddrs
+	}
+	if len(c.Addresses) > 0 && c.CloudID != "" {
+		return errors.New("elasticsearch: addresses and CloudID are mutually exclusive")
+	}
+	if c.MaxRetries < 0 || c.MaxIdleConnsPerHost < 0 {
+		return errors.New("elasticsearch: retry and pool limits must not be negative")
+	}
+	if c.RequestTimeout < 0 || c.DiscoverNodesInterval < 0 {
+		return errors.New("elasticsearch: timeouts must not be negative")
 	}
 	return nil
 }
@@ -74,16 +86,21 @@ func (c *Config) Validate() error {
 // String returns a safe string representation.
 func (c *Config) String() string {
 	if c.CloudID != "" {
-		return fmt.Sprintf("Elasticsearch{CloudID: %s, MaxRetries: %d}", maskString(c.CloudID, 10), c.MaxRetries)
+		return fmt.Sprintf("Elasticsearch{CloudID: ***, MaxRetries: %d}", c.MaxRetries)
 	}
-	return fmt.Sprintf("Elasticsearch{Addresses: %v, MaxRetries: %d}", c.Addresses, c.MaxRetries)
+	addresses := make([]string, len(c.Addresses))
+	for index, address := range c.Addresses {
+		addresses[index] = maskAddress(address)
+	}
+	return fmt.Sprintf("Elasticsearch{Addresses: %v, MaxRetries: %d}", addresses, c.MaxRetries)
 }
 
-func maskString(s string, visible int) string {
-	if len(s) <= visible {
+func maskAddress(address string) string {
+	parsed, err := url.Parse(address)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return "***"
 	}
-	return s[:visible] + "***"
+	return parsed.Scheme + "://" + parsed.Host
 }
 
 // Option is a functional option for Config.
@@ -127,11 +144,6 @@ func WithCACert(path string) Option {
 	return func(c *Config) { c.CACert = path }
 }
 
-// WithInsecureSkipVerify skips TLS verification.
-func WithInsecureSkipVerify(skip bool) Option {
-	return func(c *Config) { c.InsecureSkipVerify = skip }
-}
-
 // WithDebugLogger enables debug logging.
 func WithDebugLogger(enable bool) Option {
 	return func(c *Config) { c.EnableDebugLogger = enable }
@@ -145,7 +157,20 @@ func WithCompression(enable bool) Option {
 // Apply applies options to the config.
 func (c *Config) Apply(opts ...Option) *Config {
 	for _, opt := range opts {
-		opt(c)
+		if opt != nil {
+			opt(c)
+		}
 	}
 	return c
+}
+
+// cloneConfig 复制配置中的可变字段，避免客户端与调用方共享切片。
+func cloneConfig(config *Config) *Config {
+	if config == nil {
+		return DefaultConfig()
+	}
+	cloned := *config
+	cloned.Addresses = append([]string(nil), config.Addresses...)
+	cloned.RetryOnStatus = append([]int(nil), config.RetryOnStatus...)
+	return &cloned
 }

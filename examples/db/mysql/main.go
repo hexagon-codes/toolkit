@@ -264,8 +264,9 @@ func demonstrateAdvancedQuery(db *mysql.DB) {
 
 	// 2. 使用带超时的查询
 	fmt.Println("\n  [带超时查询] 5秒超时")
-	row := db.QueryRowWithTimeout(ctx, 5*time.Second,
+	row, cancel := db.QueryRowWithTimeout(ctx, 5*time.Second,
 		`SELECT COUNT(*) FROM users`)
+	defer cancel()
 
 	var totalUsers int
 	if err := row.Scan(&totalUsers); err != nil {

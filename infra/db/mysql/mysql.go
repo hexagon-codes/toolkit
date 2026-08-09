@@ -3,6 +3,7 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -14,7 +15,7 @@ import (
 var (
 	// 全局实例（使用 mutex + 双重检查，允许失败后重试）
 	globalDB *DB
-	globalMu sync.Mutex
+	globalMu sync.RWMutex
 )
 
 // DB MySQL 数据库封装
@@ -43,7 +44,22 @@ func Init(config *Config) (*DB, error) {
 
 // GetGlobal 获取全局 MySQL 实例
 func GetGlobal() *DB {
+	globalMu.RLock()
+	defer globalMu.RUnlock()
 	return globalDB
+}
+
+// Reset 重置并关闭全局 MySQL 实例，允许后续重新初始化。
+func Reset() error {
+	globalMu.Lock()
+	db := globalDB
+	globalDB = nil
+	globalMu.Unlock()
+
+	if db == nil || db.DB == nil {
+		return nil
+	}
+	return db.DB.Close()
 }
 
 // New 创建新的 MySQL 连接
@@ -77,11 +93,11 @@ func New(config *Config) (*DB, error) {
 	defer cancel()
 
 	if err := db.PingContext(ctx); err != nil {
-		db.Close()
+		closeErr := db.Close()
 		if config.Logger != nil {
 			config.Logger.Error("failed to ping mysql", err)
 		}
-		return nil, fmt.Errorf("failed to ping mysql: %w", err)
+		return nil, fmt.Errorf("failed to ping mysql: %w", errors.Join(err, closeErr))
 	}
 
 	if config.Logger != nil {
@@ -122,29 +138,18 @@ func (db *DB) ExecWithTimeout(ctx context.Context, timeout time.Duration, query 
 	return db.ExecContext(ctx, query, args...)
 }
 
-// QueryWithTimeout 带超时的 Query
-//
-// 警告：此函数存在 context 生命周期问题，推荐使用 QueryWithTimeoutEx
-// 或直接使用 QueryContext 并自行管理 context。
-// 原因：Rows 返回后 cancel 立即调用，但 Scan() 仍需要有效的 context。
-func (db *DB) QueryWithTimeout(ctx context.Context, timeout time.Duration, query string, args ...any) (*sql.Rows, error) {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	return db.QueryContext(ctx, query, args...)
-}
-
-// QueryWithTimeoutEx 带超时的 Query（返回 cancel 函数）
+// QueryWithTimeout 带超时的 Query（返回 cancel 函数）
 //
 // 调用者必须在 Rows 处理完成后调用 cancel 函数释放资源
 //
 // 示例：
 //
-//	rows, cancel, err := db.QueryWithTimeoutEx(ctx, 5*time.Second, "SELECT id, name FROM users")
+//	rows, cancel, err := db.QueryWithTimeout(ctx, 5*time.Second, "SELECT id, name FROM users")
 //	if err != nil { return err }
 //	defer cancel()
 //	defer rows.Close()
 //	for rows.Next() { ... }
-func (db *DB) QueryWithTimeoutEx(ctx context.Context, timeout time.Duration, query string, args ...any) (*sql.Rows, context.CancelFunc, error) {
+func (db *DB) QueryWithTimeout(ctx context.Context, timeout time.Duration, query string, args ...any) (*sql.Rows, context.CancelFunc, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -154,27 +159,17 @@ func (db *DB) QueryWithTimeoutEx(ctx context.Context, timeout time.Duration, que
 	return rows, cancel, nil
 }
 
-// QueryRowWithTimeout 带超时的 QueryRow
-//
-// 警告：此函数存在 context 生命周期问题，推荐使用 QueryRowWithTimeoutEx
-// 或直接使用 QueryRowContext 并自行管理 context
-func (db *DB) QueryRowWithTimeout(ctx context.Context, timeout time.Duration, query string, args ...any) *sql.Row {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	return db.QueryRowContext(ctx, query, args...)
-}
-
-// QueryRowWithTimeoutEx 带超时的 QueryRow（返回 cancel 函数）
+// QueryRowWithTimeout 带超时的 QueryRow（返回 cancel 函数）
 //
 // 调用者必须在 Scan 完成后调用 cancel 函数释放资源
 //
 // 示例：
 //
-//	row, cancel := db.QueryRowWithTimeoutEx(ctx, 5*time.Second, "SELECT name FROM users WHERE id = ?", 1)
+//	row, cancel := db.QueryRowWithTimeout(ctx, 5*time.Second, "SELECT name FROM users WHERE id = ?", 1)
 //	defer cancel()
 //	var name string
 //	err := row.Scan(&name)
-func (db *DB) QueryRowWithTimeoutEx(ctx context.Context, timeout time.Duration, query string, args ...any) (*sql.Row, context.CancelFunc) {
+func (db *DB) QueryRowWithTimeout(ctx context.Context, timeout time.Duration, query string, args ...any) (*sql.Row, context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	return db.QueryRowContext(ctx, query, args...), cancel
 }
@@ -188,14 +183,16 @@ func (db *DB) Transaction(ctx context.Context, fn func(*sql.Tx) error) error {
 
 	defer func() {
 		if p := recover(); p != nil {
-			tx.Rollback()
+			if rbErr := tx.Rollback(); rbErr != nil && db.config.Logger != nil {
+				db.config.Logger.Error("failed to roll back panicked transaction", rbErr)
+			}
 			panic(p)
 		}
 	}()
 
 	if err := fn(tx); err != nil {
 		if rbErr := tx.Rollback(); rbErr != nil {
-			return fmt.Errorf("tx error: %v, rollback error: %v", err, rbErr)
+			return fmt.Errorf("transaction callback failed: %w; rollback failed: %w", err, rbErr)
 		}
 		return err
 	}
@@ -209,7 +206,17 @@ func (db *DB) Transaction(ctx context.Context, fn func(*sql.Tx) error) error {
 
 // Close 关闭数据库连接
 func (db *DB) Close() error {
-	if db == nil || db.DB == nil {
+	if db == nil {
+		return nil
+	}
+
+	globalMu.Lock()
+	if globalDB == db {
+		globalDB = nil
+	}
+	globalMu.Unlock()
+
+	if db.DB == nil {
 		return nil
 	}
 	return db.DB.Close()

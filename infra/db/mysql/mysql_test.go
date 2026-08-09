@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"testing"
 	"time"
 )
@@ -281,9 +282,15 @@ func setupTestDB(t *testing.T) *DB {
 }
 
 func getTestDSN() string {
-	// 可以从环境变量读取
-	// return os.Getenv("TEST_MYSQL_DSN")
-	return "" // 默认跳过
+	return os.Getenv("TEST_MYSQL_DSN")
+}
+
+func TestGetTestDSN_ReadsEnvironment(t *testing.T) {
+	t.Setenv("TEST_MYSQL_DSN", "tester:secret@tcp(127.0.0.1:3306)/toolkit_test")
+
+	if got := getTestDSN(); got != "tester:secret@tcp(127.0.0.1:3306)/toolkit_test" {
+		t.Fatalf("getTestDSN() = %q, want configured TEST_MYSQL_DSN", got)
+	}
 }
 
 func createTestTable(t *testing.T, db *DB) {
@@ -382,8 +389,8 @@ func TestIntegration_Transaction(t *testing.T) {
 
 	// 测试成功事务
 	err := db.Transaction(ctx, func(tx *sql.Tx) error {
-		_, err := tx.Exec("INSERT INTO test_users (name, email) VALUES (?, ?)", "Charlie", "charlie@example.com")
-		return err
+		_, execErr := tx.ExecContext(ctx, "INSERT INTO test_users (name, email) VALUES (?, ?)", "Charlie", "charlie@example.com")
+		return execErr
 	})
 
 	if err != nil {
@@ -392,9 +399,9 @@ func TestIntegration_Transaction(t *testing.T) {
 
 	// 测试回滚事务
 	err = db.Transaction(ctx, func(tx *sql.Tx) error {
-		_, err := tx.Exec("INSERT INTO test_users (name, email) VALUES (?, ?)", "Dave", "dave@example.com")
-		if err != nil {
-			return err
+		_, execErr := tx.ExecContext(ctx, "INSERT INTO test_users (name, email) VALUES (?, ?)", "Dave", "dave@example.com")
+		if execErr != nil {
+			return execErr
 		}
 		// 故意返回错误以触发回滚
 		return errors.New("rollback test")
@@ -468,7 +475,8 @@ func TestIntegration_Timeout(t *testing.T) {
 
 	// 测试 QueryRowWithTimeout
 	var name string
-	row := db.QueryRowWithTimeout(ctx, 5*time.Second, "SELECT name FROM test_users WHERE email = ?", "eve@example.com")
+	row, cancel := db.QueryRowWithTimeout(ctx, 5*time.Second, "SELECT name FROM test_users WHERE email = ?", "eve@example.com")
+	defer cancel()
 	err = row.Scan(&name)
 	if err != nil {
 		t.Errorf("QueryRowWithTimeout failed: %v", err)
@@ -497,8 +505,8 @@ func TestTransaction_Panic(t *testing.T) {
 		}
 	}()
 
-	db.Transaction(ctx, func(tx *sql.Tx) error {
-		_, err := tx.Exec("INSERT INTO test_users (name, email) VALUES (?, ?)", "Panic", "panic@example.com")
+	_ = db.Transaction(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, "INSERT INTO test_users (name, email) VALUES (?, ?)", "Panic", "panic@example.com")
 		if err != nil {
 			return err
 		}
@@ -565,10 +573,11 @@ func TestQueryWithTimeout_Success(t *testing.T) {
 	db.ExecContext(ctx, "INSERT INTO test_users (name, email) VALUES (?, ?)", "Query", "query@example.com")
 
 	// 查询
-	rows, err := db.QueryWithTimeout(ctx, 5*time.Second, "SELECT name, email FROM test_users WHERE name = ?", "Query")
+	rows, cancel, err := db.QueryWithTimeout(ctx, 5*time.Second, "SELECT name, email FROM test_users WHERE name = ?", "Query")
 	if err != nil {
 		t.Fatalf("QueryWithTimeout failed: %v", err)
 	}
+	defer cancel()
 	defer rows.Close()
 
 	count := 0

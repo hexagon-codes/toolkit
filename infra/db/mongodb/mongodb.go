@@ -3,6 +3,7 @@ package mongodb
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -64,19 +65,52 @@ func Init(ctx context.Context, cfg *Config, opts ...Option) error {
 // New creates a new MongoDB client (non-singleton).
 // Use this when you need multiple clients or dependency injection.
 func New(ctx context.Context, cfg *Config, opts ...Option) (*Client, error) {
-	if cfg == nil {
-		cfg = DefaultConfig()
+	if ctx == nil {
+		return nil, errors.New("mongodb: context must not be nil")
 	}
+	cfg = cloneConfig(cfg)
 
 	// Apply options
 	cfg.Apply(opts...)
+	cfg = cloneConfig(cfg)
 
 	// Validate
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
 
-	// Build client options
+	clientOpts := buildClientOptions(cfg)
+	if err := clientOpts.Validate(); err != nil {
+		return nil, fmt.Errorf("mongodb: invalid client options: %w", err)
+	}
+
+	connectCtx, cancel := contextWithOptionalTimeout(ctx, cfg.ConnectTimeout)
+	defer cancel()
+
+	client, err := mongo.Connect(connectCtx, clientOpts)
+	if err != nil {
+		return nil, err
+	}
+
+	// 校验连接
+	pingCtx, pingCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer pingCancel()
+
+	if err := client.Ping(pingCtx, readpref.Primary()); err != nil {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		return nil, errors.Join(err, client.Disconnect(cleanupCtx))
+	}
+
+	return &Client{
+		client:   client,
+		database: client.Database(cfg.Database),
+		config:   cfg,
+	}, nil
+}
+
+// buildClientOptions 将领域配置转换为 MongoDB 驱动配置，不执行网络操作。
+func buildClientOptions(cfg *Config) *options.ClientOptions {
 	clientOpts := options.Client().ApplyURI(cfg.URI)
 
 	// Connection pool
@@ -137,29 +171,15 @@ func New(ctx context.Context, cfg *Config, opts ...Option) (*Client, error) {
 		clientOpts.SetCompressors(cfg.Compressors)
 	}
 
-	// Connect with timeout
-	connectCtx, cancel := context.WithTimeout(ctx, cfg.ConnectTimeout)
-	defer cancel()
+	return clientOpts
+}
 
-	client, err := mongo.Connect(connectCtx, clientOpts)
-	if err != nil {
-		return nil, err
+// contextWithOptionalTimeout 仅在正超时时长下添加截止时间。
+func contextWithOptionalTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return context.WithCancel(ctx)
 	}
-
-	// Verify connection
-	pingCtx, pingCancel := context.WithTimeout(ctx, 5*time.Second)
-	defer pingCancel()
-
-	if err := client.Ping(pingCtx, readpref.Primary()); err != nil {
-		_ = client.Disconnect(context.Background())
-		return nil, err
-	}
-
-	return &Client{
-		client:   client,
-		database: client.Database(cfg.Database),
-		config:   cfg,
-	}, nil
+	return context.WithTimeout(ctx, timeout)
 }
 
 func parseReadPref(pref string) *readpref.ReadPref {
@@ -236,22 +256,26 @@ func Close() error {
 	}
 	err := instance.Close()
 	instance = nil
+	initialized.Store(false)
+	initErr = nil
 	return err
 }
 
 // Reset resets the singleton, allowing re-initialization.
 // This is primarily useful for testing.
 // 此函数是线程安全的，使用 atomic.Bool 确保与 Init() 不会竞态
-func Reset() {
+func Reset() error {
 	mu.Lock()
 	defer mu.Unlock()
 
+	var closeErr error
 	if instance != nil {
-		_ = instance.Close()
+		closeErr = instance.Close()
 		instance = nil
 	}
 	initialized.Store(false) // 原子操作，安全重置初始化状态
 	initErr = nil
+	return closeErr
 }
 
 // --- Client methods ---
@@ -269,7 +293,9 @@ func (c *Client) Close() error {
 	if c.closed.Swap(true) {
 		return ErrAlreadyClosed
 	}
-	return c.client.Disconnect(context.Background())
+	closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return c.client.Disconnect(closeCtx)
 }
 
 // Name returns the client name for the db.Client interface.
@@ -299,7 +325,7 @@ func (c *Client) Coll(name string) *mongo.Collection {
 
 // Config returns a copy of the client configuration.
 func (c *Client) Config() Config {
-	return *c.config
+	return *cloneConfig(c.config)
 }
 
 // IsClosed returns true if the client has been closed.
