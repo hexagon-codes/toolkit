@@ -104,29 +104,29 @@ func IDCard(id string) bool {
 }
 
 // InRange 验证数字是否在范围内 [min, max]
-func InRange(value, min, max int) bool {
-	return value >= min && value <= max
+func InRange(value, minimum, maximum int) bool {
+	return value >= minimum && value <= maximum
 }
 
 // InRangeFloat 验证浮点数是否在范围内 [min, max]
-func InRangeFloat(value, min, max float64) bool {
-	return value >= min && value <= max
+func InRangeFloat(value, minimum, maximum float64) bool {
+	return value >= minimum && value <= maximum
 }
 
 // MinLength 验证字符串最小长度
-func MinLength(str string, min int) bool {
-	return len([]rune(str)) >= min
+func MinLength(str string, minimum int) bool {
+	return len([]rune(str)) >= minimum
 }
 
 // MaxLength 验证字符串最大长度
-func MaxLength(str string, max int) bool {
-	return len([]rune(str)) <= max
+func MaxLength(str string, maximum int) bool {
+	return len([]rune(str)) <= maximum
 }
 
 // LengthBetween 验证字符串长度在范围内 [min, max]
-func LengthBetween(str string, min, max int) bool {
+func LengthBetween(str string, minimum, maximum int) bool {
 	length := len([]rune(str))
-	return length >= min && length <= max
+	return length >= minimum && length <= maximum
 }
 
 // IsNumeric 验证是否为数字
@@ -141,7 +141,7 @@ func IsAlpha(str string) bool {
 			return false
 		}
 	}
-	return len(str) > 0
+	return str != ""
 }
 
 // IsAlphaNumeric 验证是否为字母或数字
@@ -151,7 +151,7 @@ func IsAlphaNumeric(str string) bool {
 			return false
 		}
 	}
-	return len(str) > 0
+	return str != ""
 }
 
 // Contains 验证字符串是否包含子串
@@ -200,7 +200,11 @@ func Match(str, pattern string) bool {
 		if _, isErr := cached.(regexpError); isErr {
 			return false
 		}
-		return cached.(*regexp.Regexp).MatchString(str)
+		compiled, ok := cached.(*regexp.Regexp)
+		if !ok {
+			return false
+		}
+		return compiled.MatchString(str)
 	}
 
 	// 编译正则表达式

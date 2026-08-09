@@ -26,6 +26,7 @@ func TestValidator_Struct_Success(t *testing.T) {
 		Phone:    "13812345678",
 		Password: "Abc12345",
 		Role:     "admin",
+		private:  "must be ignored",
 	}
 
 	err := v.Struct(user)
@@ -37,6 +38,9 @@ func TestValidator_Struct_Success(t *testing.T) {
 	err = v.Struct(&user)
 	if err != nil {
 		t.Errorf("unexpected error with pointer: %v", err)
+	}
+	if user.private != "must be ignored" {
+		t.Error("validator modified an unexported field")
 	}
 }
 
@@ -176,6 +180,21 @@ func TestValidator_Struct_RangeFail(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected range error")
+	}
+}
+
+func TestUnsignedBoundsHandleNegativeRules(t *testing.T) {
+	if !checkMin(uint64(0), -1) {
+		t.Fatal("checkMin() rejected an unsigned value above a negative minimum")
+	}
+	if checkMax(uint64(0), -1) {
+		t.Fatal("checkMax() accepted an unsigned value below a negative maximum")
+	}
+	if checkRange(uint64(0), -2, -1) {
+		t.Fatal("checkRange() accepted an unsigned value in a negative range")
+	}
+	if !checkRange(uint64(1), -1, 2) {
+		t.Fatal("checkRange() rejected a valid unsigned value")
 	}
 }
 

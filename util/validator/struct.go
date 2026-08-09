@@ -1,3 +1,4 @@
+// Package validator 提供值与结构体校验工具。
 package validator
 
 import (
@@ -347,7 +348,7 @@ func (v *Validator) SetTagName(tagName string) *Validator {
 //	}
 func (v *Validator) Struct(obj any) error {
 	rv := reflect.ValueOf(obj)
-	if rv.Kind() == reflect.Ptr {
+	if rv.Kind() == reflect.Pointer {
 		rv = rv.Elem()
 	}
 	if rv.Kind() != reflect.Struct {
@@ -529,7 +530,7 @@ func isEmpty(value any) bool {
 		return strings.TrimSpace(rv.String()) == ""
 	case reflect.Slice, reflect.Map, reflect.Array:
 		return rv.Len() == 0
-	case reflect.Ptr, reflect.Interface:
+	case reflect.Pointer, reflect.Interface:
 		return rv.IsNil()
 		// 数字类型零值不算空，应该正常验证
 	}
@@ -537,37 +538,43 @@ func isEmpty(value any) bool {
 }
 
 // checkMin 检查最小值/长度
-func checkMin(value any, min int) bool {
+func checkMin(value any, minimum int) bool {
 	rv := reflect.ValueOf(value)
 	switch rv.Kind() {
 	case reflect.String:
-		return len([]rune(rv.String())) >= min
+		return len([]rune(rv.String())) >= minimum
 	case reflect.Slice, reflect.Map, reflect.Array:
-		return rv.Len() >= min
+		return rv.Len() >= minimum
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return rv.Int() >= int64(min)
+		return rv.Int() >= int64(minimum)
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return rv.Uint() >= uint64(min)
+		if minimum <= 0 {
+			return true
+		}
+		return rv.Uint() >= uint64(minimum)
 	case reflect.Float32, reflect.Float64:
-		return rv.Float() >= float64(min)
+		return rv.Float() >= float64(minimum)
 	}
 	return false
 }
 
 // checkMax 检查最大值/长度
-func checkMax(value any, max int) bool {
+func checkMax(value any, maximum int) bool {
 	rv := reflect.ValueOf(value)
 	switch rv.Kind() {
 	case reflect.String:
-		return len([]rune(rv.String())) <= max
+		return len([]rune(rv.String())) <= maximum
 	case reflect.Slice, reflect.Map, reflect.Array:
-		return rv.Len() <= max
+		return rv.Len() <= maximum
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return rv.Int() <= int64(max)
+		return rv.Int() <= int64(maximum)
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return rv.Uint() <= uint64(max)
+		if maximum < 0 {
+			return false
+		}
+		return rv.Uint() <= uint64(maximum)
 	case reflect.Float32, reflect.Float64:
-		return rv.Float() <= float64(max)
+		return rv.Float() <= float64(maximum)
 	}
 	return false
 }
@@ -585,23 +592,29 @@ func checkLen(value any, length int) bool {
 }
 
 // checkRange 检查值是否在范围内
-func checkRange(value any, min, max int) bool {
+func checkRange(value any, minimum, maximum int) bool {
 	rv := reflect.ValueOf(value)
 	switch rv.Kind() {
 	case reflect.String:
 		length := len([]rune(rv.String()))
-		return length >= min && length <= max
+		return length >= minimum && length <= maximum
 	case reflect.Slice, reflect.Map, reflect.Array:
-		return rv.Len() >= min && rv.Len() <= max
+		return rv.Len() >= minimum && rv.Len() <= maximum
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		v := rv.Int()
-		return v >= int64(min) && v <= int64(max)
+		return v >= int64(minimum) && v <= int64(maximum)
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		if maximum < 0 {
+			return false
+		}
 		v := rv.Uint()
-		return v >= uint64(min) && v <= uint64(max)
+		if minimum > 0 && v < uint64(minimum) {
+			return false
+		}
+		return v <= uint64(maximum)
 	case reflect.Float32, reflect.Float64:
 		v := rv.Float()
-		return v >= float64(min) && v <= float64(max)
+		return v >= float64(minimum) && v <= float64(maximum)
 	}
 	return false
 }
