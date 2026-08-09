@@ -70,23 +70,27 @@ func (s *Store) SaveBytes(data []byte, ext string) (string, error) {
 
 	subdir := time.Now().Format("200601") // YYYYMM
 	relPath := filepath.Join(subdir, hash+"."+ext)
-	if _, err := containedPath(s.root, relPath); err != nil {
+	if _, err = containedPath(s.root, relPath); err != nil {
 		return "", err
 	}
 	root, err := os.OpenRoot(s.root)
 	if err != nil {
 		return "", fmt.Errorf("open blob root: %w", err)
 	}
-	defer root.Close()
+	defer func() {
+		if closeErr := root.Close(); closeErr != nil {
+			_ = closeErr
+		}
+	}()
 
 	// 已存在（同内容）则跳过写入
-	if _, err := root.Stat(relPath); err == nil {
+	if _, err = root.Stat(relPath); err == nil {
 		return filepath.ToSlash(relPath), nil
 	} else if !os.IsNotExist(err) {
 		return "", fmt.Errorf("stat blob: %w", err)
 	}
 
-	if err := root.MkdirAll(subdir, 0o755); err != nil {
+	if err = root.MkdirAll(subdir, 0o755); err != nil {
 		return "", fmt.Errorf("mkdir: %w", err)
 	}
 	// 原子写入：唯一 tmp + rename，避免并发写入者（或多进程共享目录）互相覆盖
@@ -96,9 +100,15 @@ func (s *Store) SaveBytes(data []byte, ext string) (string, error) {
 		return "", fmt.Errorf("create tmp: %w", err)
 	}
 	// 写 + 正确 close；失败路径下 best-effort 清理
-	cleanupTmp := func() { _ = root.Remove(tmpPath) }
+	cleanupTmp := func() {
+		if rmErr := root.Remove(tmpPath); rmErr != nil && !os.IsNotExist(rmErr) {
+			_ = rmErr
+		}
+	}
 	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
+		if closeErr := tmp.Close(); closeErr != nil {
+			_ = closeErr
+		}
 		cleanupTmp()
 		return "", fmt.Errorf("write tmp %s: %w", tmpPath, err)
 	}
@@ -142,7 +152,7 @@ func normalizeExtension(ext string) (string, error) {
 		return "bin", nil
 	}
 	ext = strings.TrimPrefix(ext, ".")
-	if len(ext) == 0 || len(ext) > 16 {
+	if ext == "" || len(ext) > 16 {
 		return "", fmt.Errorf("invalid extension")
 	}
 	for i := 0; i < len(ext); i++ {
@@ -175,7 +185,7 @@ func (s *Store) SaveFromURL(ctx context.Context, url, ext string) (string, error
 	rctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(rctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(rctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return "", fmt.Errorf("new request: %w", err)
 	}
@@ -183,7 +193,11 @@ func (s *Store) SaveFromURL(ctx context.Context, url, ext string) (string, error
 	if err != nil {
 		return "", fmt.Errorf("download %s: %w", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			_ = closeErr
+		}
+	}()
 	if resp.StatusCode >= 400 {
 		return "", fmt.Errorf("download HTTP %d: %s", resp.StatusCode, url)
 	}
@@ -208,6 +222,8 @@ func (s *Store) Open(relPath string) (*os.File, error) {
 		return nil, fmt.Errorf("open blob root: %w", err)
 	}
 	f, err := root.Open(relPath)
-	_ = root.Close()
+	if closeErr := root.Close(); closeErr != nil && err == nil {
+		err = closeErr
+	}
 	return f, err
 }

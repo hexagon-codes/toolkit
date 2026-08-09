@@ -83,15 +83,15 @@ func TestSaveStream_RejectsEscapingSymlinkedStorageSubdirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	outside := filepath.Join(parent, "outside")
-	if err := os.Mkdir(outside, 0o755); err != nil {
-		t.Fatal(err)
+	if mkErr := os.Mkdir(outside, 0o755); mkErr != nil {
+		t.Fatal(mkErr)
 	}
 	monthDir := filepath.Join(root, time.Now().Format("200601"))
-	if err := os.Symlink(outside, monthDir); err != nil {
-		t.Skipf("symlink unavailable on this platform: %v", err)
+	if symErr := os.Symlink(outside, monthDir); symErr != nil {
+		t.Skipf("symlink unavailable on this platform: %v", symErr)
 	}
 
-	if rel, err := s.SaveStream(context.Background(), strings.NewReader("stream"), "png"); err == nil {
+	if rel, saveErr := s.SaveStream(context.Background(), strings.NewReader("stream"), "png"); saveErr == nil {
 		t.Fatalf("SaveStream followed an escaping symlink: %q", rel)
 	}
 	entries, err := os.ReadDir(outside)

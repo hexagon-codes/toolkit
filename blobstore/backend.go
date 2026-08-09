@@ -52,20 +52,30 @@ func (s *Store) SaveStream(ctx context.Context, r io.Reader, ext string) (string
 	if err != nil {
 		return "", fmt.Errorf("open blob root: %w", err)
 	}
-	defer root.Close()
+	defer func() {
+		if closeErr := root.Close(); closeErr != nil {
+			_ = closeErr
+		}
+	}()
 
 	// 临时文件落在根目录下，确保与最终路径同一文件系统（rename 原子）。
 	tmp, tmpPath, err := createRootTemp(root, ".", ".stream.")
 	if err != nil {
 		return "", fmt.Errorf("create tmp: %w", err)
 	}
-	cleanupTmp := func() { _ = root.Remove(tmpPath) }
+	cleanupTmp := func() {
+		if rmErr := root.Remove(tmpPath); rmErr != nil && !os.IsNotExist(rmErr) {
+			_ = rmErr
+		}
+	}
 
 	h := sha256.New()
 	// 边写临时文件边计算哈希；ctxReader 让取消能中断长时间拷贝。
 	n, err := io.Copy(io.MultiWriter(tmp, h), &ctxReader{ctx: ctx, r: r})
 	if err != nil {
-		_ = tmp.Close()
+		if closeErr := tmp.Close(); closeErr != nil {
+			_ = closeErr
+		}
 		cleanupTmp()
 		return "", fmt.Errorf("stream copy: %w", err)
 	}

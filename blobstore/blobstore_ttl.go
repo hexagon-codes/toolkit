@@ -100,7 +100,9 @@ func (s *Store) Purge(now time.Time) (int, error) {
 		if rmErr := os.Remove(blobPath); rmErr != nil && !os.IsNotExist(rmErr) {
 			return fmt.Errorf("blobstore: purge blob %s: %w", blobPath, rmErr)
 		}
-		_ = os.Remove(path) // 删 sidecar，失败不阻断
+		if rmErr := os.Remove(path); rmErr != nil && !os.IsNotExist(rmErr) {
+			return fmt.Errorf("blobstore: purge sidecar %s: %w", path, rmErr)
+		} // 删 sidecar，失败不阻断
 		purged++
 		return nil
 	})

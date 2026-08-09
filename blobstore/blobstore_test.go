@@ -137,11 +137,11 @@ func TestSaveBytes_ReturnedPathIsContainedByRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := s.SaveBytes([]byte("containment"), "../../escaped"); err == nil {
+	if _, saveErr := s.SaveBytes([]byte("containment"), "../../escaped"); saveErr == nil {
 		t.Fatal("path-escaping extension must be rejected")
 	}
-	if _, err := os.Stat(filepath.Join(parent, "escaped")); !os.IsNotExist(err) {
-		t.Fatalf("extension escaped store root: stat error = %v", err)
+	if _, statErr := os.Stat(filepath.Join(parent, "escaped")); !os.IsNotExist(statErr) {
+		t.Fatalf("extension escaped store root: stat error = %v", statErr)
 	}
 
 	rel, err := s.SaveBytes([]byte("containment"), ".PNG")
@@ -169,15 +169,15 @@ func TestSaveBytes_RejectsSymlinkedStorageSubdirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	outside := filepath.Join(parent, "outside")
-	if err := os.Mkdir(outside, 0o755); err != nil {
-		t.Fatal(err)
+	if mkErr := os.Mkdir(outside, 0o755); mkErr != nil {
+		t.Fatal(mkErr)
 	}
 	monthDir := filepath.Join(root, time.Now().Format("200601"))
-	if err := os.Symlink(outside, monthDir); err != nil {
-		t.Skipf("symlink unavailable on this platform: %v", err)
+	if symErr := os.Symlink(outside, monthDir); symErr != nil {
+		t.Skipf("symlink unavailable on this platform: %v", symErr)
 	}
 
-	if rel, err := s.SaveBytes([]byte("must stay contained"), "png"); err == nil {
+	if rel, saveErr := s.SaveBytes([]byte("must stay contained"), "png"); saveErr == nil {
 		t.Fatalf("SaveBytes followed a symlinked storage directory: %q", rel)
 	}
 	entries, err := os.ReadDir(outside)
