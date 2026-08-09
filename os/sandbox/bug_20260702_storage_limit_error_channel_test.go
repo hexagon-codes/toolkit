@@ -6,9 +6,11 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // bug-20260702: 存储限额违规的错误通道混叠。
@@ -48,6 +50,7 @@ func TestBug20260702_StorageLimitViolationCarriesSentinelAndResult(t *testing.T)
 	}
 	if res == nil {
 		t.Fatalf("后置违规必须保留并返回 ExecResult((res, err) 形态), got nil")
+		return
 	}
 	if res.ExitCode != 0 {
 		t.Fatalf("执行本身应成功(exit 0), got %d, stderr=%q", res.ExitCode, res.Stderr)
@@ -109,5 +112,35 @@ func TestBug20260702_StorageWalkToleratesConcurrentFileRemoval(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("walk 期间文件消失应跳过继续, 不该判为检查失败: %v", err)
+	}
+}
+
+func TestTimeoutPreservesStorageAndProcessWaitErrors(t *testing.T) {
+	workspace := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	result, err := runBoundedCommand(
+		ctx,
+		"/bin/sh",
+		[]string{"-c", "printf 0123456789 > out.bin; sleep 5"},
+		Config{
+			Workspace:         workspace,
+			MaxWorkspaceBytes: 5,
+			MaxOutputBytes:    1024,
+			MaxStderrBytes:    1024,
+		},
+		os.Environ(),
+		LimitStatusWeak,
+	)
+	if result == nil {
+		t.Fatal("runBoundedCommand() result = nil")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrStorageLimitExceeded) {
+		t.Fatalf("runBoundedCommand() error = %v, want timeout and storage errors", err)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("runBoundedCommand() error = %v, want process wait error", err)
 	}
 }

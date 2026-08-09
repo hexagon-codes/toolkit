@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 )
@@ -24,6 +25,9 @@ func newBasicSandbox(cfg Config) *basicSandbox {
 }
 
 func (s *basicSandbox) Exec(ctx context.Context, command string, args []string) (*ExecResult, error) {
+	if err := validateExecContext(ctx); err != nil {
+		return nil, err
+	}
 	// 应用 cfg.Timeout: 调用方 ctx 无更早 deadline 时按配置强制超时。
 	ctx, cancel := withTimeout(ctx, s.cfg.Timeout)
 	defer cancel()
@@ -32,7 +36,10 @@ func (s *basicSandbox) Exec(ctx context.Context, command string, args []string) 
 	return runBoundedCommand(ctx, command, args, s.cfg, cleanBasicEnv(os.Environ()), LimitStatusUnsupported)
 }
 
-func (s *basicSandbox) ExecCode(ctx context.Context, language, code string) (*ExecResult, error) {
+func (s *basicSandbox) ExecCode(ctx context.Context, language, code string) (result *ExecResult, err error) {
+	if err := validateExecContext(ctx); err != nil {
+		return nil, err
+	}
 	var ext, interpreter string
 	switch language {
 	case "python", "python3":
@@ -53,7 +60,7 @@ func (s *basicSandbox) ExecCode(ctx context.Context, language, code string) (*Ex
 	if err != nil {
 		return nil, err
 	}
-	defer os.Remove(tmpFile)
+	defer func() { err = errors.Join(err, removeCodeFile(tmpFile)) }()
 
 	if language == "go" {
 		return s.Exec(ctx, interpreter, []string{"run", tmpFile})

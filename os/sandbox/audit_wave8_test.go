@@ -103,9 +103,9 @@ func TestNew_Validation(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:    "Timeout 负数也走默认 60",
+			name:    "Timeout 负数返回配置错误",
 			cfg:     Config{Workspace: t.TempDir(), Timeout: -100},
-			wantErr: false,
+			wantErr: true,
 		},
 	}
 	for _, tt := range tests {
@@ -918,106 +918,4 @@ func TestMatchDomainPattern_EdgeCases(t *testing.T) {
 			}
 		})
 	}
-}
-
-// ============================================================================
-// 十、NetProxy: 通配匹配 / ProxyEnvVars / 并发 isAllowed
-// ============================================================================
-
-// TestNetProxy_WildcardMatchesSubdomainNotSuffixTrap 暴露 NetProxy.isAllowed 的
-// 通配实现与 NetPolicy 不一致: 这里 "*.github.com" 的 suffix=".github.com",
-// 用 strings.HasSuffix 判断, 因此 "evil-github.com" *不会* 命中(正确),
-// 但 "github.com" 本身也 *不会* 命中(因为不含 ".github.com" 后缀)。
-//
-// 对比 NetPolicy.matchDomainPattern 额外有 host==pattern[2:] 的兜底,
-// 两套通配语义不一致 —— 同一个 "*.github.com" 在 policy 里放行根域、在 proxy 里拦截根域。
-func TestNetProxy_WildcardRootDomainInconsistency(t *testing.T) {
-	proxy := NewNetProxy(NetProxyConfig{AllowDomains: []string{"*.github.com"}})
-
-	// proxy: 根域 github.com 不命中通配(无 ".github.com" 后缀)
-	proxyRoot := proxy.isAllowed("github.com")
-	// policy: 根域 github.com 命中(host==pattern[2:])
-	pol := &NetPolicy{Mode: "whitelist-only", DomainWhitelist: []string{"*.github.com"}, counters: map[string]*rateBucket{}}
-	polRoot := pol.IsAllowed("github.com", 0) // AllowedPorts 空 -> 不过滤端口
-
-	if proxyRoot == polRoot {
-		t.Errorf("预期 proxy/policy 对根域通配语义不一致, 实际都=%v", proxyRoot)
-	}
-	t.Logf("语义不一致已确认: NetProxy.isAllowed(github.com, *.github.com)=%v, NetPolicy=%v", proxyRoot, polRoot)
-
-	// 子域两者都应命中
-	if !proxy.isAllowed("api.github.com") {
-		t.Error("api.github.com 应命中 proxy 通配")
-	}
-}
-
-// TestNetProxy_ProxyEnvVars 验证生成的代理环境变量齐全且格式正确。
-func TestNetProxy_ProxyEnvVars(t *testing.T) {
-	addr := "127.0.0.1:8899"
-	vars := ProxyEnvVars(addr)
-
-	want := map[string]string{
-		"HTTP_PROXY":  "http://127.0.0.1:8899",
-		"HTTPS_PROXY": "http://127.0.0.1:8899",
-		"http_proxy":  "http://127.0.0.1:8899",
-		"https_proxy": "http://127.0.0.1:8899",
-	}
-	seen := map[string]string{}
-	for _, kv := range vars {
-		parts := strings.SplitN(kv, "=", 2)
-		if len(parts) == 2 {
-			seen[parts[0]] = parts[1]
-		}
-	}
-	for k, v := range want {
-		if seen[k] != v {
-			t.Errorf("环境变量 %s=%q, 期望 %q", k, seen[k], v)
-		}
-	}
-	// 回归: ProxyEnvVars 不得注入 SSL_CERT_FILE。旧实现把它设为空字符串,
-	// 空值与"不设置"语义不同 —— 会让子进程把 CA 证书路径解析为空, 反而破坏
-	// TLS 证书校验。正确做法是根本不注入该变量, 让子进程使用系统 CA 信任库。
-	if _, ok := seen["SSL_CERT_FILE"]; ok {
-		t.Errorf("回归失败: ProxyEnvVars 不应注入 SSL_CERT_FILE(空值会破坏子进程 TLS 校验), 实际注入=%q", seen["SSL_CERT_FILE"])
-	}
-}
-
-// TestNetProxy_StartCancelCleanup 验证 ctx 取消后代理 listener 被关闭(无泄漏)。
-func TestNetProxy_StartCancelCleanup(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	p := NewNetProxy(NetProxyConfig{})
-	addr, err := p.Start(ctx, "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Start 失败: %v", err)
-	}
-	if addr == "" {
-		t.Fatal("Start 应返回非空地址")
-	}
-	cancel()
-	// 给 goroutine 一点时间响应 ctx.Done 并 srv.Close。
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if p.listener != nil {
-			// listener.Addr 仍可读, 但底层 socket 应已关闭; 这里只验证不 panic。
-			break
-		}
-	}
-	t.Logf("代理在 %s 启动并随 ctx 取消而关闭", addr)
-}
-
-// TestNetProxy_ConcurrentIsAllowed 并发读 allowList(配合 -race 检 data race)。
-func TestNetProxy_ConcurrentIsAllowed(t *testing.T) {
-	p := NewNetProxy(NetProxyConfig{AllowDomains: []string{"a.com", "*.b.com"}})
-	var wg sync.WaitGroup
-	for i := 0; i < 100; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_ = p.isAllowed("a.com")
-			_ = p.isAllowed("x.b.com")
-			_ = p.isAllowed("evil.com")
-			p.log("GET", "a.com", "/", 200) // 并发读 logger
-		}()
-	}
-	wg.Wait()
 }

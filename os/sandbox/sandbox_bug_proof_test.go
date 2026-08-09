@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -24,6 +25,57 @@ func TestBugProofLinuxBwrapMustNotBindHostTmpReadWrite(t *testing.T) {
 
 	if strings.Contains(body, `"--bind", "/tmp", "/tmp"`) {
 		t.Fatalf("linux bwrap backend bind-mounts host /tmp read-write; want private tmpfs/dir instead. body:\n%s", body)
+	}
+}
+
+func TestBugProofLinuxBwrapDistinguishesDeniedFilesAndDirectories(t *testing.T) {
+	body := mustFunctionBody(t, "sandbox_linux.go", "func (s *linuxSandbox) bwrapArgs")
+	for _, required := range []string{"os.Stat", `"--ro-bind", "/dev/null"`, `"--tmpfs"`} {
+		if !strings.Contains(body, required) {
+			t.Fatalf("linux bwrap deny policy is missing %q; body:\n%s", required, body)
+		}
+	}
+}
+
+func TestNewCreatesWorkspaceAndRejectsDangerousConfiguration(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "nested", "workspace")
+	sandboxInstance, err := New(Config{Workspace: workspace})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if sandboxInstance == nil {
+		t.Fatal("New() returned a nil sandbox")
+	}
+	info, err := os.Stat(workspace)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("workspace was not created as a directory: info=%v err=%v", info, err)
+	}
+
+	tests := []Config{
+		{Workspace: string(filepath.Separator)},
+		{Workspace: t.TempDir(), Timeout: -1},
+		{Workspace: t.TempDir(), DeniedPaths: []string{`/tmp/x") (allow network*) (`}},
+		{Workspace: t.TempDir(), ReadablePaths: []string{"relative/path"}},
+	}
+	for _, config := range tests {
+		if _, err := New(config); err == nil {
+			t.Fatalf("New(%+v) returned nil error", config)
+		}
+	}
+}
+
+func TestSandboxExecRejectsNilContextWithoutPanic(t *testing.T) {
+	sandboxInstance, err := New(Config{Workspace: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("Exec(nil, ...) panicked: %v", recovered)
+		}
+	}()
+	if _, err := sandboxInstance.Exec(nil, "true", nil); !errors.Is(err, ErrInvalidContext) { //nolint:staticcheck // 必须覆盖公开 API 的 nil context 防御边界。
+		t.Fatalf("Exec(nil, ...) error = %v, want ErrInvalidContext", err)
 	}
 }
 
@@ -59,6 +111,24 @@ func TestBugProofWindowsExecMustReturnRealExitCode(t *testing.T) {
 
 	if !strings.Contains(body, ".ExitCode()") {
 		t.Fatalf("windows Exec does not use os.ProcessState.ExitCode(), so non-zero child exits are collapsed to 0/1. body:\n%s", body)
+	}
+}
+
+func TestBugProofWindowsExecMustPropagateLifecycleErrors(t *testing.T) {
+	body := mustFunctionBody(t, "sandbox_windows.go", "func (s *windowsSandbox) Exec")
+
+	if strings.Contains(body, "_ = proc.Kill()") {
+		t.Fatalf("windows Exec discards the process termination result; body:\n%s", body)
+	}
+	for _, line := range strings.Split(body, "\n") {
+		if strings.TrimSpace(line) == "<-done" {
+			t.Fatalf("windows Exec discards the process wait result; body:\n%s", body)
+		}
+	}
+	for _, required := range []string{"killErr := proc.Kill()", "wait.err", "sandbox exec wait failed"} {
+		if !strings.Contains(body, required) {
+			t.Fatalf("windows Exec does not propagate %q; body:\n%s", required, body)
+		}
 	}
 }
 

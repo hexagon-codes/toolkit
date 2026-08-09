@@ -3,6 +3,7 @@
 package sandbox
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,20 +21,19 @@ import (
 // sandboxed process exits.
 
 const (
-	SE_FILE_OBJECT        = 1
-	DACL_SECURITY_INFO    = 0x00000004
-	GRANT_ACCESS          = 1
-	SET_ACCESS            = 2
-	DENY_ACCESS           = 3
-	NO_INHERITANCE        = 0
-	OBJECT_INHERIT_ACE    = 0x1
-	CONTAINER_INHERIT_ACE = 0x2
+	seFileObject        = 1
+	daclSecurityInfo    = 0x00000004
+	grantAccess         = 1
+	denyAccess          = 3
+	noInheritance       = 0
+	objectInheritACE    = 0x1
+	containerInheritACE = 0x2
 
-	GENERIC_READ    = 0x80000000
-	GENERIC_WRITE   = 0x40000000
-	GENERIC_EXECUTE = 0x20000000
+	genericRead    = 0x80000000
+	genericWrite   = 0x40000000
+	genericExecute = 0x20000000
 
-	TRUSTEE_IS_SID = 0
+	trusteeIsSID = 0
 )
 
 type explicitAccessW struct {
@@ -46,14 +46,14 @@ type explicitAccessW struct {
 type trusteeW struct {
 	pMultipleTrustee         uintptr
 	multipleTrusteeOperation uint32
-	trusteeForm              uint32 // TRUSTEE_IS_SID = 0
+	trusteeForm              uint32 // trusteeIsSID = 0
 	trusteeType              uint32 // TRUSTEE_IS_WELL_KNOWN_GROUP = 5
 	ptstrName                uintptr
 }
 
 var (
 	modAdvapi32ACL             = syscall.NewLazyDLL("advapi32.dll")
-	procSetEntriesInAclW       = modAdvapi32ACL.NewProc("SetEntriesInAclW")
+	procSetEntriesInACLW       = modAdvapi32ACL.NewProc("SetEntriesInAclW")
 	procSetNamedSecurityInfoW2 = modAdvapi32ACL.NewProc("SetNamedSecurityInfoW")
 	procGetNamedSecurityInfoW  = modAdvapi32ACL.NewProc("GetNamedSecurityInfoW")
 )
@@ -85,10 +85,9 @@ func applyWindowsACLPolicy(cfg Config, appContainerSID []byte) (*windowsACLPolic
 	}
 	policy := &windowsACLPolicy{}
 	for _, rule := range rules {
-		entry, err := applyPathACL(rule.path, appContainerSID, rule.permissions, rule.mode)
-		if err != nil {
-			_ = policy.restoreACL()
-			return nil, err
+		entry, applyErr := applyPathACL(rule.path, appContainerSID, rule.permissions, rule.mode)
+		if applyErr != nil {
+			return nil, errors.Join(applyErr, policy.restoreACL())
 		}
 		policy.entries = append(policy.entries, entry)
 	}
@@ -107,8 +106,8 @@ func windowsACLRulesForConfig(cfg Config) ([]windowsACLRule, error) {
 	}
 	rules = append(rules, windowsACLRule{
 		path:        workspace,
-		permissions: GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE,
-		mode:        GRANT_ACCESS,
+		permissions: genericRead | genericWrite | genericExecute,
+		mode:        grantAccess,
 	})
 
 	for _, p := range cfg.ReadablePaths {
@@ -121,8 +120,8 @@ func windowsACLRulesForConfig(cfg Config) ([]windowsACLRule, error) {
 		}
 		rules = append(rules, windowsACLRule{
 			path:        clean,
-			permissions: GENERIC_READ | GENERIC_EXECUTE,
-			mode:        GRANT_ACCESS,
+			permissions: genericRead | genericExecute,
+			mode:        grantAccess,
 		})
 	}
 
@@ -136,15 +135,15 @@ func windowsACLRulesForConfig(cfg Config) ([]windowsACLRule, error) {
 		}
 		rules = append(rules, windowsACLRule{
 			path:        clean,
-			permissions: GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE,
-			mode:        DENY_ACCESS,
+			permissions: genericRead | genericWrite | genericExecute,
+			mode:        denyAccess,
 		})
 	}
 
 	return rules, nil
 }
 
-func applyPathACL(path string, sid []byte, permissions uint32, mode uint32) (*aclConfig, error) {
+func applyPathACL(path string, sid []byte, permissions, mode uint32) (*aclConfig, error) {
 	if len(sid) == 0 {
 		return nil, fmt.Errorf("SID is required")
 	}
@@ -155,16 +154,19 @@ func applyPathACL(path string, sid []byte, permissions uint32, mode uint32) (*ac
 		return nil, fmt.Errorf("UTF16 path: %w", err)
 	}
 	r, _, callErr := procGetNamedSecurityInfoW.Call(
-		uintptr(unsafe.Pointer(pathW)),
-		SE_FILE_OBJECT,
-		DACL_SECURITY_INFO,
+		uintptr(unsafe.Pointer(pathW)), // #nosec G103 -- 指针来自已校验且在调用期间存活的 UTF-16 路径。
+		seFileObject,
+		daclSecurityInfo,
 		0, 0,
-		uintptr(unsafe.Pointer(&cfg.origDACL)),
+		uintptr(unsafe.Pointer(&cfg.origDACL)), // #nosec G103 -- Win32 API 同步写入原始 DACL 指针。
 		0,
-		uintptr(unsafe.Pointer(&cfg.origSD)),
+		uintptr(unsafe.Pointer(&cfg.origSD)), // #nosec G103 -- Win32 API 同步写入安全描述符指针。
 	)
 	if r != 0 {
-		return nil, fmt.Errorf("GetNamedSecurityInfo(%s): error %d: %w", path, r, callErr)
+		return nil, errors.Join(
+			fmt.Errorf("GetNamedSecurityInfo(%s): error %d: %w", path, r, callErr),
+			cfg.freeOriginal(),
+		)
 	}
 
 	inheritance := aclInheritanceForPath(path)
@@ -173,40 +175,50 @@ func applyPathACL(path string, sid []byte, permissions uint32, mode uint32) (*ac
 		grfAccessMode:        mode,
 		grfInheritance:       inheritance,
 		trustee: trusteeW{
-			trusteeForm: TRUSTEE_IS_SID,
-			ptstrName:   uintptr(unsafe.Pointer(&sid[0])),
+			trusteeForm: trusteeIsSID,
+			ptstrName:   uintptr(unsafe.Pointer(&sid[0])), // #nosec G103 -- SID 已校验非空并通过 KeepAlive 保持存活。
 		},
 	}
 
 	var newACL uintptr
-	r, _, callErr = procSetEntriesInAclW.Call(
-		1, // count
-		uintptr(unsafe.Pointer(&ea)),
+	r, _, callErr = procSetEntriesInACLW.Call(
+		1,                            // 条目数量
+		uintptr(unsafe.Pointer(&ea)), // #nosec G103 -- 结构体布局与 EXPLICIT_ACCESS_W ABI 一致。
 		cfg.origDACL,
-		uintptr(unsafe.Pointer(&newACL)),
+		uintptr(unsafe.Pointer(&newACL)), // #nosec G103 -- Win32 API 同步写入新 ACL 指针。
 	)
 	if r != 0 {
-		cfg.freeOriginal()
-		return nil, fmt.Errorf("SetEntriesInAcl(%s): error %d: %w", path, r, callErr)
-	}
-	if newACL != 0 {
-		defer func() {
-			_, _ = syscall.LocalFree(syscall.Handle(newACL))
-		}()
+		return nil, errors.Join(
+			fmt.Errorf("SetEntriesInAcl(%s): error %d: %w", path, r, callErr),
+			cfg.freeOriginal(),
+		)
 	}
 
 	r, _, callErr = procSetNamedSecurityInfoW2.Call(
-		uintptr(unsafe.Pointer(pathW)),
-		SE_FILE_OBJECT,
-		DACL_SECURITY_INFO,
+		uintptr(unsafe.Pointer(pathW)), // #nosec G103 -- 指针来自已校验且在调用期间存活的 UTF-16 路径。
+		seFileObject,
+		daclSecurityInfo,
 		0, 0,
 		newACL,
 		0,
 	)
 	runtimeKeepAliveSID(sid)
+	var freeACLErr error
+	if newACL != 0 {
+		_, freeACLErr = syscall.LocalFree(syscall.Handle(newACL))
+		if freeACLErr != nil {
+			freeACLErr = fmt.Errorf("release applied ACL buffer: %w", freeACLErr)
+		}
+	}
 	if r != 0 {
-		cfg.freeOriginal()
-		return nil, fmt.Errorf("SetNamedSecurityInfo(%s): error %d: %w", path, r, callErr)
+		return nil, errors.Join(
+			fmt.Errorf("SetNamedSecurityInfo(%s): error %d: %w", path, r, callErr),
+			freeACLErr,
+			cfg.freeOriginal(),
+		)
+	}
+	if freeACLErr != nil {
+		return nil, errors.Join(freeACLErr, cfg.restoreACL())
 	}
 
 	return cfg, nil
@@ -215,14 +227,14 @@ func applyPathACL(path string, sid []byte, permissions uint32, mode uint32) (*ac
 func aclInheritanceForPath(path string) uint32 {
 	st, err := os.Stat(path)
 	if err == nil && st.IsDir() {
-		return OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
+		return objectInheritACE | containerInheritACE
 	}
-	return NO_INHERITANCE
+	return noInheritance
 }
 
 // restoreACL restores the original DACL.
 func (c *aclConfig) restoreACL() error {
-	if c == nil {
+	if c == nil || c.origSD == 0 {
 		return nil
 	}
 	pathW, err := syscall.UTF16PtrFromString(c.path)
@@ -230,9 +242,9 @@ func (c *aclConfig) restoreACL() error {
 		return fmt.Errorf("UTF16 restore path: %w", err)
 	}
 	r, _, err := procSetNamedSecurityInfoW2.Call(
-		uintptr(unsafe.Pointer(pathW)),
-		SE_FILE_OBJECT,
-		DACL_SECURITY_INFO,
+		uintptr(unsafe.Pointer(pathW)), // #nosec G103 -- 指针来自已校验且在调用期间存活的 UTF-16 路径。
+		seFileObject,
+		daclSecurityInfo,
 		0, 0,
 		c.origDACL,
 		0,
@@ -240,34 +252,38 @@ func (c *aclConfig) restoreACL() error {
 	if r != 0 {
 		return fmt.Errorf("restore ACL: error %d: %w", r, err)
 	}
-	c.freeOriginal()
-	return nil
+	return c.freeOriginal()
 }
 
-func (c *aclConfig) freeOriginal() {
-	if c.origSD != 0 {
-		_, _ = syscall.LocalFree(syscall.Handle(c.origSD))
-		c.origSD = 0
-		c.origDACL = 0
+func (c *aclConfig) freeOriginal() error {
+	if c == nil || c.origSD == 0 {
+		return nil
 	}
+	_, err := syscall.LocalFree(syscall.Handle(c.origSD))
+	if err != nil {
+		return fmt.Errorf("release original security descriptor: %w", err)
+	}
+	c.origSD = 0
+	c.origDACL = 0
+	return nil
 }
 
 func (p *windowsACLPolicy) restoreACL() error {
 	if p == nil {
 		return nil
 	}
-	var firstErr error
+	var resultErr error
 	for i := len(p.entries) - 1; i >= 0; i-- {
-		if err := p.entries[i].restoreACL(); err != nil && firstErr == nil {
-			firstErr = err
-		}
+		resultErr = errors.Join(resultErr, p.entries[i].restoreACL())
 	}
-	p.entries = nil
-	return firstErr
+	if resultErr == nil {
+		p.entries = nil
+	}
+	return resultErr
 }
 
-func cleanWindowsACLPath(path string, requireExists bool) (string, bool, error) {
-	path = strings.TrimSpace(expandWindowsPath(path))
+func cleanWindowsACLPath(path string, requireExists bool) (cleanPath string, exists bool, err error) {
+	path = strings.TrimSpace(expandPath(path))
 	if path == "" {
 		if requireExists {
 			return "", false, fmt.Errorf("empty path")
@@ -283,8 +299,8 @@ func cleanWindowsACLPath(path string, requireExists bool) (string, bool, error) 
 		}
 		return "", false, nil
 	}
-	if real, err := filepath.EvalSymlinks(path); err == nil {
-		path = real
+	if resolvedPath, resolveErr := filepath.EvalSymlinks(path); resolveErr == nil {
+		path = resolvedPath
 	}
 	path = filepath.Clean(path)
 	if _, err := os.Stat(path); err != nil {
@@ -294,18 +310,6 @@ func cleanWindowsACLPath(path string, requireExists bool) (string, bool, error) 
 		return "", false, err
 	}
 	return path, true, nil
-}
-
-func expandWindowsPath(path string) string {
-	if path == "~" {
-		home, _ := os.UserHomeDir()
-		return home
-	}
-	if strings.HasPrefix(path, "~/") || strings.HasPrefix(path, `~\`) {
-		home, _ := os.UserHomeDir()
-		return filepath.Join(home, path[2:])
-	}
-	return path
 }
 
 func runtimeKeepAliveSID(sid []byte) {

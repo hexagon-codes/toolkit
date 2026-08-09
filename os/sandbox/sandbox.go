@@ -1,19 +1,24 @@
-// Package sandbox 提供跨平台进程沙箱
-//
-// 三平台隔离策略:
-//   - macOS: Seatbelt (sandbox-exec + SBPL 策略)
-//   - Linux: Namespace + seccomp + pivot_root (Phase 7 D18-D19)
-//   - Windows: Restricted Token + ACL + Job Object (Phase 8 D29-D35)
-//
-// 默认 ON，零外部依赖，对齐 Codex 沙箱能力。
+// Package sandbox 提供面向本地代码执行的进程、文件和网络隔离能力。
 package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"time"
+)
+
+const maxCrossPlatformProcessLimit = 1<<31 - 1
+
+var (
+	// ErrUnsupportedNetworkPolicy 表示当前运行环境无法落实所请求的网络策略。
+	ErrUnsupportedNetworkPolicy = errors.New("sandbox: requested network policy is not enforceable")
+	// ErrInvalidContext 表示执行调用没有提供有效上下文。
+	ErrInvalidContext = errors.New("sandbox: context must not be nil")
 )
 
 // Config 沙箱配置
@@ -28,16 +33,11 @@ type Config struct {
 	ReadablePaths []string `yaml:"readable_paths"`
 	Network       bool     `yaml:"network"` // 是否允许网络，默认 false
 	// DenyLoopback 在 Network=true 时额外禁止访问本机回环地址（127.0.0.1 / ::1 /
-	// localhost）。用途：无人值守面的 code_exec 需要外网（抓网页/调 API）但绝不该
-	// 打本机管理端口——沙箱内代码经 loopback 触达本机 API server / Ollama / 其它
-	// sidecar 会构成 SSRF 与权限自提升面。默认 false 保持向后兼容；安全敏感的
-	// agent 代码执行应显式置 true。
+	// localhost）。无法真实执行该策略的平台必须返回 ErrUnsupportedNetworkPolicy。
 	DenyLoopback bool `yaml:"deny_loopback"`
 
-	// Baseline resource limits. These are intentionally conservative defaults
-	// for agent-facing code execution rather than full enterprise resource
-	// governance. Unsupported platform limits must be surfaced by callers as
-	// capability gaps instead of silently pretending they are enforced.
+	// 面向 Agent 代码执行的保守资源上限。平台无法落实的限制必须通过能力报告显式暴露，
+	// 不得静默伪装为已经生效。
 	MaxOutputBytes    int64 `yaml:"max_output_bytes"`
 	MaxStderrBytes    int64 `yaml:"max_stderr_bytes"`
 	MaxWorkspaceBytes int64 `yaml:"max_workspace_bytes"`
@@ -53,9 +53,9 @@ type Config struct {
 type LimitStatus string
 
 const (
-	// LimitStatusEnforced means the resource limit is actively enforced.
+	// LimitStatusEnforced 表示资源限制已被当前后端真实执行。
 	LimitStatusEnforced LimitStatus = "enforced"
-	// LimitStatusUnsupported means the current platform/backend cannot enforce it.
+	// LimitStatusUnsupported 表示当前平台或后端无法执行该资源限制。
 	LimitStatusUnsupported LimitStatus = "unsupported"
 	// LimitStatusWeak 表示该项在当前后端「有部分约束但非强隔离」——
 	// 后端存在且执行了限制动作, 但不满足 deny-by-default 语义。
@@ -107,8 +107,27 @@ func New(cfg Config) (Sandbox, error) {
 	if cfg.Workspace == "" {
 		return nil, fmt.Errorf("sandbox workspace is required")
 	}
-	if resolved, err := filepath.EvalSymlinks(cfg.Workspace); err == nil {
-		cfg.Workspace = resolved
+	if cfg.Timeout < 0 {
+		return nil, fmt.Errorf("sandbox timeout must not be negative")
+	}
+	if cfg.MaxOutputBytes < 0 || cfg.MaxStderrBytes < 0 || cfg.MaxWorkspaceBytes < 0 ||
+		cfg.MaxArtifactBytes < 0 || cfg.MaxMemoryBytes < 0 || cfg.MaxProcesses < 0 {
+		return nil, fmt.Errorf("sandbox resource limits must not be negative")
+	}
+	if cfg.MaxProcesses > maxCrossPlatformProcessLimit {
+		return nil, fmt.Errorf("sandbox max processes exceeds the cross-platform limit")
+	}
+
+	workspace, err := normalizeSandboxWorkspace(cfg.Workspace)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Workspace = workspace
+	if cfg.ReadablePaths, err = normalizeSandboxPaths("readable path", cfg.ReadablePaths); err != nil {
+		return nil, err
+	}
+	if cfg.DeniedPaths, err = normalizeSandboxPaths("denied path", cfg.DeniedPaths); err != nil {
+		return nil, err
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 60
@@ -131,8 +150,133 @@ func New(cfg Config) (Sandbox, error) {
 	if cfg.MaxProcesses <= 0 {
 		cfg.MaxProcesses = 64
 	}
-
 	return newPlatformSandbox(cfg)
+}
+
+func normalizeSandboxWorkspace(rawPath string) (string, error) {
+	path, err := absoluteSandboxPath("workspace", rawPath)
+	if err != nil {
+		return "", err
+	}
+	if isFilesystemRoot(path) {
+		return "", fmt.Errorf("sandbox workspace must not be a filesystem root")
+	}
+	if mkdirErr := os.MkdirAll(path, 0o700); mkdirErr != nil {
+		return "", fmt.Errorf("create sandbox workspace: %w", mkdirErr)
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve sandbox workspace: %w", err)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("inspect sandbox workspace: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("sandbox workspace must be a directory")
+	}
+	return filepath.Clean(resolved), nil
+}
+
+func normalizeSandboxPaths(field string, paths []string) ([]string, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	normalized := make([]string, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	for index, rawPath := range paths {
+		if rawPath == "" {
+			return nil, fmt.Errorf("sandbox %s at index %d is empty", field, index)
+		}
+		expanded := expandPath(rawPath)
+		if !filepath.IsAbs(expanded) {
+			return nil, fmt.Errorf("sandbox %s %q must be absolute", field, rawPath)
+		}
+		path, err := absoluteSandboxPath(field, expanded)
+		if err != nil {
+			return nil, err
+		}
+		if isFilesystemRoot(path) {
+			return nil, fmt.Errorf("sandbox %s must not be a filesystem root", field)
+		}
+		path, err = resolveExistingPathPrefix(path)
+		if err != nil {
+			return nil, fmt.Errorf("resolve sandbox %s %q: %w", field, rawPath, err)
+		}
+		key := path
+		if runtime.GOOS == "windows" {
+			key = strings.ToLower(key)
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		normalized = append(normalized, path)
+	}
+	return normalized, nil
+}
+
+func absoluteSandboxPath(field, rawPath string) (string, error) {
+	expanded := expandPath(rawPath)
+	if strings.ContainsAny(expanded, "\x00\r\n\"") || (runtime.GOOS == "darwin" && strings.Contains(expanded, `\`)) {
+		return "", fmt.Errorf("sandbox %s contains unsupported characters", field)
+	}
+	path, err := filepath.Abs(expanded)
+	if err != nil {
+		return "", fmt.Errorf("resolve sandbox %s: %w", field, err)
+	}
+	return filepath.Clean(path), nil
+}
+
+func resolveExistingPathPrefix(path string) (string, error) {
+	current := filepath.Clean(path)
+	missing := make([]string, 0)
+	for {
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			for index := len(missing) - 1; index >= 0; index-- {
+				resolved = filepath.Join(resolved, missing[index])
+			}
+			return filepath.Clean(resolved), nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return filepath.Clean(path), nil
+		}
+		missing = append(missing, filepath.Base(current))
+		current = parent
+	}
+}
+
+func isFilesystemRoot(path string) bool {
+	volume := filepath.VolumeName(path)
+	root := volume + string(filepath.Separator)
+	return filepath.Clean(path) == filepath.Clean(root)
+}
+
+// expandPath 展开当前用户家目录的波浪号前缀。
+func expandPath(path string) string {
+	if path != "~" && !strings.HasPrefix(path, "~/") && !strings.HasPrefix(path, `~\`) {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	if path == "~" {
+		return home
+	}
+	return filepath.Join(home, path[2:])
+}
+
+func validateExecContext(ctx context.Context) error {
+	if ctx == nil {
+		return ErrInvalidContext
+	}
+	return nil
 }
 
 type boundedBuffer struct {
@@ -188,15 +332,20 @@ func newUniqueCodeFile(dir, ext, code string) (string, error) {
 	}
 	name := f.Name()
 	if _, err := f.WriteString(code); err != nil {
-		_ = f.Close()
-		_ = os.Remove(name)
-		return "", fmt.Errorf("write temp code: %w", err)
+		return "", fmt.Errorf("write temp code: %w", errors.Join(err, f.Close(), os.Remove(name)))
 	}
 	if err := f.Close(); err != nil {
-		_ = os.Remove(name)
-		return "", fmt.Errorf("close temp code file: %w", err)
+		return "", fmt.Errorf("close temp code file: %w", errors.Join(err, os.Remove(name)))
 	}
 	return name, nil
+}
+
+func removeCodeFile(path string) error {
+	err := os.Remove(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
 }
 
 // withTimeout 依据 cfg.Timeout(秒)为执行派生一个截止时间。

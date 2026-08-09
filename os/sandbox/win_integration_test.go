@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,7 +66,9 @@ func TestWindows_WorkspaceIsolation(t *testing.T) {
 
 	// Create a file in workspace
 	testFile := filepath.Join(ws, "test.txt")
-	os.WriteFile(testFile, []byte("sandbox data"), 0644)
+	if err := os.WriteFile(testFile, []byte("sandbox data"), 0o600); err != nil {
+		t.Fatalf("write workspace fixture: %v", err)
+	}
 
 	sb, err := New(Config{Workspace: ws, Timeout: 10})
 	if err != nil {
@@ -92,9 +95,12 @@ func TestWindows_Timeout(t *testing.T) {
 
 	ctx := context.Background()
 	start := time.Now()
-	_, err = sb.Exec(ctx, "cmd", []string{"/c", "ping", "-n", "10", "127.0.0.1"})
+	_, execErr := sb.Exec(ctx, "cmd", []string{"/c", "ping", "-n", "10", "127.0.0.1"})
 	elapsed := time.Since(start)
 
+	if !errors.Is(execErr, context.DeadlineExceeded) {
+		t.Fatalf("timeout error = %v, want context deadline exceeded", execErr)
+	}
 	// Should timeout within ~3 seconds (2s timeout + buffer)
 	if elapsed > 5*time.Second {
 		t.Fatalf("timeout not enforced: took %v", elapsed)
@@ -183,48 +189,5 @@ func TestWindows_EscapeVectors(t *testing.T) {
 		if !tt.ok && err == nil {
 			t.Errorf("expected block for %q %v", tt.cmd, tt.args)
 		}
-	}
-}
-
-func TestWindows_NetProxy_Integration(t *testing.T) {
-	// Test that proxy starts and blocks correctly
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	proxy := NewNetProxy(NetProxyConfig{
-		AllowDomains: []string{"httpbin.org"},
-	})
-
-	addr, err := proxy.Start(ctx, "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("start proxy: %v", err)
-	}
-	t.Logf("proxy listening at %s", addr)
-
-	// Verify proxy env vars
-	envVars := ProxyEnvVars(addr)
-	if len(envVars) < 4 {
-		t.Fatalf("expected 4+ env vars, got %d", len(envVars))
-	}
-	for _, e := range envVars {
-		if !strings.Contains(e, addr) && !strings.HasPrefix(e, "SSL_CERT_FILE=") {
-			t.Errorf("env var doesn't contain proxy addr: %s", e)
-		}
-	}
-}
-
-func TestWindows_DefaultPolicy(t *testing.T) {
-	policy := DefaultWindowsPolicy()
-	if policy.Mode != ModeWorkspaceWrite {
-		t.Errorf("expected workspace-write mode, got %s", policy.Mode)
-	}
-	if policy.Network != NetworkOffline {
-		t.Errorf("expected offline network, got %s", policy.Network)
-	}
-	if policy.MemoryMB != 512 {
-		t.Errorf("expected 512MB memory, got %d", policy.MemoryMB)
-	}
-	if !policy.UseDesktop {
-		t.Error("expected UseDesktop=true")
 	}
 }

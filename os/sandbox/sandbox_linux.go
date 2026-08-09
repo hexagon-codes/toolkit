@@ -27,6 +27,9 @@ type linuxSandbox struct {
 }
 
 func newPlatformSandbox(cfg Config) (Sandbox, error) {
+	if cfg.Network && cfg.DenyLoopback {
+		return nil, fmt.Errorf("%w: Linux backend cannot allow external network while isolating host loopback", ErrUnsupportedNetworkPolicy)
+	}
 	return &linuxSandbox{cfg: cfg}, nil
 }
 
@@ -44,6 +47,9 @@ func newPlatformSandbox(cfg Config) (Sandbox, error) {
 // ExecResult.Limits.Filesystem 上标 weak 把降级信号交给上层决策。两者都不存在或
 // 启动失败时直接返回 sandbox unavailable，不做裸 exec fallback。
 func (s *linuxSandbox) Exec(ctx context.Context, command string, args []string) (*ExecResult, error) {
+	if err := validateExecContext(ctx); err != nil {
+		return nil, err
+	}
 	// 应用 cfg.Timeout: 调用方 ctx 无更早 deadline 时按配置强制超时。
 	ctx, cancel := withTimeout(ctx, s.cfg.Timeout)
 	defer cancel()
@@ -86,7 +92,8 @@ func (s *linuxSandbox) linuxSandboxRunner(command string, args []string) (runner
 
 	switch backend {
 	case linuxBackendBwrap:
-		return bwrap, s.bwrapArgs(command, args), env, containment, nil
+		bwrapArgs, buildErr := s.bwrapArgs(command, args)
+		return bwrap, bwrapArgs, env, containment, buildErr
 	case linuxBackendUnshare:
 		return unshare, s.unshareArgs(command, args), env, containment, nil
 	default:
@@ -134,7 +141,12 @@ func runLinuxBwrapProbe(bwrap string, network bool) bool {
 	defer cancel()
 
 	s := &linuxSandbox{cfg: Config{Workspace: ws, Network: network}}
-	cmd := exec.CommandContext(ctx, bwrap, s.bwrapArgs("/bin/sh", []string{"-c", "exit 0"})...)
+	args, err := s.bwrapArgs("/bin/sh", []string{"-c", "exit 0"})
+	if err != nil {
+		return false
+	}
+	// bwrap 已由 LookPath 解析，探测参数由本包固定生成且不经过命令行解释器。
+	cmd := exec.CommandContext(ctx, bwrap, args...) // #nosec G204 -- 动态程序路径来自受控的后端能力探测。
 	cmd.Env = cleanLinuxEnv(os.Environ())
 	return cmd.Run() == nil
 }
@@ -147,7 +159,8 @@ func linuxUnshareBackendUsable(unshare string) bool {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
-		cmd := exec.CommandContext(ctx, unshare,
+		// unshare 已由 LookPath 解析，所有探测参数均为固定常量。
+		cmd := exec.CommandContext(ctx, unshare, // #nosec G204 -- 动态程序路径来自受控的后端能力探测。
 			"--user",
 			"--map-root-user",
 			"--mount",
@@ -165,7 +178,7 @@ func linuxUnshareBackendUsable(unshare string) bool {
 	return linuxUnshareProbeOK
 }
 
-func (s *linuxSandbox) bwrapArgs(command string, args []string) []string {
+func (s *linuxSandbox) bwrapArgs(command string, args []string) ([]string, error) {
 	out := []string{
 		"--die-with-parent",
 		"--new-session",
@@ -181,11 +194,6 @@ func (s *linuxSandbox) bwrapArgs(command string, args []string) []string {
 	if !s.cfg.Network {
 		out = append(out, "--unshare-net")
 	}
-	// 能力缺口（诚实标注）：DenyLoopback 在 linux 尚未实现。Network=true 时进程
-	// 共享宿主 net namespace，回环仍可达——细粒度「允许外网、禁回环」需 unshare-net +
-	// slirp/pasta 或 nftables 出站过滤，本平台暂缺。调用方（如 hexclaw code_exec）在
-	// linux 上不能依赖沙箱屏蔽本机管理端口；darwin 经 seatbelt 已强制。
-	_ = s.cfg.DenyLoopback
 	for _, p := range linuxSystemReadPaths() {
 		if dirExists(p) {
 			out = append(out, "--ro-bind", p, p)
@@ -193,18 +201,36 @@ func (s *linuxSandbox) bwrapArgs(command string, args []string) []string {
 	}
 	out = append(out, "--bind", s.cfg.Workspace, s.cfg.Workspace)
 	for _, p := range s.cfg.ReadablePaths {
-		if p = cleanLinuxMountPath(p); p != "" && dirExists(p) {
+		p = cleanLinuxMountPath(p)
+		if p == "" {
+			continue
+		}
+		if _, err := os.Stat(p); err == nil {
 			out = append(out, "--ro-bind", p, p)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("inspect sandbox readable path %q: %w", p, err)
 		}
 	}
 	for _, p := range s.cfg.DeniedPaths {
-		if p = cleanLinuxMountPath(p); p != "" && p != "/" {
+		p = cleanLinuxMountPath(p)
+		if p == "" || p == "/" {
+			continue
+		}
+		info, err := os.Stat(p)
+		switch {
+		case err == nil && info.IsDir():
 			out = append(out, "--tmpfs", p)
+		case err == nil:
+			out = append(out, "--ro-bind", "/dev/null", p)
+		case errors.Is(err, os.ErrNotExist):
+			continue
+		default:
+			return nil, fmt.Errorf("inspect sandbox denied path %q: %w", p, err)
 		}
 	}
 	out = append(out, "--chdir", s.cfg.Workspace, "--", command)
 	out = append(out, args...)
-	return out
+	return out, nil
 }
 
 func (s *linuxSandbox) unshareArgs(command string, args []string) []string {
@@ -282,7 +308,10 @@ exit 127
 `
 
 // ExecCode 在沙箱内执行代码
-func (s *linuxSandbox) ExecCode(ctx context.Context, language, code string) (*ExecResult, error) {
+func (s *linuxSandbox) ExecCode(ctx context.Context, language, code string) (result *ExecResult, err error) {
+	if err := validateExecContext(ctx); err != nil {
+		return nil, err
+	}
 	var ext, interpreter string
 	switch language {
 	case "python", "python3":
@@ -303,7 +332,7 @@ func (s *linuxSandbox) ExecCode(ctx context.Context, language, code string) (*Ex
 	if err != nil {
 		return nil, err
 	}
-	defer os.Remove(tmpFile)
+	defer func() { err = errors.Join(err, removeCodeFile(tmpFile)) }()
 
 	if language == "go" {
 		return s.Exec(ctx, interpreter, []string{"run", tmpFile})

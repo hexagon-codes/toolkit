@@ -4,37 +4,35 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
-// windowsSandbox implements Sandbox using Win32 five-layer isolation:
-//  1. Restricted Token — strip privileges, Untrusted IL
-//  2. AppContainer ACL — workspace RW, ReadablePaths RO, DeniedPaths deny
-//  3. Job Object — memory/process limits + UI restrictions
-//  4. Low Box Token — kernel-level network isolation
-//  5. Alternate Desktop — GUI isolation
+// windowsSandbox 通过 Win32 四层机制实现沙箱隔离：
+//  1. 受限令牌：移除权限并使用不可信完整性级别
+//  2. AppContainer ACL：工作区可读写、授权路径只读、拒绝路径不可访问
+//  3. Job Object：限制内存、进程数和界面能力
+//  4. Low Box Token：由内核执行网络隔离
 type windowsSandbox struct {
-	cfg    Config
-	policy WindowsSandboxPolicy
+	cfg Config
 }
 
 func newPlatformSandbox(cfg Config) (Sandbox, error) {
-	if err := os.MkdirAll(cfg.Workspace, 0755); err != nil {
+	if err := os.MkdirAll(cfg.Workspace, 0o700); err != nil {
 		return nil, fmt.Errorf("create workspace: %w", err)
 	}
 
-	return &windowsSandbox{
-		cfg:    cfg,
-		policy: DefaultWindowsPolicy(),
-	}, nil
+	return &windowsSandbox{cfg: cfg}, nil
 }
 
 func (s *windowsSandbox) Exec(ctx context.Context, command string, args []string) (*ExecResult, error) {
+	if err := validateExecContext(ctx); err != nil {
+		return nil, err
+	}
 	if err := enforceSandboxStorageLimits(s.cfg); err != nil {
 		return nil, err
 	}
@@ -47,8 +45,7 @@ func (s *windowsSandbox) Exec(ctx context.Context, command string, args []string
 		return nil, err
 	}
 
-	timeout := time.Duration(s.cfg.Timeout) * time.Second
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	ctx, cancel := withTimeout(ctx, s.cfg.Timeout)
 	defer cancel()
 
 	// Try full sandbox launch
@@ -86,16 +83,26 @@ func (s *windowsSandbox) Exec(ctx context.Context, command string, args []string
 			StderrTruncated: proc.stderr.Truncated(),
 			Limits:          windowsLimitReport(),
 		}
-		if err := enforceSandboxStorageLimits(s.cfg); err != nil {
-			return res, err
+		limitErr := enforceSandboxStorageLimits(s.cfg)
+		if wait.err != nil {
+			return res, errors.Join(fmt.Errorf("sandbox exec wait failed: %w", wait.err), limitErr)
+		}
+		if wait.state == nil {
+			return res, errors.Join(fmt.Errorf("sandbox exec wait failed: process state is unavailable"), limitErr)
+		}
+		if limitErr != nil {
+			return res, limitErr
 		}
 		return res, nil
 	case <-ctx.Done():
-		_ = proc.Kill()
-		<-done
+		killErr := proc.Kill()
+		wait := <-done
 		stderr := proc.stderr.String()
 		if stderr == "" {
-			stderr = "process timed out"
+			stderr = "process canceled"
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				stderr = "process timed out"
+			}
 		}
 		stderrBytes := proc.stderr.BytesSeen()
 		if stderrBytes == 0 {
@@ -111,11 +118,17 @@ func (s *windowsSandbox) Exec(ctx context.Context, command string, args []string
 			StderrTruncated: proc.stderr.Truncated(),
 			Limits:          windowsLimitReport(),
 		}
-		if limitErr := enforceSandboxStorageLimits(s.cfg); limitErr != nil {
-			// 存储限额错误也用 %w 包装, 保证 ErrStorageLimitExceeded 哨兵可被 errors.Is 命中
-			return res, fmt.Errorf("sandbox exec terminated by timeout/cancel: %w; storage limit check failed: %w", ctx.Err(), limitErr)
+		resultErr := fmt.Errorf("sandbox exec terminated by timeout/cancel: %w", ctx.Err())
+		if killErr != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("kill sandbox process: %w", killErr))
 		}
-		return res, ctx.Err()
+		if wait.err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("sandbox exec wait failed: %w", wait.err))
+		}
+		if limitErr := enforceSandboxStorageLimits(s.cfg); limitErr != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("storage limit check failed: %w", limitErr))
+		}
+		return res, resultErr
 	}
 }
 
@@ -135,7 +148,10 @@ func windowsLimitReport() LimitReport {
 	}
 }
 
-func (s *windowsSandbox) ExecCode(ctx context.Context, language, code string) (*ExecResult, error) {
+func (s *windowsSandbox) ExecCode(ctx context.Context, language, code string) (result *ExecResult, err error) {
+	if validationErr := validateExecContext(ctx); validationErr != nil {
+		return nil, validationErr
+	}
 	var ext, runner string
 	lang := strings.ToLower(language)
 	switch lang {
@@ -153,7 +169,7 @@ func (s *windowsSandbox) ExecCode(ctx context.Context, language, code string) (*
 	if err != nil {
 		return nil, err
 	}
-	defer os.Remove(tmpFile)
+	defer func() { err = errors.Join(err, removeCodeFile(tmpFile)) }()
 
 	var args []string
 	if lang == "go" || lang == "golang" {
@@ -175,7 +191,7 @@ func (s *windowsSandbox) ExecCode(ctx context.Context, language, code string) (*
 	return runSandbox.Exec(ctx, runner, args)
 }
 
-func resolveWindowsRuntimeForExecCode(runner string) (resolvedRunner string, readablePath string) {
+func resolveWindowsRuntimeForExecCode(runner string) (resolvedRunner, readablePath string) {
 	resolvedRunner = runner
 	path, err := exec.LookPath(runner)
 	if err != nil {

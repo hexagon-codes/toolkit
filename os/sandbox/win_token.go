@@ -3,9 +3,13 @@
 package sandbox
 
 import (
+	"errors"
 	"fmt"
+	"runtime"
 	"syscall"
 	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
 // Phase 8 D29: Restricted Token management
@@ -14,87 +18,67 @@ import (
 // Aligns with Codex codex-windows-sandbox Restricted Token approach.
 
 const (
-	DISABLE_MAX_PRIVILEGE = 0x1
-	SANDBOX_INERT         = 0x2
-
-	TokenIntegrityLevel = 25 // TOKEN_INFORMATION_CLASS
-	SE_GROUP_INTEGRITY  = 0x00000020
-
-	WinUntrustedLabelSid = 66 // WELL_KNOWN_SID_TYPE
+	disableMaxPrivilege    = 0x1
+	sandboxInert           = 0x2
+	tokenIntegrityLevel    = 25
+	securityGroupIntegrity = 0x00000020
 )
 
-// tokenMandatoryLabel removed — inlined in setTokenIntegrityLevel
-
-// createSandboxToken creates a restricted token with:
-//   - All privileges removed (DISABLE_MAX_PRIVILEGE)
-//   - Integrity Level set to Untrusted (0x0000)
-//   - SANDBOX_INERT flag set
+// createSandboxToken 创建受限令牌：移除全部权限、设置不可信完整性级别，
+// 并启用沙箱惰性标志。
 func createSandboxToken() (syscall.Token, error) {
-	// Get current process token
+	// 获取当前进程令牌。
 	var processToken syscall.Token
-	process, _ := syscall.GetCurrentProcess()
-	err := syscall.OpenProcessToken(process, syscall.TOKEN_ALL_ACCESS, &processToken)
+	process, err := syscall.GetCurrentProcess()
 	if err != nil {
+		return 0, fmt.Errorf("get current process: %w", err)
+	}
+	if err := syscall.OpenProcessToken(process, syscall.TOKEN_ALL_ACCESS, &processToken); err != nil {
 		return 0, fmt.Errorf("open process token: %w", err)
 	}
-	defer processToken.Close()
-
-	// Create restricted token — strip all privileges
+	// 创建受限令牌并移除全部权限。
 	var restrictedToken syscall.Token
 	r, _, callErr := procCreateRestrictedToken.Call(
 		uintptr(processToken),
-		DISABLE_MAX_PRIVILEGE|SANDBOX_INERT,
-		0, 0, // no SIDs to disable
-		0, 0, // no privileges to delete (DISABLE_MAX_PRIVILEGE handles it)
-		0, 0, // no restricting SIDs
-		uintptr(unsafe.Pointer(&restrictedToken)),
+		disableMaxPrivilege|sandboxInert,
+		0, 0, // 不额外禁用 SID
+		0, 0, // 权限由 disableMaxPrivilege 统一移除
+		0, 0, // 不额外限制 SID
+		uintptr(unsafe.Pointer(&restrictedToken)), // #nosec G103 -- Win32 API 同步写入有效令牌变量。
 	)
 	if r == 0 {
-		return 0, fmt.Errorf("CreateRestrictedToken: %w", callErr)
+		return 0, errors.Join(fmt.Errorf("CreateRestrictedToken: %w", callErr), processToken.Close())
+	}
+	if closeErr := processToken.Close(); closeErr != nil {
+		return 0, errors.Join(fmt.Errorf("close process token: %w", closeErr), restrictedToken.Close())
 	}
 
-	// Set integrity level to Untrusted
-	if err := setTokenIntegrityLevel(restrictedToken, SECURITY_MANDATORY_UNTRUSTED_RID); err != nil {
-		restrictedToken.Close()
-		return 0, fmt.Errorf("set integrity level: %w", err)
+	// 将完整性级别设置为不可信。
+	if err := setTokenIntegrityLevel(restrictedToken, securityMandatoryUntrustedRID); err != nil {
+		return 0, errors.Join(fmt.Errorf("set integrity level: %w", err), restrictedToken.Close())
 	}
 
 	return restrictedToken, nil
 }
 
-// setTokenIntegrityLevel sets the token's mandatory integrity level.
+// setTokenIntegrityLevel 设置令牌的强制完整性级别。
 func setTokenIntegrityLevel(token syscall.Token, level uint32) error {
-	// Create SID for the integrity level using Ntdll
-	authority := sidIdentifierAuthority{Value: [6]byte{0, 0, 0, 0, 0, 16}} // MANDATORY_LABEL_AUTHORITY
-	var sid uintptr
+	sid, err := allocateSID(windows.SECURITY_MANDATORY_LABEL_AUTHORITY, level)
+	if err != nil {
+		return fmt.Errorf("allocate integrity SID: %w", err)
+	}
 
-	r, _, err := procRtlAllocateAndInitializeSid.Call(
-		uintptr(unsafe.Pointer(&authority)),
-		1,              // sub-authority count
-		uintptr(level), // RID
-		0, 0, 0, 0, 0, 0, 0,
-		uintptr(unsafe.Pointer(&sid)),
-	)
-	if r != 0 {
-		return fmt.Errorf("allocate integrity SID: NTSTATUS 0x%X: %w", r, err)
+	info := windows.Tokenmandatorylabel{
+		Label: windows.SIDAndAttributes{Sid: sid, Attributes: securityGroupIntegrity},
 	}
-	defer procRtlFreeSid.Call(sid)
-
-	type sidAndAttrs struct {
-		Sid        uintptr
-		Attributes uint32
-	}
-	type tml struct {
-		Label sidAndAttrs
-	}
-	info := tml{Label: sidAndAttrs{Sid: sid, Attributes: SE_GROUP_INTEGRITY}}
 
 	r2, _, callErr := procSetTokenInformation.Call(
 		uintptr(token),
-		uintptr(TokenIntegrityLevel),
-		uintptr(unsafe.Pointer(&info)),
-		unsafe.Sizeof(info),
+		uintptr(tokenIntegrityLevel),
+		uintptr(unsafe.Pointer(&info)), // #nosec G103 -- 结构体布局与 TOKEN_MANDATORY_LABEL ABI 一致。
+		uintptr(info.Size()),
 	)
+	runtime.KeepAlive(info)
 	if r2 == 0 {
 		return fmt.Errorf("SetTokenInformation: %w", callErr)
 	}

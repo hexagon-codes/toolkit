@@ -25,29 +25,29 @@ func TestWindowsACLRulesReadablePathsAreReadOnly(t *testing.T) {
 	}
 
 	wsRule := mustFindACLRule(t, rules, workspace)
-	if wsRule.mode != GRANT_ACCESS {
-		t.Fatalf("workspace mode=%d, want GRANT_ACCESS", wsRule.mode)
+	if wsRule.mode != grantAccess {
+		t.Fatalf("workspace mode=%d, want grantAccess", wsRule.mode)
 	}
-	if wsRule.permissions&(GENERIC_READ|GENERIC_WRITE|GENERIC_EXECUTE) != GENERIC_READ|GENERIC_WRITE|GENERIC_EXECUTE {
+	if wsRule.permissions&(genericRead|genericWrite|genericExecute) != genericRead|genericWrite|genericExecute {
 		t.Fatalf("workspace permissions=%#x, want RWX", wsRule.permissions)
 	}
 
 	readRule := mustFindACLRule(t, rules, readable)
-	if readRule.mode != GRANT_ACCESS {
-		t.Fatalf("readable mode=%d, want GRANT_ACCESS", readRule.mode)
+	if readRule.mode != grantAccess {
+		t.Fatalf("readable mode=%d, want grantAccess", readRule.mode)
 	}
-	if readRule.permissions&GENERIC_WRITE != 0 {
+	if readRule.permissions&genericWrite != 0 {
 		t.Fatalf("readable permissions=%#x unexpectedly include write", readRule.permissions)
 	}
-	if readRule.permissions&(GENERIC_READ|GENERIC_EXECUTE) != GENERIC_READ|GENERIC_EXECUTE {
+	if readRule.permissions&(genericRead|genericExecute) != genericRead|genericExecute {
 		t.Fatalf("readable permissions=%#x, want read+execute", readRule.permissions)
 	}
 
 	denyRule := mustFindACLRule(t, rules, denied)
-	if denyRule.mode != DENY_ACCESS {
-		t.Fatalf("denied mode=%d, want DENY_ACCESS", denyRule.mode)
+	if denyRule.mode != denyAccess {
+		t.Fatalf("denied mode=%d, want denyAccess", denyRule.mode)
 	}
-	if denyRule.permissions&(GENERIC_READ|GENERIC_WRITE|GENERIC_EXECUTE) != GENERIC_READ|GENERIC_WRITE|GENERIC_EXECUTE {
+	if denyRule.permissions&(genericRead|genericWrite|genericExecute) != genericRead|genericWrite|genericExecute {
 		t.Fatalf("denied permissions=%#x, want RWX deny", denyRule.permissions)
 	}
 }

@@ -3,41 +3,41 @@
 package sandbox
 
 import (
+	"errors"
 	"fmt"
 	"syscall"
 	"unsafe"
 )
 
-// Additional Job Object UI restriction flags not in win_syscall.go
+// 下列常量对应 JOBOBJECT_BASIC_UI_RESTRICTIONS 的界面限制位。
 const (
-	jOB_OBJECT_UILIMIT_HANDLES          = 0x00000001
-	jOB_OBJECT_UILIMIT_READCLIPBOARD    = 0x00000002
-	jOB_OBJECT_UILIMIT_WRITECLIPBOARD   = 0x00000004
-	jOB_OBJECT_UILIMIT_SYSTEMPARAMETERS = 0x00000008
-	jOB_OBJECT_UILIMIT_DISPLAYSETTINGS  = 0x00000010
-	jOB_OBJECT_UILIMIT_GLOBALATOMS      = 0x00000020
-	jOB_OBJECT_UILIMIT_DESKTOP          = 0x00000040
-	jOB_OBJECT_UILIMIT_EXITWINDOWS      = 0x00000080
+	jobObjectUILimitHandles          = 0x00000001
+	jobObjectUILimitReadClipboard    = 0x00000002
+	jobObjectUILimitWriteClipboard   = 0x00000004
+	jobObjectUILimitSystemParameters = 0x00000008
+	jobObjectUILimitDisplaySettings  = 0x00000010
+	jobObjectUILimitGlobalAtoms      = 0x00000020
+	jobObjectUILimitDesktop          = 0x00000040
+	jobObjectUILimitExitWindows      = 0x00000080
 
 	jobObjectBasicUIRestrictionsClass = 4
 )
 
-type jobobjectBasicUIRestrictions2 struct {
+type jobObjectBasicUIRestrictions struct {
 	UIRestrictionsClass uint32
 }
 
 // createSandboxJobObject creates a fully configured Job Object with memory, process,
 // and UI restrictions for sandbox isolation. Wraps the basic createJobObject from
 // win_syscall.go with additional hardening.
-func createSandboxJobObject(memoryMB int, maxProcesses int) (syscall.Handle, error) {
+func createSandboxJobObject(memoryMB, maxProcesses int) (syscall.Handle, error) {
 	job, err := createJobObject(memoryMB, maxProcesses)
 	if err != nil {
 		return 0, err
 	}
 
 	if err := setJobUIRestrictions(job); err != nil {
-		syscall.CloseHandle(job)
-		return 0, err
+		return 0, errors.Join(err, syscall.CloseHandle(job))
 	}
 
 	return job, nil
@@ -46,21 +46,21 @@ func createSandboxJobObject(memoryMB int, maxProcesses int) (syscall.Handle, err
 // setJobUIRestrictions blocks clipboard access, global hooks, atom table,
 // desktop creation, display settings changes, and inter-process handle access.
 func setJobUIRestrictions(job syscall.Handle) error {
-	restrictions := jobobjectBasicUIRestrictions2{
-		UIRestrictionsClass: jOB_OBJECT_UILIMIT_DESKTOP |
-			jOB_OBJECT_UILIMIT_DISPLAYSETTINGS |
-			jOB_OBJECT_UILIMIT_EXITWINDOWS |
-			jOB_OBJECT_UILIMIT_GLOBALATOMS |
-			jOB_OBJECT_UILIMIT_HANDLES |
-			jOB_OBJECT_UILIMIT_READCLIPBOARD |
-			jOB_OBJECT_UILIMIT_SYSTEMPARAMETERS |
-			jOB_OBJECT_UILIMIT_WRITECLIPBOARD,
+	restrictions := jobObjectBasicUIRestrictions{
+		UIRestrictionsClass: jobObjectUILimitDesktop |
+			jobObjectUILimitDisplaySettings |
+			jobObjectUILimitExitWindows |
+			jobObjectUILimitGlobalAtoms |
+			jobObjectUILimitHandles |
+			jobObjectUILimitReadClipboard |
+			jobObjectUILimitSystemParameters |
+			jobObjectUILimitWriteClipboard,
 	}
 
 	r, _, err := procSetInformationJobObject.Call(
 		uintptr(job),
 		uintptr(jobObjectBasicUIRestrictionsClass),
-		uintptr(unsafe.Pointer(&restrictions)),
+		uintptr(unsafe.Pointer(&restrictions)), // #nosec G103 -- 结构体布局与 JOBOBJECT_BASIC_UI_RESTRICTIONS ABI 一致。
 		unsafe.Sizeof(restrictions),
 	)
 	if r == 0 {
@@ -70,7 +70,7 @@ func setJobUIRestrictions(job syscall.Handle) error {
 }
 
 // assignProcessToJob assigns a process handle to the Job Object.
-func assignProcessToJob(job syscall.Handle, process syscall.Handle) error {
+func assignProcessToJob(job, process syscall.Handle) error {
 	r, _, err := procAssignProcessToJobObject.Call(uintptr(job), uintptr(process))
 	if r == 0 {
 		return fmt.Errorf("AssignProcessToJobObject: %w", err)

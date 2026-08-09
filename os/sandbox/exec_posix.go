@@ -48,7 +48,8 @@ func runBoundedCommand(ctx context.Context, command string, args []string, cfg C
 		return nil, setupErr
 	}
 
-	cmd := exec.CommandContext(ctx, runCommand, runArgs...)
+	// 沙箱必须执行调用方指定的程序；参数通过 argv 传递，不经过命令行解释器。
+	cmd := exec.CommandContext(ctx, runCommand, runArgs...) // #nosec G204 -- 动态程序执行是沙箱 API 的核心职责。
 	cmd.Dir = cfg.Workspace
 	cmd.Env = runEnv
 	cmd.Stdout = stdout
@@ -80,17 +81,17 @@ func runBoundedCommand(ctx context.Context, command string, args []string, cfg C
 			StderrTruncated: stderr.Truncated(),
 			Limits:          posixLimitReport(fsContainment),
 		}
-		if limitErr := enforceSandboxStorageLimits(cfg); limitErr != nil {
-			// 存储限额错误也用 %w 包装, 保证 ErrStorageLimitExceeded 哨兵可被 errors.Is 命中
-			return res, fmt.Errorf("sandbox exec terminated by timeout/cancel: %w; storage limit check failed: %w", ctx.Err(), limitErr)
-		}
+		resultErr := fmt.Errorf("sandbox exec terminated by timeout/cancel: %w", ctx.Err())
 		if killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
-			return res, fmt.Errorf("sandbox exec terminated by timeout/cancel: %w; kill process group failed: %w", ctx.Err(), killErr)
+			resultErr = errors.Join(resultErr, fmt.Errorf("kill process group failed: %w", killErr))
 		}
 		if waitErr != nil {
-			return res, fmt.Errorf("sandbox exec terminated by timeout/cancel: %w; wait failed: %v", ctx.Err(), waitErr)
+			resultErr = errors.Join(resultErr, fmt.Errorf("sandbox exec wait failed: %w", waitErr))
 		}
-		return res, fmt.Errorf("sandbox exec terminated by timeout/cancel: %w", ctx.Err())
+		if limitErr := enforceSandboxStorageLimits(cfg); limitErr != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("storage limit check failed: %w", limitErr))
+		}
+		return res, resultErr
 	}
 
 	exitCode := 0
@@ -184,7 +185,8 @@ func runPosixRlimitHelper(argv []string) int {
 		fmt.Fprintf(os.Stderr, "sandbox rlimit helper: resolve %q: %v\n", command, err)
 		return 127
 	}
-	if err := syscall.Exec(path, argv, stripPosixRlimitEnv(os.Environ())); err != nil {
+	// path 已由 LookPath 解析，argv 直接交给内核，不经过命令行解释器。
+	if err := syscall.Exec(path, argv, stripPosixRlimitEnv(os.Environ())); err != nil { // #nosec G204,G702 -- 动态程序执行是受限辅助进程的核心职责。
 		fmt.Fprintf(os.Stderr, "sandbox rlimit helper: exec %q: %v\n", command, err)
 		return 127
 	}
@@ -279,7 +281,7 @@ func currentLinuxUIDTaskCount() (uint64, bool) {
 		if !isDecimalString(pid) {
 			continue
 		}
-		status, err := os.ReadFile("/proc/" + pid + "/status")
+		status, err := os.ReadFile("/proc/" + pid + "/status") // #nosec G304 -- pid 已通过纯十进制校验，路径固定在 procfs。
 		if err != nil {
 			continue
 		}

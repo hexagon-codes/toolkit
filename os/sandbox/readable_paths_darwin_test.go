@@ -106,13 +106,14 @@ func externalAuthorizedDir(t *testing.T) string {
 func TestReadablePaths_DarwinRejectsProfileBreakingPaths(t *testing.T) {
 	ws := t.TempDir()
 	good := t.TempDir()
-	bad := []string{
+	bad := make([]string, 0, 6)
+	bad = append(bad,
 		`/Users/x/a"b`,  // 引号：终止字符串字面量 → 注入/损坏
 		"/Users/x/a\nb", // 换行
 		`/x") (allow network*) (allow file-read* (subpath "/`, // 显式注入企图
 		"relative/not/abs", // 非绝对
 		"",                 // 空
-	}
+	)
 	s := newDarwinSandbox(Config{Workspace: ws, ReadablePaths: append(bad, good), Timeout: 10})
 	sbpl := s.generateSBPL()
 
@@ -146,19 +147,59 @@ func TestReadablePaths_DarwinRejectsProfileBreakingPaths(t *testing.T) {
 }
 
 func TestReadablePaths_DarwinBadPathDoesNotBreakExec(t *testing.T) {
-	requireSandboxTools(t)
 	ws := t.TempDir()
-	s, err := New(Config{Workspace: ws, ReadablePaths: []string{`/Users/x/a"b`}, Timeout: 15})
+	if _, err := New(Config{Workspace: ws, ReadablePaths: []string{`/Users/x/a"b`}, Timeout: 15}); err == nil {
+		t.Fatal("非法授权路径应在创建沙箱时返回错误")
+	}
+}
+
+func TestDarwinConfigSnapshotsDeniedPaths(t *testing.T) {
+	original := filepath.Join(t.TempDir(), "secret")
+	denied := []string{original}
+	sandboxInstance, err := New(Config{Workspace: t.TempDir(), DeniedPaths: denied})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 即便配了一个会损坏 profile 的非法路径，普通 code_exec 也必须照常跑（沙箱不被一个脏路径搞瘫）。
-	res, err := s.ExecCode(context.Background(), "python", "print(40+2)")
-	if err != nil {
-		t.Fatalf("一个非法授权路径不应搞瘫 code_exec: %v", err)
+	denied[0] = `/tmp/x") (allow network*) (`
+
+	darwin, ok := sandboxInstance.(*darwinSandbox)
+	if !ok {
+		t.Fatalf("New() returned %T, want *darwinSandbox", sandboxInstance)
 	}
-	if got := strings.TrimSpace(res.Stdout); got != "42" {
-		t.Fatalf("期望 '42' 实得 %q (stderr=%q exit=%d)", got, res.Stderr, res.ExitCode)
+	normalizedOriginal := darwin.cfg.DeniedPaths[0]
+	profile := darwin.generateSBPL()
+	if !strings.Contains(profile, normalizedOriginal) {
+		t.Fatalf("profile lost the original denied path:\n%s", profile)
+	}
+	if strings.Contains(profile, "(allow network*)") {
+		t.Fatalf("caller mutation changed the sandbox policy:\n%s", profile)
+	}
+}
+
+func TestDarwinNetworkDisabledDoesNotAllowUnixSockets(t *testing.T) {
+	profile := newDarwinSandbox(Config{Workspace: t.TempDir(), Network: false}).generateSBPL()
+	if strings.Contains(profile, "(allow network-outbound (to unix-socket))") {
+		t.Fatalf("network-disabled profile still allows Unix sockets:\n%s", profile)
+	}
+}
+
+func TestDarwinExecCodeTreatsAlreadyRemovedTemporaryFileAsClean(t *testing.T) {
+	requireSandboxTools(t)
+	sandboxInstance, err := New(Config{Workspace: t.TempDir(), Timeout: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := sandboxInstance.ExecCode(
+		context.Background(),
+		"python",
+		"import os\nos.remove(__file__)\nprint('removed')",
+	)
+	if err != nil {
+		t.Fatalf("ExecCode() error = %v", err)
+	}
+	if result == nil || strings.TrimSpace(result.Stdout) != "removed" {
+		t.Fatalf("ExecCode() result = %#v, want successful output", result)
 	}
 }
 

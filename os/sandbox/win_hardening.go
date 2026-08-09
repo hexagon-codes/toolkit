@@ -6,68 +6,12 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"syscall"
-	"unsafe"
 )
 
 // Phase 8 D34: Security hardening + escape prevention
 
-// Job Object UI restrictions
-const (
-	JOB_OBJECT_UILIMIT_DESKTOP          = 0x00000040
-	JOB_OBJECT_UILIMIT_GLOBALATOMS      = 0x00000020
-	JOB_OBJECT_UILIMIT_HANDLES          = 0x00000001
-	JOB_OBJECT_UILIMIT_READCLIPBOARD    = 0x00000002
-	JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS = 0x00000008
-	JOB_OBJECT_UILIMIT_WRITECLIPBOARD   = 0x00000004
-	JOB_OBJECT_UILIMIT_EXITWINDOWS      = 0x00000080
-	JOB_OBJECT_UILIMIT_DISPLAYSETTINGS  = 0x00000010
-)
-
-type jobObjectBasicUIRestrictions struct {
-	UIRestrictionsClass uint32
-}
-
-// hardenJobObject applies UI restrictions to the Job Object.
-//
-// Blocks:
-//   - Clipboard read/write (data exfiltration)
-//   - Global atom table (IPC attack vector)
-//   - Desktop creation (escape to new desktop)
-//   - System parameter changes
-//   - Display settings modification
-func hardenJobObject(jobHandle syscall.Handle) error {
-	restrictions := jobObjectBasicUIRestrictions{
-		UIRestrictionsClass: JOB_OBJECT_UILIMIT_READCLIPBOARD |
-			JOB_OBJECT_UILIMIT_WRITECLIPBOARD |
-			JOB_OBJECT_UILIMIT_GLOBALATOMS |
-			JOB_OBJECT_UILIMIT_DESKTOP |
-			JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS |
-			JOB_OBJECT_UILIMIT_DISPLAYSETTINGS |
-			JOB_OBJECT_UILIMIT_EXITWINDOWS,
-	}
-
-	r, _, err := procSetInformationJobObject.Call(
-		uintptr(jobHandle),
-		7, // JobObjectBasicUIRestrictions
-		uintptr(unsafe.Pointer(&restrictions)),
-		unsafe.Sizeof(restrictions),
-	)
-	if r == 0 {
-		return err
-	}
-	return nil
-}
-
-// cleanWindowsEnv returns a sanitized environment for sandboxed processes.
-//
-// Strips dangerous variables:
-//   - COMSPEC (cmd.exe path — prevents shell escape)
-//   - PSModulePath (PowerShell module injection)
-//   - PROCESSOR_ARCHITECTURE (info leak)
-//   - USERNAME, USERDOMAIN (identity leak)
-//   - APPDATA, LOCALAPPDATA (out-of-workspace access)
-func cleanWindowsEnv(workspace string) []string {
+// cleanWindowsEnv 构造沙箱进程的最小环境，并创建隔离的临时目录。
+func cleanWindowsEnv(workspace string) ([]string, error) {
 	dangerousVars := map[string]bool{
 		"COMSPEC":                true,
 		"PSMODULEPATH":           true,
@@ -81,7 +25,7 @@ func cleanWindowsEnv(workspace string) []string {
 		"HOMEDRIVE":              true,
 	}
 
-	// Keep only safe variables
+	// 仅保留运行时启动所需的系统变量。
 	var clean []string
 	for _, env := range os.Environ() {
 		parts := strings.SplitN(env, "=", 2)
@@ -92,27 +36,30 @@ func cleanWindowsEnv(workspace string) []string {
 		if dangerousVars[key] {
 			continue
 		}
-		// Allow PATH, SYSTEMROOT, TEMP, TMP
 		if key == "PATH" || key == "SYSTEMROOT" || key == "SYSTEMDRIVE" || key == "WINDIR" {
 			clean = append(clean, env)
 		}
 	}
 
-	// Override with sandbox-safe values
+	temporaryDir := workspace + "\\_tmp"
+	appDataDir := workspace + "\\_appdata"
+	localAppDataDir := workspace + "\\_localappdata"
+	for _, dir := range []string{temporaryDir, appDataDir, localAppDataDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("create sandbox environment directory %q: %w", dir, err)
+		}
+	}
+
+	// 用工作区内目录覆盖用户身份与临时目录变量。
 	clean = append(clean,
-		"TEMP="+workspace+"\\_tmp",
-		"TMP="+workspace+"\\_tmp",
+		"TEMP="+temporaryDir,
+		"TMP="+temporaryDir,
 		"USERPROFILE="+workspace,
 		"HOMEPATH="+workspace,
-		"APPDATA="+workspace+"\\_appdata",
-		"LOCALAPPDATA="+workspace+"\\_localappdata",
+		"APPDATA="+appDataDir,
+		"LOCALAPPDATA="+localAppDataDir,
 	)
-
-	os.MkdirAll(workspace+"\\_tmp", 0755)
-	os.MkdirAll(workspace+"\\_appdata", 0755)
-	os.MkdirAll(workspace+"\\_localappdata", 0755)
-
-	return clean
+	return clean, nil
 }
 
 // validateWindowsEscapeVectors checks for common escape attempts in command/args.

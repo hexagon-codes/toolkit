@@ -4,9 +4,9 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -19,6 +19,14 @@ type darwinSandbox struct {
 }
 
 func newPlatformSandbox(cfg Config) (Sandbox, error) {
+	if !isSafeSeatbeltPath(cfg.Workspace) {
+		return nil, fmt.Errorf("sandbox workspace cannot be represented safely in a macOS profile")
+	}
+	for _, path := range append(append([]string(nil), cfg.ReadablePaths...), cfg.DeniedPaths...) {
+		if !isSafeSeatbeltPath(path) {
+			return nil, fmt.Errorf("sandbox path cannot be represented safely in a macOS profile")
+		}
+	}
 	return newDarwinSandbox(cfg), nil
 }
 
@@ -74,15 +82,18 @@ func (s *darwinSandbox) generateSBPL() string {
 	sb.WriteString("  (subpath \"/usr/local\")\n")
 
 	// Python/Node 运行时
-	home, _ := os.UserHomeDir()
-	sb.WriteString(fmt.Sprintf("  (subpath \"%s/.pyenv\")\n", home))
-	sb.WriteString(fmt.Sprintf("  (subpath \"%s/.nvm\")\n", home))
-	sb.WriteString(fmt.Sprintf("  (subpath \"%s/.local\")\n", home))
+	if home, err := os.UserHomeDir(); err == nil {
+		for _, runtimePath := range []string{home + "/.pyenv", home + "/.nvm", home + "/.local"} {
+			if isSafeSeatbeltPath(runtimePath) {
+				fmt.Fprintf(&sb, "  (subpath \"%s\")\n", runtimePath)
+			}
+		}
+	}
 	sb.WriteString(")\n")
 
 	// 工作区读写
-	sb.WriteString(fmt.Sprintf("(allow file-read* (subpath \"%s\"))\n", workspace))
-	sb.WriteString(fmt.Sprintf("(allow file-write* (subpath \"%s\"))\n", workspace))
+	fmt.Fprintf(&sb, "(allow file-read* (subpath \"%s\"))\n", workspace)
+	fmt.Fprintf(&sb, "(allow file-write* (subpath \"%s\"))\n", workspace)
 
 	// /tmp 读写 (临时文件)
 	sb.WriteString("(allow file-write* (subpath \"/tmp\"))\n")
@@ -98,14 +109,17 @@ func (s *darwinSandbox) generateSBPL() string {
 		if !isSafeSeatbeltPath(expanded) {
 			continue
 		}
-		sb.WriteString(fmt.Sprintf("(allow file-read* (subpath \"%s\"))\n", expanded))
+		fmt.Fprintf(&sb, "(allow file-read* (subpath \"%s\"))\n", expanded)
 	}
 
 	// 明确拒绝的路径
 	for _, denied := range s.cfg.DeniedPaths {
 		expanded := expandPath(denied)
-		sb.WriteString(fmt.Sprintf("(deny file-read* (subpath \"%s\"))\n", expanded))
-		sb.WriteString(fmt.Sprintf("(deny file-write* (subpath \"%s\"))\n", expanded))
+		if !isSafeSeatbeltPath(expanded) {
+			continue
+		}
+		fmt.Fprintf(&sb, "(deny file-read* (subpath \"%s\"))\n", expanded)
+		fmt.Fprintf(&sb, "(deny file-write* (subpath \"%s\"))\n", expanded)
 	}
 
 	// 网络控制
@@ -119,8 +133,6 @@ func (s *darwinSandbox) generateSBPL() string {
 		}
 	} else {
 		sb.WriteString("(deny network*)\n")
-		// 允许本地 DNS 和 loopback (某些运行时需要)
-		sb.WriteString("(allow network-outbound (to unix-socket))\n")
 	}
 
 	return sb.String()
@@ -128,13 +140,17 @@ func (s *darwinSandbox) generateSBPL() string {
 
 // Exec 在 Seatbelt 沙箱内执行命令
 func (s *darwinSandbox) Exec(ctx context.Context, command string, args []string) (*ExecResult, error) {
+	if err := validateExecContext(ctx); err != nil {
+		return nil, err
+	}
 	// 应用 cfg.Timeout: 调用方 ctx 无更早 deadline 时按配置强制超时。
 	ctx, cancel := withTimeout(ctx, s.cfg.Timeout)
 	defer cancel()
 
 	sbpl := s.generateSBPL()
 
-	sandboxArgs := []string{"-p", sbpl, command}
+	sandboxArgs := make([]string, 0, 3+len(args))
+	sandboxArgs = append(sandboxArgs, "-p", sbpl, command)
 	sandboxArgs = append(sandboxArgs, args...)
 
 	// 清理危险环境变量。Seatbelt (deny default SBPL) 提供强文件系统隔离 → enforced。
@@ -142,7 +158,10 @@ func (s *darwinSandbox) Exec(ctx context.Context, command string, args []string)
 }
 
 // ExecCode 在沙箱内执行代码
-func (s *darwinSandbox) ExecCode(ctx context.Context, language, code string) (*ExecResult, error) {
+func (s *darwinSandbox) ExecCode(ctx context.Context, language, code string) (result *ExecResult, err error) {
+	if contextErr := validateExecContext(ctx); contextErr != nil {
+		return nil, contextErr
+	}
 	// 写代码到临时文件
 	var ext, cmd string
 	switch language {
@@ -167,7 +186,7 @@ func (s *darwinSandbox) ExecCode(ctx context.Context, language, code string) (*E
 	if err != nil {
 		return nil, err
 	}
-	defer os.Remove(tmpFile)
+	defer func() { err = errors.Join(err, removeCodeFile(tmpFile)) }()
 
 	if language == "go" {
 		return s.Exec(ctx, cmd, []string{"run", tmpFile})
@@ -217,27 +236,4 @@ func isSafeSeatbeltPath(p string) bool {
 		return false
 	}
 	return !strings.ContainsAny(p, "\"\\\n\r\x00")
-}
-
-// expandPath 展开路径中的波浪号前缀为当前用户的 home 目录。
-//
-// 支持:
-//   - "~"        -> home (裸波浪号, 用户用它表达 home 目录)
-//   - "~/x"、"~\x" -> home/x
-//
-// 不支持 "~user" 形式 (解析任意其他用户的 home 涉及平台特定的用户库查询,
-// 且在 deny 规则里指向他人 home 语义不明确), 原样返回, 由调用方自行决定。
-//
-// 历史缺陷: 旧实现只处理 "~/" 前缀, 裸 "~" 会被当成字面路径写进 SBPL deny 规则,
-// 指向不存在的 "~" 文件, 导致用户"拒绝 home 目录"的意图静默失效。
-func expandPath(p string) string {
-	if p == "~" {
-		home, _ := os.UserHomeDir()
-		return home
-	}
-	if strings.HasPrefix(p, "~/") || strings.HasPrefix(p, "~\\") {
-		home, _ := os.UserHomeDir()
-		return filepath.Join(home, p[2:])
-	}
-	return p
 }

@@ -3,6 +3,8 @@
 package sandbox
 
 import (
+	"errors"
+	"fmt"
 	"syscall"
 	"unsafe"
 )
@@ -18,37 +20,24 @@ var (
 	modAdvapi32 = syscall.NewLazyDLL("advapi32.dll")
 	modKernel32 = syscall.NewLazyDLL("kernel32.dll")
 
-	// Token management
+	// 令牌管理。
 	procCreateRestrictedToken = modAdvapi32.NewProc("CreateRestrictedToken")
-	procCreateProcessAsUserW  = modAdvapi32.NewProc("CreateProcessAsUserW")
 	procSetTokenInformation   = modAdvapi32.NewProc("SetTokenInformation")
-	procAdjustTokenPrivileges = modAdvapi32.NewProc("AdjustTokenPrivileges")
 
-	// Job Object
+	// Job Object 管理。
 	procCreateJobObjectW         = modKernel32.NewProc("CreateJobObjectW")
 	procSetInformationJobObject  = modKernel32.NewProc("SetInformationJobObject")
 	procAssignProcessToJobObject = modKernel32.NewProc("AssignProcessToJobObject")
 	procTerminateJobObject       = modKernel32.NewProc("TerminateJobObject")
-
-	// ACL / Security
-	procSetNamedSecurityInfoW = modAdvapi32.NewProc("SetNamedSecurityInfoW")
-
-	// Note: Desktop procs are in win_desktop.go (user32.dll)
 )
 
-// Integrity levels
-const (
-	SECURITY_MANDATORY_UNTRUSTED_RID = 0x0000
-	SECURITY_MANDATORY_LOW_RID       = 0x1000
-	SECURITY_MANDATORY_MEDIUM_RID    = 0x2000
-)
+const securityMandatoryUntrustedRID = 0x0000
 
-// Job Object limit flags
+// 下列常量对应 JOBOBJECT_EXTENDED_LIMIT_INFORMATION 的限制位。
 const (
-	JOB_OBJECT_LIMIT_PROCESS_MEMORY    = 0x00000100
-	JOB_OBJECT_LIMIT_JOB_MEMORY        = 0x00000200
-	JOB_OBJECT_LIMIT_ACTIVE_PROCESS    = 0x00000008
-	JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+	jobObjectLimitProcessMemory = 0x00000100
+	jobObjectLimitActiveProcess = 0x00000008
+	jobObjectLimitKillOnClose   = 0x00002000
 )
 
 // Placeholder: actual Win32 struct definitions will be filled on Windows
@@ -80,25 +69,14 @@ type (
 	}
 )
 
-// createRestrictedToken creates a restricted token with deny-only SIDs.
-func createRestrictedToken(existingToken syscall.Token) (syscall.Token, error) {
-	var newToken syscall.Token
-	r, _, err := procCreateRestrictedToken.Call(
-		uintptr(existingToken),
-		0,    // flags: DISABLE_MAX_PRIVILEGE
-		0, 0, // SIDs to disable
-		0, 0, // privileges to delete
-		0, 0, // restricting SIDs
-		uintptr(unsafe.Pointer(&newToken)),
-	)
-	if r == 0 {
-		return 0, err
-	}
-	return newToken, nil
-}
-
 // createJobObject creates a new Job Object with memory and process limits.
-func createJobObject(memoryLimitMB int, maxProcesses int) (syscall.Handle, error) {
+func createJobObject(memoryLimitMB, maxProcesses int) (syscall.Handle, error) {
+	if memoryLimitMB <= 0 || maxProcesses <= 0 {
+		return 0, fmt.Errorf("job object limits must be positive")
+	}
+	if uint64(maxProcesses) > uint64(^uint32(0)) {
+		return 0, fmt.Errorf("job object process limit exceeds uint32")
+	}
 	h, _, err := procCreateJobObjectW.Call(0, 0)
 	if h == 0 {
 		return 0, err
@@ -106,21 +84,20 @@ func createJobObject(memoryLimitMB int, maxProcesses int) (syscall.Handle, error
 	handle := syscall.Handle(h)
 
 	info := jobObjectExtendedLimitInformation{}
-	info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_PROCESS_MEMORY |
-		JOB_OBJECT_LIMIT_ACTIVE_PROCESS |
-		JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+	info.BasicLimitInformation.LimitFlags = jobObjectLimitProcessMemory |
+		jobObjectLimitActiveProcess |
+		jobObjectLimitKillOnClose
 	info.ProcessMemoryLimit = uintptr(memoryLimitMB) * 1024 * 1024
-	info.BasicLimitInformation.ActiveProcessLimit = uint32(maxProcesses)
+	info.BasicLimitInformation.ActiveProcessLimit = uint32(maxProcesses) // #nosec G115 -- 上方已校验 uint32 边界。
 
 	r, _, err := procSetInformationJobObject.Call(
 		uintptr(handle),
-		9, // JobObjectExtendedLimitInformation
-		uintptr(unsafe.Pointer(&info)),
+		9,                              // 扩展限制信息类型
+		uintptr(unsafe.Pointer(&info)), // #nosec G103 -- 结构体布局与 JOBOBJECT_EXTENDED_LIMIT_INFORMATION ABI 一致。
 		unsafe.Sizeof(info),
 	)
 	if r == 0 {
-		syscall.CloseHandle(handle)
-		return 0, err
+		return 0, errors.Join(err, syscall.CloseHandle(handle))
 	}
 	return handle, nil
 }
