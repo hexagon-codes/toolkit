@@ -45,21 +45,21 @@ func stringFrom(charset string, length int) (string, error) {
 
 	// charset 为空时无法采样：big.NewInt(0) 传给 rand.Int 会 panic，
 	// 这里提前拦截并以 error 形式返回，保证 Try* 系列绝不 panic。
-	charsetLen := len(charset)
-	if charsetLen == 0 {
+	charsetRunes := []rune(charset)
+	if len(charsetRunes) == 0 {
 		return "", fmt.Errorf("rand: 字符集为空，无法生成长度为 %d 的随机字符串", length)
 	}
 
-	result := make([]byte, length)
-	bound := big.NewInt(int64(charsetLen))
+	result := make([]rune, length)
+	bound := big.NewInt(int64(len(charsetRunes)))
 
 	for i := 0; i < length; i++ {
 		num, err := rand.Int(rand.Reader, bound)
 		if err != nil {
 			// 包装底层错误并附带 ErrInsufficientEntropy 哨兵，便于上层 errors.Is 判定。
-			return "", fmt.Errorf("%w: crypto/rand.Int 调用失败: %v", ErrInsufficientEntropy, err)
+			return "", fmt.Errorf("%w: crypto/rand.Int failed: %w", ErrInsufficientEntropy, err)
 		}
-		result[i] = charset[num.Int64()]
+		result[i] = charsetRunes[num.Int64()]
 	}
 
 	return string(result), nil
@@ -169,17 +169,16 @@ func TryCode(length int) (string, error) {
 // 返回：
 //   - int:   生成的随机整数；出错时为 min。
 //   - error: 底层 crypto/rand 失败时返回非 nil，可用 errors.Is 判定熵源故障。
-func TryInt(min, max int) (int, error) {
-	if min >= max {
-		return min, nil
+func TryInt(lower, upper int) (int, error) {
+	if lower >= upper {
+		return lower, nil
 	}
 
-	diff := max - min
-	num, err := rand.Int(rand.Reader, big.NewInt(int64(diff)))
+	num, err := randomInt64(int64(lower), int64(upper))
 	if err != nil {
-		return min, fmt.Errorf("%w: crypto/rand.Int 调用失败: %v", ErrInsufficientEntropy, err)
+		return lower, fmt.Errorf("%w: crypto/rand.Int failed: %w", ErrInsufficientEntropy, err)
 	}
-	return int(num.Int64()) + min, nil
+	return int(num), nil
 }
 
 // TryInt64 是 Int64 的错误返回安全变体，生成范围 [min, max) 内的随机 int64。
@@ -192,17 +191,16 @@ func TryInt(min, max int) (int, error) {
 // 返回：
 //   - int64: 生成的随机整数；出错时为 min。
 //   - error: 底层 crypto/rand 失败时返回非 nil，可用 errors.Is 判定熵源故障。
-func TryInt64(min, max int64) (int64, error) {
-	if min >= max {
-		return min, nil
+func TryInt64(lower, upper int64) (int64, error) {
+	if lower >= upper {
+		return lower, nil
 	}
 
-	diff := max - min
-	num, err := rand.Int(rand.Reader, big.NewInt(diff))
+	num, err := randomInt64(lower, upper)
 	if err != nil {
-		return min, fmt.Errorf("%w: crypto/rand.Int 调用失败: %v", ErrInsufficientEntropy, err)
+		return lower, fmt.Errorf("%w: crypto/rand.Int failed: %w", ErrInsufficientEntropy, err)
 	}
-	return num.Int64() + min, nil
+	return num, nil
 }
 
 // TryBytes 是 Bytes 的错误返回安全变体，生成 length 个加密安全随机字节。
@@ -222,7 +220,7 @@ func TryBytes(length int) ([]byte, error) {
 
 	b := make([]byte, length)
 	if _, err := rand.Read(b); err != nil {
-		return nil, fmt.Errorf("%w: crypto/rand.Read 调用失败: %v", ErrInsufficientEntropy, err)
+		return nil, fmt.Errorf("%w: crypto/rand.Read failed: %w", ErrInsufficientEntropy, err)
 	}
 	return b, nil
 }

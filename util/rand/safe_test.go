@@ -97,6 +97,16 @@ func TestTryStringFrom(t *testing.T) {
 	}
 }
 
+func TestTryStringFromSamplesWholeUnicodeCharacters(t *testing.T) {
+	got, err := TryStringFrom("界", 4)
+	if err != nil {
+		t.Fatalf("TryStringFrom() error = %v", err)
+	}
+	if got != "界界界界" {
+		t.Fatalf("TryStringFrom() = %q, want four complete Unicode characters", got)
+	}
+}
+
 // TestTryInt 表驱动测试 TryInt 的范围、边界（min>=max）路径。
 func TestTryInt(t *testing.T) {
 	tests := []struct {
@@ -171,6 +181,19 @@ func TestTryInt64(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestTryIntegerRangesDoNotOverflow(t *testing.T) {
+	maximumInt := int(^uint(0) >> 1)
+	minimumInt := -maximumInt - 1
+	if value, err := TryInt(minimumInt, maximumInt); err != nil || value < minimumInt || value >= maximumInt {
+		t.Fatalf("TryInt() = (%d, %v)", value, err)
+	}
+	const minimumInt64 = -1 << 63
+	const maximumInt64 = 1<<63 - 1
+	if value, err := TryInt64(minimumInt64, maximumInt64); err != nil || value < minimumInt64 || value >= maximumInt64 {
+		t.Fatalf("TryInt64() = (%d, %v)", value, err)
 	}
 }
 

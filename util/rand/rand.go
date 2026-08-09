@@ -1,3 +1,4 @@
+// Package rand 提供密码学安全的随机值生成工具。
 package rand
 
 import (
@@ -23,22 +24,22 @@ func String(length int) string {
 	return StringFrom(AlphaNumeric, length)
 }
 
-// Numeric 生成指定长度的随机数字字符串
+// NumericString 生成指定长度的随机数字字符串。
 func NumericString(length int) string {
 	return StringFrom(Numeric, length)
 }
 
-// Alpha 生成指定长度的随机字母字符串
+// AlphaString 生成指定长度的随机字母字符串。
 func AlphaString(length int) string {
 	return StringFrom(Alpha, length)
 }
 
-// Lower 生成指定长度的小写字母字符串
+// LowerString 生成指定长度的小写字母字符串。
 func LowerString(length int) string {
 	return StringFrom(AlphaLower, length)
 }
 
-// Upper 生成指定长度的大写字母字符串
+// UpperString 生成指定长度的大写字母字符串。
 func UpperString(length int) string {
 	return StringFrom(AlphaUpper, length)
 }
@@ -60,32 +61,42 @@ func StringFrom(charset string, length int) string {
 
 // Int 生成指定范围的随机整数 [min, max)
 // 使用 crypto/rand 生成加密安全的随机数
-func Int(min, max int) int {
-	if min >= max {
-		return min
+func Int(lower, upper int) int {
+	if lower >= upper {
+		return lower
 	}
 
-	diff := max - min
-	num, err := rand.Int(rand.Reader, big.NewInt(int64(diff)))
+	num, err := randomInt64(int64(lower), int64(upper))
 	if err != nil {
 		panic("crypto/rand.Int failed: " + err.Error())
 	}
-	return int(num.Int64()) + min
+	return int(num)
 }
 
 // Int64 生成指定范围的随机 int64 [min, max)
 // 使用 crypto/rand 生成加密安全的随机数
-func Int64(min, max int64) int64 {
-	if min >= max {
-		return min
+func Int64(lower, upper int64) int64 {
+	if lower >= upper {
+		return lower
 	}
 
-	diff := max - min
-	num, err := rand.Int(rand.Reader, big.NewInt(diff))
+	num, err := randomInt64(lower, upper)
 	if err != nil {
 		panic("crypto/rand.Int failed: " + err.Error())
 	}
-	return num.Int64() + min
+	return num
+}
+
+// randomInt64 在 big.Int 上计算区间宽度，避免有符号整数减法溢出。
+func randomInt64(lower, upper int64) (int64, error) {
+	lowerValue := big.NewInt(lower)
+	rangeSize := new(big.Int).Sub(big.NewInt(upper), lowerValue)
+	num, err := rand.Int(rand.Reader, rangeSize)
+	if err != nil {
+		return lower, err
+	}
+
+	return num.Add(num, lowerValue).Int64(), nil
 }
 
 // Bytes 生成指定长度的随机字节数组

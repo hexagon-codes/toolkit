@@ -152,6 +152,28 @@ func TestInt64(t *testing.T) {
 	}
 }
 
+func TestIntSupportsFullMachineRange(t *testing.T) {
+	maximum := int(^uint(0) >> 1)
+	minimum := -maximum - 1
+	for range 32 {
+		value := Int(minimum, maximum)
+		if value < minimum || value >= maximum {
+			t.Fatalf("Int() = %d outside [%d, %d)", value, minimum, maximum)
+		}
+	}
+}
+
+func TestInt64SupportsFullRange(t *testing.T) {
+	const minimum = -1 << 63
+	const maximum = 1<<63 - 1
+	for range 32 {
+		value := Int64(minimum, maximum)
+		if value < minimum || value >= maximum {
+			t.Fatalf("Int64() = %d outside [%d, %d)", value, int64(minimum), int64(maximum))
+		}
+	}
+}
+
 func TestBytes(t *testing.T) {
 	length := 32
 	bytes := Bytes(length)
