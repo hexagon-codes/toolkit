@@ -12,16 +12,20 @@
 package blobstore
 
 import (
+	"bytes"
 	"context"
 	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hexagon-codes/toolkit/net/httpx"
@@ -31,22 +35,54 @@ import (
 type Store struct {
 	root  string       // blob 根目录的绝对路径
 	httpc *http.Client // 用于下载远程 URL
+	ttlMu sync.RWMutex // 保证 TTL 更新、读取与清理在单个 Store 内线性化
 }
+
+const maxRemoteBlobBytes int64 = 200 << 20
+
+var errRemoteBlobTooLarge = errors.New("blobstore: remote blob exceeds 200 MiB limit")
 
 // NewStore 创建存储；root 是 blob 根目录。会自动 mkdir。
 func NewStore(root string) (*Store, error) {
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		return nil, fmt.Errorf("mkdir %s: %w", root, err)
+	if strings.TrimSpace(root) == "" {
+		return nil, fmt.Errorf("blobstore: storage root must not be empty")
 	}
 	rootAbs, err := filepath.Abs(root)
 	if err != nil {
-		return nil, fmt.Errorf("resolve root %s: %w", root, err)
+		return nil, fmt.Errorf("resolve blob root %s: %w", root, err)
+	}
+	if isFilesystemRoot(rootAbs) {
+		return nil, fmt.Errorf("blobstore: storage root must not be a filesystem root")
+	}
+	if mkdirErr := os.MkdirAll(rootAbs, 0o700); mkdirErr != nil {
+		return nil, fmt.Errorf("create blob root %s: %w", rootAbs, mkdirErr)
+	}
+	// 解析最终路径，避免通过指向卷根目录的符号链接绕过根目录检查。
+	resolvedRoot, err := filepath.EvalSymlinks(rootAbs)
+	if err != nil {
+		return nil, fmt.Errorf("resolve blob root symlinks %s: %w", rootAbs, err)
+	}
+	if isFilesystemRoot(resolvedRoot) {
+		return nil, fmt.Errorf("blobstore: storage root must not resolve to a filesystem root")
+	}
+	if chmodErr := os.Chmod(resolvedRoot, 0o700); chmodErr != nil {
+		return nil, fmt.Errorf("secure blob root permissions %s: %w", resolvedRoot, chmodErr)
+	}
+	httpClient, err := httpx.NewRawClient(httpx.WithRawTimeout(5 * time.Minute))
+	if err != nil {
+		return nil, fmt.Errorf("create blob download client: %w", err)
 	}
 	return &Store{
-		root: rootAbs,
+		root: resolvedRoot,
 		// 远程下载可能较慢（如视频）
-		httpc: httpx.RawClient(httpx.WithRawTimeout(5 * time.Minute)),
+		httpc: httpClient,
 	}, nil
+}
+
+func isFilesystemRoot(candidate string) bool {
+	clean := filepath.Clean(candidate)
+	volume := filepath.VolumeName(clean)
+	return clean == volume+string(os.PathSeparator)
 }
 
 // Root 返回存储根目录（用于 file server 配置）。
@@ -83,14 +119,16 @@ func (s *Store) SaveBytes(data []byte, ext string) (string, error) {
 		}
 	}()
 
-	// 已存在（同内容）则跳过写入
-	if _, err = root.Stat(relPath); err == nil {
+	// 仅在既有文件内容确实匹配地址哈希时复用，损坏文件必须被替换。
+	matches, err := storedBlobMatches(root, relPath, sum[:])
+	if err != nil {
+		return "", fmt.Errorf("verify stored blob: %w", err)
+	}
+	if matches {
 		return filepath.ToSlash(relPath), nil
-	} else if !os.IsNotExist(err) {
-		return "", fmt.Errorf("stat blob: %w", err)
 	}
 
-	if err = root.MkdirAll(subdir, 0o755); err != nil {
+	if err = root.MkdirAll(subdir, 0o700); err != nil {
 		return "", fmt.Errorf("mkdir: %w", err)
 	}
 	// 原子写入：唯一 tmp + rename，避免并发写入者（或多进程共享目录）互相覆盖
@@ -112,14 +150,20 @@ func (s *Store) SaveBytes(data []byte, ext string) (string, error) {
 		cleanupTmp()
 		return "", fmt.Errorf("write tmp %s: %w", tmpPath, err)
 	}
+	if err := tmp.Sync(); err != nil {
+		if closeErr := tmp.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+		cleanupTmp()
+		return "", fmt.Errorf("sync tmp %s: %w", tmpPath, err)
+	}
 	if err := tmp.Close(); err != nil {
 		cleanupTmp()
 		return "", fmt.Errorf("close tmp %s: %w", tmpPath, err)
 	}
-	// Rename 成功即视为落盘；若另一并发写者先完成，此处 Rename 覆盖，内容等价（SHA-256 一致）
+	// Rename 成功即视为原子替换；失败时只接受另一个写入者已经落下相同内容。
 	if err := root.Rename(tmpPath, relPath); err != nil {
-		// Windows 不允许 Rename 覆盖已存在目标；并发写入同一内容时目标等价。
-		if _, statErr := root.Stat(relPath); statErr == nil {
+		if matches, matchErr := storedBlobMatches(root, relPath, sum[:]); matchErr == nil && matches {
 			cleanupTmp()
 			return filepath.ToSlash(relPath), nil
 		}
@@ -127,6 +171,30 @@ func (s *Store) SaveBytes(data []byte, ext string) (string, error) {
 		return "", fmt.Errorf("rename %s→%s: %w", tmpPath, relPath, err)
 	}
 	return filepath.ToSlash(relPath), nil
+}
+
+func storedBlobMatches(root *os.Root, relPath string, expectedHash []byte) (_ bool, err error) {
+	info, err := root.Lstat(relPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !info.Mode().IsRegular() {
+		return false, nil
+	}
+
+	file, err := root.Open(relPath)
+	if err != nil {
+		return false, err
+	}
+	defer func() { err = errors.Join(err, file.Close()) }()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return false, err
+	}
+	return bytes.Equal(hash.Sum(nil), expectedHash), nil
 }
 
 func createRootTemp(root *os.Root, dir, prefix string) (*os.File, string, error) {
@@ -176,9 +244,27 @@ func containedPath(root, relPath string) (string, error) {
 	return abs, nil
 }
 
+// normalizeStorePath 校验并转换存储 API 使用的规范相对路径。
+func normalizeStorePath(relPath string) (string, error) {
+	if relPath == "" || strings.ContainsRune(relPath, '\x00') || strings.ContainsRune(relPath, '\\') {
+		return "", fmt.Errorf("blobstore: invalid relative path %q", relPath)
+	}
+	clean := path.Clean(relPath)
+	if clean == "." || clean != relPath || path.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("blobstore: invalid relative path %q", relPath)
+	}
+	if len(clean) >= 2 && clean[1] == ':' && ((clean[0] >= 'a' && clean[0] <= 'z') || (clean[0] >= 'A' && clean[0] <= 'Z')) {
+		return "", fmt.Errorf("blobstore: invalid relative path %q", relPath)
+	}
+	return filepath.FromSlash(clean), nil
+}
+
 // SaveFromURL 下载远程 URL 并落盘，返回相对路径。
 // 用于内容只在临时过期 URL 上可得的场景（如视频 Provider 给的 24h 过期 URL）。
 func (s *Store) SaveFromURL(ctx context.Context, url, ext string) (string, error) {
+	if isNilInterface(ctx) {
+		return "", fmt.Errorf("blobstore: context must not be nil")
+	}
 	if url == "" {
 		return "", fmt.Errorf("empty url")
 	}
@@ -201,20 +287,49 @@ func (s *Store) SaveFromURL(ctx context.Context, url, ext string) (string, error
 	if resp.StatusCode >= 400 {
 		return "", fmt.Errorf("download HTTP %d: %s", resp.StatusCode, url)
 	}
-	// 限制 200MB（普通 5-10s 视频不超过 50MB）
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 200<<20))
-	if err != nil {
-		return "", fmt.Errorf("read body: %w", err)
+	if resp.ContentLength > maxRemoteBlobBytes {
+		return "", errRemoteBlobTooLarge
 	}
-	return s.SaveBytes(body, ext)
+	// 流式限制下载大小，并额外探测一个字节，禁止把超限响应静默截断后落盘。
+	return s.SaveStream(rctx, newMaxBytesReader(resp.Body, maxRemoteBlobBytes), ext)
+}
+
+type maxBytesReader struct {
+	reader    io.Reader
+	remaining int64
+}
+
+func newMaxBytesReader(reader io.Reader, maximum int64) io.Reader {
+	return &maxBytesReader{reader: reader, remaining: maximum}
+}
+
+func (r *maxBytesReader) Read(buffer []byte) (int, error) {
+	if len(buffer) == 0 {
+		return 0, nil
+	}
+	if r.remaining > 0 {
+		if int64(len(buffer)) > r.remaining {
+			buffer = buffer[:r.remaining]
+		}
+		n, err := r.reader.Read(buffer)
+		r.remaining -= int64(n)
+		return n, err
+	}
+
+	var probe [1]byte
+	n, err := r.reader.Read(probe[:])
+	if n > 0 {
+		return 0, errRemoteBlobTooLarge
+	}
+	return 0, err
 }
 
 // Open 安全打开存储文件（防路径穿越）。
 //
 // relPath 必须是 SaveBytes 返回的相对路径形式（forward slash + 子目录/哈希名）。
 func (s *Store) Open(relPath string) (*os.File, error) {
-	relPath = filepath.FromSlash(strings.TrimLeft(relPath, "/"))
-	if _, err := containedPath(s.root, relPath); err != nil {
+	relPath, err := normalizeStorePath(relPath)
+	if err != nil {
 		return nil, err
 	}
 	root, err := os.OpenRoot(s.root)
@@ -222,8 +337,18 @@ func (s *Store) Open(relPath string) (*os.File, error) {
 		return nil, fmt.Errorf("open blob root: %w", err)
 	}
 	f, err := root.Open(relPath)
-	if closeErr := root.Close(); closeErr != nil && err == nil {
-		err = closeErr
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("open blob: %w", err), root.Close())
 	}
-	return f, err
+	info, err := f.Stat()
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("stat blob: %w", err), f.Close(), root.Close())
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.Join(errors.New("blobstore: blob is not a regular file"), f.Close(), root.Close())
+	}
+	if err := root.Close(); err != nil {
+		return nil, errors.Join(fmt.Errorf("close blob root: %w", err), f.Close())
+	}
+	return f, nil
 }

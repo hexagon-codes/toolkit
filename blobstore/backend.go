@@ -11,10 +11,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"time"
 )
 
@@ -43,6 +45,12 @@ var _ Blobstore = (*Store)(nil)
 // 内容读进内存：边读边写临时文件、同时计算哈希，读完后按哈希 rename 到最终路径。
 // 适合视频等大文件。ext 不带点；空内容返回错误；ctx 取消会中断读取。
 func (s *Store) SaveStream(ctx context.Context, r io.Reader, ext string) (string, error) {
+	if isNilInterface(ctx) {
+		return "", errors.New("blobstore: context must not be nil")
+	}
+	if isNilInterface(r) {
+		return "", errors.New("blobstore: reader must not be nil")
+	}
 	var err error
 	ext, err = normalizeExtension(ext)
 	if err != nil {
@@ -79,16 +87,28 @@ func (s *Store) SaveStream(ctx context.Context, r io.Reader, ext string) (string
 		cleanupTmp()
 		return "", fmt.Errorf("stream copy: %w", err)
 	}
+	if n == 0 {
+		emptyErr := errors.New("empty data")
+		if closeErr := tmp.Close(); closeErr != nil {
+			emptyErr = errors.Join(emptyErr, closeErr)
+		}
+		cleanupTmp()
+		return "", emptyErr
+	}
+	if err := tmp.Sync(); err != nil {
+		if closeErr := tmp.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+		cleanupTmp()
+		return "", fmt.Errorf("sync tmp %s: %w", tmpPath, err)
+	}
 	if err := tmp.Close(); err != nil {
 		cleanupTmp()
 		return "", fmt.Errorf("close tmp %s: %w", tmpPath, err)
 	}
-	if n == 0 {
-		cleanupTmp()
-		return "", fmt.Errorf("empty data")
-	}
 
-	hash := hex.EncodeToString(h.Sum(nil))
+	expectedHash := h.Sum(nil)
+	hash := hex.EncodeToString(expectedHash)
 	subdir := time.Now().Format("200601") // YYYYMM
 	relPath := filepath.Join(subdir, hash+"."+ext)
 	if _, err := containedPath(s.root, relPath); err != nil {
@@ -96,20 +116,22 @@ func (s *Store) SaveStream(ctx context.Context, r io.Reader, ext string) (string
 		return "", err
 	}
 
-	// 同内容已存在则丢弃临时文件、复用既有。
-	if _, statErr := root.Stat(relPath); statErr == nil {
+	// 仅在既有文件内容确实匹配地址哈希时复用，损坏文件必须被替换。
+	matches, matchErr := storedBlobMatches(root, relPath, expectedHash)
+	if matchErr != nil {
+		cleanupTmp()
+		return "", fmt.Errorf("verify stored blob: %w", matchErr)
+	}
+	if matches {
 		cleanupTmp()
 		return filepath.ToSlash(relPath), nil
-	} else if !os.IsNotExist(statErr) {
-		cleanupTmp()
-		return "", fmt.Errorf("stat blob: %w", statErr)
 	}
-	if err := root.MkdirAll(subdir, 0o755); err != nil {
+	if err := root.MkdirAll(subdir, 0o700); err != nil {
 		cleanupTmp()
 		return "", fmt.Errorf("mkdir: %w", err)
 	}
 	if err := root.Rename(tmpPath, relPath); err != nil {
-		if _, statErr := root.Stat(relPath); statErr == nil {
+		if matches, matchErr := storedBlobMatches(root, relPath, expectedHash); matchErr == nil && matches {
 			cleanupTmp()
 			return filepath.ToSlash(relPath), nil
 		}
@@ -117,6 +139,19 @@ func (s *Store) SaveStream(ctx context.Context, r io.Reader, ext string) (string
 		return "", fmt.Errorf("rename %s→%s: %w", tmpPath, relPath, err)
 	}
 	return filepath.ToSlash(relPath), nil
+}
+
+func isNilInterface(value any) bool {
+	if value == nil {
+		return true
+	}
+	dynamic := reflect.ValueOf(value)
+	switch dynamic.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return dynamic.IsNil()
+	default:
+		return false
+	}
 }
 
 // OpenReader 流式读取已保存的内容，返回 io.ReadCloser（带路径穿越防护）。

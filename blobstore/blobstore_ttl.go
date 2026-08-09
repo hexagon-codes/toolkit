@@ -1,8 +1,11 @@
 package blobstore
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -10,117 +13,231 @@ import (
 	"time"
 )
 
-// ttlSuffix 是 TTL sidecar 文件后缀：blob 旁存 "<blob>.ttl"，内容为过期时刻 UnixNano。
-//
-// 为何用 sidecar 而非中央索引：blobstore 是内容寻址 + 原子写 + 多进程共享目录的无状态
-// 设计，per-blob sidecar 同样无状态、原子、可并发，且 Purge 只需遍历不需加载全量索引。
-const ttlSuffix = ".ttl"
+const (
+	// ttlSuffix 是 TTL 元数据文件后缀，内容为过期时刻的 UnixNano。
+	ttlSuffix = ".blobstore.ttl"
+	// maxTTLMetadataBytes 限制元数据大小，避免异常文件造成无界内存占用。
+	maxTTLMetadataBytes = 64
+)
 
-// SetTTL 为已落盘的相对路径设置存活时长；ttl<=0 表示清除过期（永不过期）。
+// SetTTL 为已落盘的相对路径设置存活时长；ttl<=0 表示清除过期时间。
 //
-// 注意：blobstore 内容寻址会让相同内容共享同一相对路径，故 TTL 以"路径"为粒度
-// （同内容的多个逻辑产物共享一个过期时间，取最后一次 SetTTL）。
-func (s *Store) SetTTL(relPath string, ttl time.Duration) error {
-	blobPath, err := s.safeJoin(relPath)
+// 相同内容共享同一相对路径，因此 TTL 也以路径为粒度，最后一次设置生效。
+func (s *Store) SetTTL(relPath string, ttl time.Duration) (err error) {
+	s.ttlMu.Lock()
+	defer s.ttlMu.Unlock()
+	lock, err := s.acquireTTLFileLock(true)
 	if err != nil {
 		return err
 	}
-	sidecar := blobPath + ttlSuffix
+	defer func() { err = errors.Join(err, lock.close()) }()
+	return s.setTTL(relPath, ttl)
+}
+
+func (s *Store) setTTL(relPath string, ttl time.Duration) (err error) {
+	relPath, err = normalizeStorePath(relPath)
+	if err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(s.root)
+	if err != nil {
+		return fmt.Errorf("blobstore: open root: %w", err)
+	}
+	defer func() { err = errors.Join(err, root.Close()) }()
+
+	sidecarPath := relPath + ttlSuffix
 	if ttl <= 0 {
-		if err := os.Remove(sidecar); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("blobstore: clear ttl: %w", err)
+		if removeErr := root.Remove(sidecarPath); removeErr != nil && !os.IsNotExist(removeErr) {
+			return fmt.Errorf("blobstore: clear ttl: %w", removeErr)
 		}
 		return nil
 	}
-	expiry := time.Now().Add(ttl).UnixNano()
-	if err := os.WriteFile(sidecar, []byte(strconv.FormatInt(expiry, 10)), 0o644); err != nil {
-		return fmt.Errorf("blobstore: write ttl: %w", err)
+
+	info, err := root.Stat(relPath)
+	if err != nil {
+		return fmt.Errorf("blobstore: stat blob: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("blobstore: ttl target is not a regular file")
+	}
+
+	expiryTime := time.Now().Add(ttl)
+	if expiryTime.After(time.Unix(0, math.MaxInt64)) {
+		return fmt.Errorf("blobstore: ttl expiry exceeds UnixNano range")
+	}
+	expiry := strconv.FormatInt(expiryTime.UnixNano(), 10)
+	if writeErr := writeTTLMetadata(root, sidecarPath, []byte(expiry)); writeErr != nil {
+		return fmt.Errorf("blobstore: write ttl: %w", writeErr)
 	}
 	return nil
 }
 
-// SaveBytesWithTTL 落盘并设置存活时长，返回相对路径。ttl<=0 等价于 SaveBytes（不过期）。
-func (s *Store) SaveBytesWithTTL(data []byte, ext string, ttl time.Duration) (string, error) {
-	relPath, err := s.SaveBytes(data, ext)
+func writeTTLMetadata(root *os.Root, sidecarPath string, data []byte) (err error) {
+	dir := filepath.Dir(sidecarPath)
+	tmp, tmpPath, err := createRootTemp(root, dir, filepath.Base(sidecarPath)+".tmp.")
+	if err != nil {
+		return fmt.Errorf("create temporary ttl metadata: %w", err)
+	}
+	tmpOpen := true
+	defer func() {
+		if tmpOpen {
+			err = errors.Join(err, tmp.Close())
+		}
+		if removeErr := root.Remove(tmpPath); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
+			err = errors.Join(err, fmt.Errorf("remove temporary ttl metadata: %w", removeErr))
+		}
+	}()
+
+	if _, err := tmp.Write(data); err != nil {
+		return fmt.Errorf("write temporary ttl metadata: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return fmt.Errorf("sync temporary ttl metadata: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		tmpOpen = false
+		return fmt.Errorf("close temporary ttl metadata: %w", err)
+	}
+	tmpOpen = false
+	if err := root.Rename(tmpPath, sidecarPath); err != nil {
+		return fmt.Errorf("replace ttl metadata: %w", err)
+	}
+	return nil
+}
+
+// SaveBytesWithTTL 落盘并设置存活时长，返回相对路径。
+func (s *Store) SaveBytesWithTTL(data []byte, ext string, ttl time.Duration) (relPath string, err error) {
+	s.ttlMu.Lock()
+	defer s.ttlMu.Unlock()
+	lock, err := s.acquireTTLFileLock(true)
 	if err != nil {
 		return "", err
 	}
-	if ttl > 0 {
-		if err := s.SetTTL(relPath, ttl); err != nil {
-			return relPath, err
-		}
+	defer func() { err = errors.Join(err, lock.close()) }()
+
+	relPath, err = s.SaveBytes(data, ext)
+	if err != nil {
+		return "", err
+	}
+	if err := s.setTTL(relPath, ttl); err != nil {
+		return relPath, err
 	}
 	return relPath, nil
 }
 
-// ExpiresAt 返回相对路径的过期时刻；ok=false 表示无 TTL（永不过期）。
+// ExpiresAt 返回相对路径的过期时刻；ok=false 表示未设置 TTL。
 func (s *Store) ExpiresAt(relPath string) (t time.Time, ok bool, err error) {
-	blobPath, err := s.safeJoin(relPath)
+	s.ttlMu.RLock()
+	defer s.ttlMu.RUnlock()
+	lock, err := s.acquireTTLFileLock(false)
 	if err != nil {
 		return time.Time{}, false, err
 	}
-	b, err := os.ReadFile(blobPath + ttlSuffix)
+	defer func() { err = errors.Join(err, lock.close()) }()
+
+	relPath, err = normalizeStorePath(relPath)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	root, err := os.OpenRoot(s.root)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("blobstore: open root: %w", err)
+	}
+	defer func() { err = errors.Join(err, root.Close()) }()
+
+	expiry, err := readTTL(root, relPath+ttlSuffix)
 	if os.IsNotExist(err) {
 		return time.Time{}, false, nil
 	}
 	if err != nil {
 		return time.Time{}, false, fmt.Errorf("blobstore: read ttl: %w", err)
 	}
-	ns, perr := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
-	if perr != nil {
-		return time.Time{}, false, fmt.Errorf("blobstore: parse ttl: %w", perr)
-	}
-	return time.Unix(0, ns), true, nil
+	return expiry, true, nil
 }
 
-// Purge 删除所有在 now 时刻已过期的 blob（及其 TTL sidecar），返回删除的 blob 数。
+// Purge 删除所有在 now 时刻已过期的 blob 及其 TTL 元数据，返回删除的 blob 数。
 //
-// 无 sidecar 的 blob（未设 TTL）永不删除。适合后台定时清理或启动时一次性清理。
-func (s *Store) Purge(now time.Time) (int, error) {
-	purged := 0
-	walkErr := filepath.WalkDir(s.root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
+// 未设置 TTL 的 blob 永不删除。损坏或不可读的元数据会汇总为错误，其他条目仍会继续清理。
+func (s *Store) Purge(now time.Time) (purged int, err error) {
+	s.ttlMu.Lock()
+	defer s.ttlMu.Unlock()
+	lock, err := s.acquireTTLFileLock(true)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { err = errors.Join(err, lock.close()) }()
+
+	root, err := os.OpenRoot(s.root)
+	if err != nil {
+		return 0, fmt.Errorf("blobstore: open root: %w", err)
+	}
+	defer func() { err = errors.Join(err, root.Close()) }()
+
+	var purgeErr error
+	walkErr := fs.WalkDir(root.FS(), ".", func(entryPath string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
-		if d.IsDir() || !strings.HasSuffix(path, ttlSuffix) {
+		if entry.IsDir() || !strings.HasSuffix(entryPath, ttlSuffix) {
 			return nil
 		}
-		b, rerr := os.ReadFile(path)
-		if rerr != nil {
-			return nil // sidecar 读失败则跳过，不阻断清理
-		}
-		ns, perr := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
-		if perr != nil {
+
+		sidecarPath, pathErr := normalizeStorePath(entryPath)
+		if pathErr != nil {
+			purgeErr = errors.Join(purgeErr, pathErr)
 			return nil
 		}
-		if now.UnixNano() < ns {
-			return nil // 未过期
+		expiry, readErr := readTTL(root, sidecarPath)
+		if os.IsNotExist(readErr) {
+			return nil
 		}
-		blobPath := strings.TrimSuffix(path, ttlSuffix)
-		if rmErr := os.Remove(blobPath); rmErr != nil && !os.IsNotExist(rmErr) {
-			return fmt.Errorf("blobstore: purge blob %s: %w", blobPath, rmErr)
+		if readErr != nil {
+			purgeErr = errors.Join(purgeErr, fmt.Errorf("blobstore: read ttl %s: %w", entryPath, readErr))
+			return nil
 		}
-		if rmErr := os.Remove(path); rmErr != nil && !os.IsNotExist(rmErr) {
-			return fmt.Errorf("blobstore: purge sidecar %s: %w", path, rmErr)
-		} // 删 sidecar，失败不阻断
-		purged++
+		if now.Before(expiry) {
+			return nil
+		}
+
+		blobPath := strings.TrimSuffix(sidecarPath, ttlSuffix)
+		removedBlob := false
+		if removeErr := root.Remove(blobPath); removeErr == nil {
+			removedBlob = true
+		} else if !os.IsNotExist(removeErr) {
+			purgeErr = errors.Join(purgeErr, fmt.Errorf("blobstore: purge blob %s: %w", entryPath, removeErr))
+			return nil
+		}
+		if removeErr := root.Remove(sidecarPath); removeErr != nil && !os.IsNotExist(removeErr) {
+			purgeErr = errors.Join(purgeErr, fmt.Errorf("blobstore: purge ttl %s: %w", entryPath, removeErr))
+		}
+		if removedBlob {
+			purged++
+		}
 		return nil
 	})
 	if walkErr != nil {
-		return purged, fmt.Errorf("blobstore: purge walk: %w", walkErr)
+		purgeErr = errors.Join(purgeErr, fmt.Errorf("blobstore: purge walk: %w", walkErr))
 	}
-	return purged, nil
+	return purged, purgeErr
 }
 
-// safeJoin 把相对路径安全拼接到 root，防路径穿越（与 Open 同款防护）。
-func (s *Store) safeJoin(relPath string) (string, error) {
-	clean := filepath.Clean(relPath)
-	if strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {
-		return "", fmt.Errorf("blobstore: illegal relPath %q", relPath)
+func readTTL(root *os.Root, sidecarPath string) (_ time.Time, err error) {
+	file, err := root.Open(filepath.FromSlash(sidecarPath))
+	if err != nil {
+		return time.Time{}, err
 	}
-	full := filepath.Join(s.root, clean)
-	if !strings.HasPrefix(full, filepath.Clean(s.root)+string(os.PathSeparator)) && full != filepath.Clean(s.root) {
-		return "", fmt.Errorf("blobstore: relPath escapes root: %q", relPath)
+	defer func() { err = errors.Join(err, file.Close()) }()
+
+	data, err := io.ReadAll(io.LimitReader(file, maxTTLMetadataBytes+1))
+	if err != nil {
+		return time.Time{}, err
 	}
-	return full, nil
+	if len(data) > maxTTLMetadataBytes {
+		return time.Time{}, fmt.Errorf("ttl metadata exceeds %d bytes", maxTTLMetadataBytes)
+	}
+	nanoseconds, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse ttl: %w", err)
+	}
+	return time.Unix(0, nanoseconds), nil
 }

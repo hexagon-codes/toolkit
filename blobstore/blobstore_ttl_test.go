@@ -1,6 +1,9 @@
 package blobstore
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -72,5 +75,88 @@ func TestBlobstoreTTL_ExpiresAt(t *testing.T) {
 	}
 	if _, ok, _ := s.ExpiresAt(rel); ok {
 		t.Error("清除 TTL 后应 ok=false")
+	}
+}
+
+func TestBlobstoreTTL_RejectsEscapingPathsAndSymlinks(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "store")
+	s, err := NewStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, relPath := range []string{
+		"../outside",
+		"nested/../../outside",
+		"/absolute",
+		`C:/windows/path`,
+		`nested\windows\path`,
+	} {
+		t.Run(relPath, func(t *testing.T) {
+			if setErr := s.SetTTL(relPath, time.Hour); setErr == nil {
+				t.Fatalf("SetTTL(%q) 未拒绝越界路径", relPath)
+			}
+		})
+	}
+
+	outside := filepath.Join(parent, "outside")
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "blob"), []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "link")); err != nil {
+		t.Skipf("当前平台无法创建符号链接: %v", err)
+	}
+	if err := s.SetTTL("link/blob", time.Hour); err == nil {
+		t.Fatal("SetTTL 跟随了指向存储根目录外的符号链接")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "blob.ttl")); !os.IsNotExist(err) {
+		t.Fatalf("SetTTL 在存储根目录外创建了元数据: %v", err)
+	}
+}
+
+func TestBlobstoreTTL_RequiresExistingBlob(t *testing.T) {
+	s := newTestStore(t)
+	relPath, err := s.SaveBytes([]byte("existing"), "bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.ToSlash(filepath.Join(filepath.Dir(relPath), "missing.bin"))
+	if err := s.SetTTL(missing, time.Hour); err == nil {
+		t.Fatal("SetTTL 接受了不存在的 blob")
+	}
+}
+
+func TestBlobstore_DefaultPermissionsAreOwnerOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows 不提供 POSIX 权限位语义")
+	}
+
+	root := filepath.Join(t.TempDir(), "store")
+	s, err := NewStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relPath, err := s.SaveBytesWithTTL([]byte("private"), "bin", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for path, want := range map[string]os.FileMode{
+		root: 0o700,
+		filepath.Dir(filepath.Join(root, relPath)): 0o700,
+		filepath.Join(root, relPath):               0o600,
+		filepath.Join(root, relPath) + ttlSuffix:   0o600,
+	} {
+		info, statErr := os.Stat(path)
+		if statErr != nil {
+			t.Fatalf("Stat(%q): %v", path, statErr)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Errorf("%s 权限 = %04o, 期望 %04o", path, got, want)
+		}
 	}
 }
