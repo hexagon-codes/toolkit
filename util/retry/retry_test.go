@@ -3,6 +3,7 @@ package retry
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 	"time"
 )
@@ -148,7 +149,7 @@ func TestDo_RetryIf(t *testing.T) {
 	err := Do(func() error {
 		attempts++
 		return errSpecial
-	}, Attempts(5), RetryIf(func(err error) bool {
+	}, Attempts(5), If(func(err error) bool {
 		// 只重试 errTest，不重试 errSpecial
 		return errors.Is(err, errTest)
 	}), Delay(10*time.Millisecond))
@@ -160,6 +161,40 @@ func TestDo_RetryIf(t *testing.T) {
 	// 因为 errSpecial 不满足重试条件，所以只尝试1次
 	if attempts != 1 {
 		t.Errorf("expected 1 attempt, got %d", attempts)
+	}
+}
+
+func TestDoRejectsInvalidConfiguration(t *testing.T) {
+	tests := []struct {
+		name   string
+		option Option
+	}{
+		{name: "attempts", option: Attempts(0)},
+		{name: "delay", option: Delay(-time.Second)},
+		{name: "max delay", option: MaxDelay(0)},
+		{name: "multiplier", option: Multiplier(0)},
+		{name: "predicate", option: If(nil)},
+		{name: "jitter", option: WithJitter(2)},
+		{name: "jitter type", option: WithJitterType(JitterType(99))},
+		{name: "nil option", option: nil},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := Do(func() error { return nil }, test.option); !errors.Is(err, ErrInvalidConfig) {
+				t.Fatalf("Do() error = %v, want ErrInvalidConfig", err)
+			}
+		})
+	}
+}
+
+func TestDoExhaustedErrorIncludesLastFailure(t *testing.T) {
+	lastFailure := errors.New("upstream failed")
+	err := Do(
+		func() error { return lastFailure },
+		Attempts(1),
+	)
+	if !errors.Is(err, ErrMaxAttemptsReached) || !errors.Is(err, lastFailure) {
+		t.Fatalf("Do() error chain = %v", err)
 	}
 }
 
@@ -235,6 +270,29 @@ func TestDo_MaxDelay(t *testing.T) {
 	// 但 MaxDelay 限制为 50ms
 	if attempts != 5 {
 		t.Errorf("expected 5 attempts, got %d", attempts)
+	}
+}
+
+func TestCalculateDelayCapsRetryAfterAtMaxDelay(t *testing.T) {
+	resp := &http.Response{Header: http.Header{}}
+	resp.Header.Set("Retry-After", "120")
+	config := &Config{
+		MaxDelay:        5 * time.Second,
+		RetryAfterAware: true,
+		LastError:       NewHTTPError(resp),
+	}
+
+	if got := calculateDelay(1, config); got != config.MaxDelay {
+		t.Fatalf("calculateDelay() = %v, want %v", got, config.MaxDelay)
+	}
+}
+
+func TestLinearBackoffCapsBeforeDurationMultiplicationOverflow(t *testing.T) {
+	config := &Config{Delay: time.Second, MaxDelay: 5 * time.Second}
+	maximumInt := int(^uint(0) >> 1)
+
+	if got := LinearBackoff(maximumInt, config); got != config.MaxDelay {
+		t.Fatalf("LinearBackoff() = %v, want %v", got, config.MaxDelay)
 	}
 }
 
@@ -317,6 +375,48 @@ func TestFixedDelay_Function(t *testing.T) {
 		if result != time.Second {
 			t.Errorf("attempt %d: expected %v, got %v", attempt, time.Second, result)
 		}
+	}
+}
+
+func TestCalculateDelayAppliesJitterAfterConfiguredBackoff(t *testing.T) {
+	config := &Config{
+		Delay:       time.Nanosecond,
+		MaxDelay:    time.Second,
+		Multiplier:  1,
+		DelayFunc:   FixedDelay,
+		JitterType:  FullJitter,
+		RetryIf:     func(error) bool { return true },
+		MaxAttempts: 2,
+	}
+
+	// 一纳秒乘以 [0, 1) 的随机数必然向下取整为零，可稳定证明抖动已生效。
+	if got := calculateDelay(1, config); got != 0 {
+		t.Fatalf("calculateDelay() = %v, want 0", got)
+	}
+}
+
+func TestExponentialBackoffPreservesZeroDelay(t *testing.T) {
+	config := &Config{
+		Delay:      0,
+		MaxDelay:   time.Second,
+		Multiplier: 2,
+	}
+
+	if got := ExponentialBackoff(32, config); got != 0 {
+		t.Fatalf("ExponentialBackoff() = %v, want 0", got)
+	}
+}
+
+func TestPresetStrategiesReturnIndependentSlices(t *testing.T) {
+	first := OpenAIStrategy()
+	first[0] = Attempts(1)
+
+	config, err := newConfig(OpenAIStrategy()...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.MaxAttempts != 5 {
+		t.Fatalf("OpenAIStrategy() MaxAttempts = %d, want 5", config.MaxAttempts)
 	}
 }
 

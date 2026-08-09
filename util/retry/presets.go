@@ -12,15 +12,17 @@ import "time"
 // - 30% 抖动
 // - 感知 Retry-After 头
 // - 重试 429、5xx 和网络错误
-var OpenAIStrategy = []Option{
-	Attempts(5),
-	Delay(1 * time.Second),
-	MaxDelay(60 * time.Second),
-	Multiplier(2.0),
-	DelayType(ExponentialBackoff),
-	WithJitter(0.3),
-	WithRetryAfterAware(),
-	RetryIf(IsRetryableHTTPError),
+func OpenAIStrategy() []Option {
+	return []Option{
+		Attempts(5),
+		Delay(1 * time.Second),
+		MaxDelay(60 * time.Second),
+		Multiplier(2.0),
+		DelayType(ExponentialBackoff),
+		WithJitter(0.3),
+		WithRetryAfterAware(),
+		If(IsRetryableHTTPError),
+	}
 }
 
 // ClaudeStrategy Anthropic Claude 推荐重试策略
@@ -29,14 +31,16 @@ var OpenAIStrategy = []Option{
 // - 最大延迟 30s
 // - 25% 抖动
 // - 重试 429、5xx 和网络错误
-var ClaudeStrategy = []Option{
-	Attempts(4),
-	Delay(2 * time.Second),
-	MaxDelay(30 * time.Second),
-	Multiplier(2.0),
-	DelayType(ExponentialBackoff),
-	WithJitter(0.25),
-	RetryIf(IsRetryableHTTPError),
+func ClaudeStrategy() []Option {
+	return []Option{
+		Attempts(4),
+		Delay(2 * time.Second),
+		MaxDelay(30 * time.Second),
+		Multiplier(2.0),
+		DelayType(ExponentialBackoff),
+		WithJitter(0.25),
+		If(IsRetryableHTTPError),
+	}
 }
 
 // GeminiStrategy Google Gemini 推荐重试策略
@@ -45,53 +49,61 @@ var ClaudeStrategy = []Option{
 // - 最大延迟 30s
 // - 全抖动
 // - 重试 429、5xx 和网络错误
-var GeminiStrategy = []Option{
-	Attempts(3),
-	Delay(1 * time.Second),
-	MaxDelay(30 * time.Second),
-	Multiplier(2.0),
-	DelayType(ExponentialBackoff),
-	WithFullJitter(),
-	RetryIf(IsRetryableHTTPError),
+func GeminiStrategy() []Option {
+	return []Option{
+		Attempts(3),
+		Delay(1 * time.Second),
+		MaxDelay(30 * time.Second),
+		Multiplier(2.0),
+		DelayType(ExponentialBackoff),
+		WithFullJitter(),
+		If(IsRetryableHTTPError),
+	}
 }
 
 // DeepSeekStrategy DeepSeek 推荐重试策略
 // - 5 次尝试
 // - 指数退避
 // - 30% 抖动
-var DeepSeekStrategy = []Option{
-	Attempts(5),
-	Delay(1 * time.Second),
-	MaxDelay(60 * time.Second),
-	Multiplier(2.0),
-	DelayType(ExponentialBackoff),
-	WithJitter(0.3),
-	WithRetryAfterAware(),
-	RetryIf(IsRetryableHTTPError),
+func DeepSeekStrategy() []Option {
+	return []Option{
+		Attempts(5),
+		Delay(1 * time.Second),
+		MaxDelay(60 * time.Second),
+		Multiplier(2.0),
+		DelayType(ExponentialBackoff),
+		WithJitter(0.3),
+		WithRetryAfterAware(),
+		If(IsRetryableHTTPError),
+	}
 }
 
 // QwenStrategy 通义千问推荐重试策略
-var QwenStrategy = []Option{
-	Attempts(4),
-	Delay(1 * time.Second),
-	MaxDelay(30 * time.Second),
-	Multiplier(2.0),
-	DelayType(ExponentialBackoff),
-	WithJitter(0.25),
-	RetryIf(IsRetryableHTTPError),
+func QwenStrategy() []Option {
+	return []Option{
+		Attempts(4),
+		Delay(1 * time.Second),
+		MaxDelay(30 * time.Second),
+		Multiplier(2.0),
+		DelayType(ExponentialBackoff),
+		WithJitter(0.25),
+		If(IsRetryableHTTPError),
+	}
 }
 
 // AIAPIStrategy 通用 AI API 重试策略
 // 适用于大多数 AI API
-var AIAPIStrategy = []Option{
-	Attempts(5),
-	Delay(1 * time.Second),
-	MaxDelay(60 * time.Second),
-	Multiplier(2.0),
-	DelayType(ExponentialBackoff),
-	WithJitter(0.3),
-	WithRetryAfterAware(),
-	RetryIf(IsRetryableHTTPError),
+func AIAPIStrategy() []Option {
+	return []Option{
+		Attempts(5),
+		Delay(1 * time.Second),
+		MaxDelay(60 * time.Second),
+		Multiplier(2.0),
+		DelayType(ExponentialBackoff),
+		WithJitter(0.3),
+		WithRetryAfterAware(),
+		If(IsRetryableHTTPError),
+	}
 }
 
 // ============== 通用预设策略 ==============
@@ -99,50 +111,56 @@ var AIAPIStrategy = []Option{
 // AggressiveStrategy 激进重试策略
 // 适用于对延迟敏感的场景
 // - 快速重试，短延迟
-var AggressiveStrategy = []Option{
-	Attempts(3),
-	Delay(100 * time.Millisecond),
-	MaxDelay(1 * time.Second),
-	Multiplier(2.0),
-	DelayType(ExponentialBackoff),
-	WithJitter(0.1),
+func AggressiveStrategy() []Option {
+	return []Option{
+		Attempts(3),
+		Delay(100 * time.Millisecond),
+		MaxDelay(1 * time.Second),
+		Multiplier(2.0),
+		DelayType(ExponentialBackoff),
+		WithJitter(0.1),
+	}
 }
 
 // ConservativeStrategy 保守重试策略
 // 适用于需要避免过度重试的场景
 // - 较少重试，长延迟
-var ConservativeStrategy = []Option{
-	Attempts(3),
-	Delay(5 * time.Second),
-	MaxDelay(60 * time.Second),
-	Multiplier(2.0),
-	DelayType(ExponentialBackoff),
-	WithJitter(0.5),
+func ConservativeStrategy() []Option {
+	return []Option{
+		Attempts(3),
+		Delay(5 * time.Second),
+		MaxDelay(60 * time.Second),
+		Multiplier(2.0),
+		DelayType(ExponentialBackoff),
+		WithJitter(0.5),
+	}
 }
 
 // NetworkErrorStrategy 网络错误重试策略
 // 适用于处理不稳定的网络连接
-var NetworkErrorStrategy = []Option{
-	Attempts(5),
-	Delay(1 * time.Second),
-	MaxDelay(30 * time.Second),
-	Multiplier(2.0),
-	DelayType(ExponentialBackoff),
-	WithEqualJitter(),
-	RetryIf(func(err error) bool {
-		return isNetworkError(err)
-	}),
+func NetworkErrorStrategy() []Option {
+	return []Option{
+		Attempts(5),
+		Delay(1 * time.Second),
+		MaxDelay(30 * time.Second),
+		Multiplier(2.0),
+		DelayType(ExponentialBackoff),
+		WithEqualJitter(),
+		If(isNetworkError),
+	}
 }
 
 // DatabaseStrategy 数据库重试策略
 // 适用于数据库连接和查询
-var DatabaseStrategy = []Option{
-	Attempts(3),
-	Delay(100 * time.Millisecond),
-	MaxDelay(5 * time.Second),
-	Multiplier(2.0),
-	DelayType(ExponentialBackoff),
-	WithJitter(0.2),
+func DatabaseStrategy() []Option {
+	return []Option{
+		Attempts(3),
+		Delay(100 * time.Millisecond),
+		MaxDelay(5 * time.Second),
+		Multiplier(2.0),
+		DelayType(ExponentialBackoff),
+		WithJitter(0.2),
+	}
 }
 
 // ============== 辅助函数 ==============

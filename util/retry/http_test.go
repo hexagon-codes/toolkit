@@ -148,6 +148,16 @@ func TestGetRetryAfter(t *testing.T) {
 	}
 }
 
+func TestGetRetryAfterSaturatesOverflowingSeconds(t *testing.T) {
+	resp := &http.Response{Header: http.Header{}}
+	resp.Header.Set("Retry-After", "9223372036854775807")
+
+	const maxDuration = time.Duration(1<<63 - 1)
+	if got := GetRetryAfter(resp); got != maxDuration {
+		t.Fatalf("GetRetryAfter() = %v, want %v", got, maxDuration)
+	}
+}
+
 func TestHTTPError(t *testing.T) {
 	err := &HTTPError{
 		StatusCode: 429,
@@ -171,7 +181,7 @@ func TestRetryWithHTTPError(t *testing.T) {
 		return nil
 	},
 		Attempts(5),
-		RetryIf(IsRetryableHTTPError),
+		If(IsRetryableHTTPError),
 		Delay(10*time.Millisecond),
 	)
 
@@ -194,7 +204,7 @@ func TestRetryWith429(t *testing.T) {
 		return nil
 	},
 		Attempts(5),
-		RetryIf(IsRetryableHTTPError),
+		If(IsRetryableHTTPError),
 		Delay(10*time.Millisecond),
 	)
 
@@ -214,7 +224,7 @@ func TestNoRetryOn400(t *testing.T) {
 		return &HTTPError{StatusCode: 400}
 	},
 		Attempts(5),
-		RetryIf(IsRetryableHTTPError),
+		If(IsRetryableHTTPError),
 		Delay(10*time.Millisecond),
 	)
 

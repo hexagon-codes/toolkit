@@ -83,7 +83,7 @@ err := retry.Do(
     func() error {
         return apiCall()
     },
-    retry.RetryIf(func(err error) bool {
+    retry.If(func(err error) bool {
         // Only retry network errors
         return errors.Is(err, ErrNetwork)
     }),
@@ -143,49 +143,12 @@ retry.DelayType(retry.ExponentialBackoff)
 | `MaxDelay(d)` | Maximum delay | 30s |
 | `Multiplier(m)` | Delay multiplier (exponential backoff) | 2.0 |
 | `OnRetry(fn)` | Retry callback function | nil |
-| `RetryIf(fn)` | Retry condition check | Retry on any error |
+| `If(fn)` | Retry condition check | Retry on any error |
 | `DelayType(fn)` | Delay strategy | Fixed delay |
 
-## Compatibility Options
-
-The following are purely additive compatibility options. **Default behavior is unchanged**; they take effect only when explicitly enabled, preserving backward compatibility.
-
-### WithUnwrapFinalError / WithReturnLastError
-
-By default, the final error returned when retries are exhausted is `fmt.Errorf("%w: %v", ErrMaxAttemptsReached, lastErr)`, whose error chain only carries `ErrMaxAttemptsReached`, so `errors.Is(err, lastErr)` is always `false`.
-
-Enabling this option switches the final error to multi-`%w` wrapping, so the original last error also enters the error chain and can be unwrapped:
-
-```go
-err := retry.Do(
-    func() error { return apiCall() },
-    retry.Attempts(3),
-    retry.WithUnwrapFinalError(), // alias: retry.WithReturnLastError()
-)
-
-// Both hold:
-errors.Is(err, retry.ErrMaxAttemptsReached) // true (sentinel preserved)
-errors.Is(err, ErrUpstream)                 // true (original error unwrappable)
-```
-
-`WithReturnLastError()` is a semantic alias for `WithUnwrapFinalError()` with identical effect.
-
-> Note: this option only affects the error returned on the "retries exhausted" path. Errors returned early because `RetryIf` deemed them non-retryable, and `ctx.Err()` returned on context cancellation/timeout, already return the original error directly and are unaffected.
-
-### WithOnRetryZeroBased
-
-By default the `OnRetry` callback uses one-based counting (first retry `n == 1`). Enabling this option switches to zero-based counting (first retry `n == 0`), to align with the "number of retries already occurred" semantics used by some downstream frameworks.
-
-```go
-retry.Do(fn,
-    retry.WithOnRetryZeroBased(),
-    retry.OnRetry(func(n int, err error) {
-        // n == 0 on the first retry
-    }),
-)
-```
-
-> This option only shifts the count value passed to the callback; it does not affect invocation timing, invocation count, or backoff/jitter behavior.
+When all retries are exhausted, the final error wraps both
+`ErrMaxAttemptsReached` and the last execution error for `errors.Is`/`errors.As`.
+`OnRetry` uses one-based numbering, so the first retry is 1.
 
 ## Use Cases
 
@@ -209,7 +172,7 @@ func callAPI() error {
         },
         retry.Attempts(3),
         retry.Delay(time.Second),
-        retry.RetryIf(func(err error) bool {
+        retry.If(func(err error) bool {
             // Only retry 5xx errors
             return strings.Contains(err.Error(), "server error")
         }),
@@ -254,7 +217,7 @@ func processMessage(msg *Message) error {
         },
         retry.Attempts(3),
         retry.Delay(5*time.Second),
-        retry.RetryIf(func(err error) bool {
+        retry.If(func(err error) bool {
             // Do not retry business logic errors
             return !errors.Is(err, ErrBusinessLogic)
         }),
@@ -324,7 +287,7 @@ retry.OnRetry(func(n int, err error) {
 ### 5. Distinguish Retryable from Non-Retryable Errors
 
 ```go
-retry.RetryIf(func(err error) bool {
+retry.If(func(err error) bool {
     // Network errors, timeouts: retryable
     if errors.Is(err, ErrNetwork) || errors.Is(err, ErrTimeout) {
         return true
@@ -351,4 +314,4 @@ retry.RetryIf(func(err error) bool {
 
 - Retries add latency; set retry counts reasonably
 - Exponential backoff effectively reduces server load
-- Use RetryIf to avoid unnecessary retries
+- Use `If` to avoid unnecessary retries

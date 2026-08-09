@@ -180,9 +180,15 @@ func GetRetryAfter(resp *http.Response) time.Duration {
 		return 0
 	}
 
-	// 尝试解析为秒数
-	if seconds, err := strconv.Atoi(header); err == nil {
+	// 秒数来自不可信响应头，先按无符号整数解析并在乘法前做饱和处理。
+	const maxDuration = time.Duration(1<<63 - 1)
+	if seconds, err := strconv.ParseUint(strings.TrimSpace(header), 10, 64); err == nil {
+		if seconds > uint64(maxDuration/time.Second) {
+			return maxDuration
+		}
 		return time.Duration(seconds) * time.Second
+	} else if errors.Is(err, strconv.ErrRange) {
+		return maxDuration
 	}
 
 	// 尝试解析为 HTTP 日期
@@ -213,9 +219,9 @@ func WithRetryAfterAware() Option {
 	}
 }
 
-// RetryIfHTTP 创建 HTTP 错误重试条件
+// IfHTTP 创建 HTTP 错误重试条件
 // 可以指定哪些状态码需要重试
-func RetryIfHTTP(statusCodes ...int) func(error) bool {
+func IfHTTP(statusCodes ...int) func(error) bool {
 	codeSet := make(map[int]bool)
 	for _, code := range statusCodes {
 		codeSet[code] = true
@@ -230,9 +236,9 @@ func RetryIfHTTP(statusCodes ...int) func(error) bool {
 	}
 }
 
-// RetryIfHTTPOrNetwork 创建 HTTP + 网络错误重试条件
-func RetryIfHTTPOrNetwork(statusCodes ...int) func(error) bool {
-	httpRetry := RetryIfHTTP(statusCodes...)
+// IfHTTPOrNetwork 创建 HTTP + 网络错误重试条件
+func IfHTTPOrNetwork(statusCodes ...int) func(error) bool {
+	httpRetry := IfHTTP(statusCodes...)
 
 	return func(err error) bool {
 		if httpRetry(err) {

@@ -1,42 +1,17 @@
-// Package retry 提供带指数退避的重试功能
+// Package retry 提供可校验配置、指数退避、抖动和上下文取消能力。
 //
-// 支持可配置的重试次数、延迟策略和自定义重试条件。
+// 重试耗尽时返回值同时包含 ErrMaxAttemptsReached 和最后一次执行错误，
+// 调用方可以使用 errors.Is 或 errors.As 判断两者。
 //
-// 基本用法:
-//
-//	err := retry.Do(func() error {
-//	    return someOperation()
-//	}, retry.WithAttempts(3), retry.WithDelay(time.Second))
-//
-// 带指数退避:
+// 基本用法：
 //
 //	err := retry.Do(func() error {
-//	    return httpCall()
-//	}, retry.WithBackoff(retry.ExponentialBackoff{
-//	    InitialInterval: time.Second,
-//	    MaxInterval:     time.Minute,
-//	    Multiplier:      2,
-//	}))
+//		return someOperation()
+//	}, retry.Attempts(3), retry.Delay(time.Second))
 //
-// --- English ---
+// 带上下文：
 //
-// Package retry provides retry functionality with exponential backoff.
-//
-// It supports configurable retry attempts, delays, and custom retry conditions.
-//
-// Basic usage:
-//
-//	err := retry.Do(func() error {
-//	    return someOperation()
-//	}, retry.WithAttempts(3), retry.WithDelay(time.Second))
-//
-// With exponential backoff:
-//
-//	err := retry.Do(func() error {
-//	    return httpCall()
-//	}, retry.WithBackoff(retry.ExponentialBackoff{
-//	    InitialInterval: time.Second,
-//	    MaxInterval:     time.Minute,
-//	    Multiplier:      2,
-//	}))
+//	err := retry.DoWithContext(ctx, func() error {
+//		return someOperation()
+//	}, retry.If(isRetryable))
 package retry

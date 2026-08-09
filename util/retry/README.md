@@ -83,7 +83,7 @@ err := retry.Do(
     func() error {
         return apiCall()
     },
-    retry.RetryIf(func(err error) bool {
+    retry.If(func(err error) bool {
         // 只重试网络错误
         return errors.Is(err, ErrNetwork)
     }),
@@ -143,49 +143,11 @@ retry.DelayType(retry.ExponentialBackoff)
 | `MaxDelay(d)` | 最大延迟 | 30s |
 | `Multiplier(m)` | 延迟倍数（指数退避） | 2.0 |
 | `OnRetry(fn)` | 重试回调函数 | nil |
-| `RetryIf(fn)` | 重试条件判断 | 任何错误都重试 |
+| `If(fn)` | 重试条件判断 | 任何错误都重试 |
 | `DelayType(fn)` | 延迟策略 | 固定延迟 |
 
-## 兼容性增强选项
-
-以下为纯增量的兼容性选项，**默认行为完全不变**，仅在显式开启时生效，向后兼容。
-
-### WithUnwrapFinalError / WithReturnLastError
-
-默认情况下，重试耗尽时返回的最终错误为 `fmt.Errorf("%w: %v", ErrMaxAttemptsReached, lastErr)`，错误链中只挂载 `ErrMaxAttemptsReached`，`errors.Is(err, lastErr)` 恒为 `false`。
-
-开启本选项后，最终错误改用多 `%w` 包装，使原始的最后一次错误也进入错误链可被解包：
-
-```go
-err := retry.Do(
-    func() error { return apiCall() },
-    retry.Attempts(3),
-    retry.WithUnwrapFinalError(), // 别名：retry.WithReturnLastError()
-)
-
-// 同时成立：
-errors.Is(err, retry.ErrMaxAttemptsReached) // true（sentinel 仍在）
-errors.Is(err, ErrUpstream)                 // true（原始错误可解包）
-```
-
-`WithReturnLastError()` 是 `WithUnwrapFinalError()` 的语义别名，效果完全一致。
-
-> 注意：本选项仅影响"重试耗尽"路径返回的错误；`RetryIf` 判定不可重试而提前返回的错误、以及上下文取消/超时返回的 `ctx.Err()` 本就直接返回原始错误，不受影响。
-
-### WithOnRetryZeroBased
-
-默认 `OnRetry` 回调采用一基计数（首次重试 `n == 1`）。开启本选项后切换为零基计数（首次重试 `n == 0`），用于对齐部分下游框架"已发生的重试次数"语义。
-
-```go
-retry.Do(fn,
-    retry.WithOnRetryZeroBased(),
-    retry.OnRetry(func(n int, err error) {
-        // 首次重试时 n == 0
-    }),
-)
-```
-
-> 本选项仅平移传入回调的计数值，不影响调用时机、调用次数与退避/抖动行为。
+重试耗尽时，最终错误会同时包装 `ErrMaxAttemptsReached` 和最后一次执行错误；
+可分别使用 `errors.Is` 或 `errors.As` 判断。`OnRetry` 使用一基计数，首次重试为 1。
 
 ## 使用场景
 
@@ -209,7 +171,7 @@ func callAPI() error {
         },
         retry.Attempts(3),
         retry.Delay(time.Second),
-        retry.RetryIf(func(err error) bool {
+        retry.If(func(err error) bool {
             // 只重试 5xx 错误
             return strings.Contains(err.Error(), "server error")
         }),
@@ -254,7 +216,7 @@ func processMessage(msg *Message) error {
         },
         retry.Attempts(3),
         retry.Delay(5*time.Second),
-        retry.RetryIf(func(err error) bool {
+        retry.If(func(err error) bool {
             // 不重试业务错误
             return !errors.Is(err, ErrBusinessLogic)
         }),
@@ -324,7 +286,7 @@ retry.OnRetry(func(n int, err error) {
 ### 5. 区分可重试和不可重试错误
 
 ```go
-retry.RetryIf(func(err error) bool {
+retry.If(func(err error) bool {
     // 网络错误、超时：可重试
     if errors.Is(err, ErrNetwork) || errors.Is(err, ErrTimeout) {
         return true
@@ -351,4 +313,4 @@ retry.RetryIf(func(err error) bool {
 
 - 重试会增加延迟，合理设置重试次数
 - 指数退避可以有效降低服务器压力
-- 使用 RetryIf 避免不必要的重试
+- 使用 `If` 避免不必要的重试
