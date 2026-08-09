@@ -21,6 +21,7 @@ func TestNewTimerContext(t *testing.T) {
 
 	if tc == nil {
 		t.Fatal("expected non-nil TimerContext")
+		return
 	}
 
 	if tc.startTime.IsZero() {

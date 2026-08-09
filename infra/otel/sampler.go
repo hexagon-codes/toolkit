@@ -98,7 +98,7 @@ func (s *RateLimitingSampler) ShouldSample(traceID, spanName string) bool {
 
 	// 检查预算
 	if s.budget >= 1 {
-		s.budget -= 1
+		s.budget--
 		return true
 	}
 

@@ -1,265 +1,303 @@
 package prometheus
 
 import (
+	"context"
+	"errors"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/hexagon-codes/toolkit/infra/observe"
 )
 
-func TestNewRegistry(t *testing.T) {
+func TestRegistryHistogramUsesCumulativeBucketsOnce(t *testing.T) {
 	registry := NewRegistry()
+	histogram, err := registry.Histogram("request_seconds", "Request duration", []float64{0.1, 0.5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := histogram.Observe(0.1); err != nil {
+		t.Fatal(err)
+	}
 
-	if registry == nil {
-		t.Fatal("expected non-nil registry")
+	output := gather(t, registry)
+	for _, expected := range []string{
+		`request_seconds_bucket{le="0.1"} 1`,
+		`request_seconds_bucket{le="0.5"} 1`,
+		`request_seconds_bucket{le="+Inf"} 1`,
+		`request_seconds_count 1`,
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected %q in exposition:\n%s", expected, output)
+		}
 	}
 }
 
-func TestRegistryCounter(t *testing.T) {
+func TestRegistryRejectsDescriptorDrift(t *testing.T) {
 	registry := NewRegistry()
-
-	counter := registry.Counter("test_counter", "Test counter help")
-	if counter == nil {
-		t.Fatal("expected non-nil counter")
+	if _, err := registry.Counter("requests_total", "Requests", "method"); err != nil {
+		t.Fatal(err)
 	}
-
-	// 同名 counter 应该返回相同实例
-	counter2 := registry.Counter("test_counter", "Test counter help")
-	if counter != counter2 {
-		t.Error("expected same counter instance")
+	if _, err := registry.Counter("requests_total", "Different help", "method"); err == nil {
+		t.Fatal("expected inconsistent help to be rejected")
+	}
+	if _, err := registry.Gauge("requests_total", "Requests", "method"); err == nil {
+		t.Fatal("expected metric type collision to be rejected")
 	}
 }
 
-func TestPrometheusCounter(t *testing.T) {
+func TestCounterRejectsNegativeAndWrongLabelArity(t *testing.T) {
 	registry := NewRegistry()
-	counter := registry.Counter("requests_total", "Total requests")
+	counter, err := registry.Counter("requests_total", "Requests", "method")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := counter.Add(-1, "GET"); !errors.Is(err, ErrNegativeCounterValue) {
+		t.Fatalf("expected negative counter error, got %v", err)
+	}
+	if err := counter.Inc(); err == nil {
+		t.Fatal("expected label arity error")
+	}
+	if err := counter.Add(2, "GET"); err != nil {
+		t.Fatal(err)
+	}
+}
 
+func TestFactoryPrefixesMetrics(t *testing.T) {
+	registry := NewRegistry()
+	factory, err := NewFactory(registry, "app", "api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	counter, err := factory.Counter("requests_total", "Requests")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := counter.Inc(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gather(t, registry), "app_api_requests_total") {
+		t.Fatal("expected namespace and subsystem prefix")
+	}
+}
+
+func TestMetricsAdapterPreservesTypedTags(t *testing.T) {
+	registry := NewRegistry()
+	adapter := mustMetricsAdapter(t, registry, "test", "")
+	counter, err := adapter.Counter("requests_total", observe.Tag{Name: "method", Value: "GET"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	counter.Inc()
-	counter.Add(5)
-
-	output := counter.String()
-	if !strings.Contains(output, "requests_total") {
-		t.Error("expected counter name in output")
+	if err := counter.Add(5); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(output, "# TYPE requests_total counter") {
-		t.Error("expected counter type in output")
-	}
-}
-
-func TestPrometheusCounterWithLabels(t *testing.T) {
-	registry := NewRegistry()
-	counter := registry.Counter("http_requests", "HTTP requests", "method", "path")
-
-	counter.Inc("GET", "/api")
-	counter.Inc("POST", "/api")
-	counter.Add(3, "GET", "/api")
-
-	output := counter.String()
-	if !strings.Contains(output, `method="GET"`) {
-		t.Error("expected label in output")
-	}
-}
-
-func TestPrometheusGauge(t *testing.T) {
-	registry := NewRegistry()
-	gauge := registry.Gauge("active_connections", "Active connections")
-
-	gauge.Set(10)
-	gauge.Inc()
-	gauge.Dec()
-	gauge.Add(5)
-
-	output := gauge.String()
-	if !strings.Contains(output, "# TYPE active_connections gauge") {
-		t.Error("expected gauge type in output")
-	}
-}
-
-func TestPrometheusHistogram(t *testing.T) {
-	registry := NewRegistry()
-	histogram := registry.Histogram("request_duration", "Request duration", nil)
-
-	histogram.Observe(0.1)
-	histogram.Observe(0.5)
-	histogram.Observe(1.0)
-
-	output := histogram.String()
-	if !strings.Contains(output, "# TYPE request_duration histogram") {
-		t.Error("expected histogram type in output")
-	}
-	if !strings.Contains(output, "request_duration_bucket") {
-		t.Error("expected bucket in output")
-	}
-	if !strings.Contains(output, "request_duration_sum") {
-		t.Error("expected sum in output")
-	}
-	if !strings.Contains(output, "request_duration_count") {
-		t.Error("expected count in output")
-	}
-}
-
-func TestPrometheusSummary(t *testing.T) {
-	registry := NewRegistry()
-	summary := registry.Summary("response_time", "Response time", nil)
-
-	for i := 0; i < 100; i++ {
-		summary.Observe(float64(i) * 0.01)
-	}
-
-	output := summary.String()
-	if !strings.Contains(output, "# TYPE response_time summary") {
-		t.Error("expected summary type in output")
-	}
-}
-
-func TestRegistryGather(t *testing.T) {
-	registry := NewRegistry()
-
-	registry.Counter("counter1", "Counter 1").Inc()
-	registry.Gauge("gauge1", "Gauge 1").Set(42)
-
-	output := registry.Gather()
-	if !strings.Contains(output, "counter1") {
-		t.Error("expected counter1 in output")
-	}
-	if !strings.Contains(output, "gauge1") {
-		t.Error("expected gauge1 in output")
-	}
-}
-
-func TestNewExporter(t *testing.T) {
-	exporter := NewExporter()
-
-	if exporter == nil {
-		t.Fatal("expected non-nil exporter")
-	}
-
-	if exporter.namespace != "app" {
-		t.Errorf("expected default namespace 'app', got '%s'", exporter.namespace)
-	}
-}
-
-func TestExporterWithOptions(t *testing.T) {
-	exporter := NewExporter(
-		WithNamespace("myapp"),
-		WithSubsystem("api"),
-	)
-
-	if exporter.namespace != "myapp" {
-		t.Errorf("expected namespace 'myapp', got '%s'", exporter.namespace)
-	}
-
-	if exporter.subsystem != "api" {
-		t.Errorf("expected subsystem 'api', got '%s'", exporter.subsystem)
-	}
-}
-
-func TestExporterRegistry(t *testing.T) {
-	exporter := NewExporter()
-
-	registry := exporter.Registry()
-	if registry == nil {
-		t.Fatal("expected non-nil registry")
-	}
-}
-
-func TestExporterCollector(t *testing.T) {
-	exporter := NewExporter()
-
-	collector := exporter.Collector()
-	if collector == nil {
-		t.Fatal("expected non-nil collector")
-	}
-}
-
-func TestMetricsAdapter(t *testing.T) {
-	registry := NewRegistry()
-	adapter := NewMetricsAdapter(registry, "test", "")
-
-	// Counter
-	counter := adapter.Counter("requests")
-	counter.Inc()
-	counter.Add(5)
 	if counter.Value() != 6 {
-		t.Errorf("expected counter value 6, got %f", counter.Value())
+		t.Fatalf("expected counter value 6, got %f", counter.Value())
 	}
 
-	// Gauge
-	gauge := adapter.Gauge("connections")
+	output := gather(t, registry)
+	if !strings.Contains(output, `method="GET"`) {
+		t.Fatalf("metric tag was lost:\n%s", output)
+	}
+}
+
+func TestMetricsAdapterRejectsDuplicateTags(t *testing.T) {
+	adapter := mustMetricsAdapter(t, NewRegistry(), "test", "")
+	_, err := adapter.Counter(
+		"requests_total",
+		observe.Tag{Name: "method", Value: "GET"},
+		observe.Tag{Name: "method", Value: "POST"},
+	)
+	if err == nil {
+		t.Fatal("expected duplicate tag error")
+	}
+}
+
+func TestHistogramAdapterConcurrentObserve(t *testing.T) {
+	adapter := mustMetricsAdapter(t, NewRegistry(), "test", "")
+	histogram, err := adapter.Histogram("duration")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const workers = 100
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			histogram.Observe(1)
+		}()
+	}
+	wg.Wait()
+
+	if histogram.Count() != workers {
+		t.Fatalf("expected %d observations, got %d", workers, histogram.Count())
+	}
+	if histogram.Sum() != workers {
+		t.Fatalf("expected sum %d, got %f", workers, histogram.Sum())
+	}
+}
+
+func TestGaugeAndTimerAdapters(t *testing.T) {
+	adapter := mustMetricsAdapter(t, NewRegistry(), "test", "")
+	gauge, err := adapter.Gauge("connections")
+	if err != nil {
+		t.Fatal(err)
+	}
 	gauge.Set(10)
 	gauge.Inc()
 	gauge.Dec()
 	if gauge.Value() != 10 {
-		t.Errorf("expected gauge value 10, got %f", gauge.Value())
+		t.Fatalf("expected gauge value 10, got %f", gauge.Value())
 	}
 
-	// Histogram
-	histogram := adapter.Histogram("duration")
-	histogram.Observe(1.0)
-	histogram.Observe(2.0)
-	if histogram.Count() != 2 {
-		t.Errorf("expected histogram count 2, got %d", histogram.Count())
+	timer, err := adapter.Timer("latency")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if histogram.Sum() != 3.0 {
-		t.Errorf("expected histogram sum 3.0, got %f", histogram.Sum())
+	timer.ObserveDuration(time.Millisecond)
+	timer.Time(func() {})
+	if timer.NewTimer().Stop() < 0 {
+		t.Fatal("timer returned a negative duration")
+	}
+}
+
+func TestExporterHandlerAndIdempotentShutdown(t *testing.T) {
+	exporter, err := NewExporter(nil, WithNamespace("myapp"), WithSubsystem("api"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exporter.Factory() == nil || exporter.Registry() == nil {
+		t.Fatal("expected exporter dependencies")
 	}
 
-	// Timer
-	timer := adapter.Timer("latency")
-	timer.ObserveDuration(100 * time.Millisecond)
-	timer.Time(func() {
+	recorder := httptest.NewRecorder()
+	exporter.Handler().ServeHTTP(
+		recorder,
+		httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/metrics", nil),
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("unexpected handler status %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "go_goroutines") {
+		t.Fatal("official Go runtime metrics were not registered")
+	}
+
+	if err := exporter.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := exporter.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestConstructorsRejectNilRegistry(t *testing.T) {
+	if factory, err := NewFactory(nil, "app", ""); factory != nil || !errors.Is(err, ErrNilRegistry) {
+		t.Fatalf("NewFactory(nil) = (%v, %v), want nil and ErrNilRegistry", factory, err)
+	}
+	if adapter, err := NewMetricsAdapter(nil, "app", ""); adapter != nil || !errors.Is(err, ErrNilRegistry) {
+		t.Fatalf("NewMetricsAdapter(nil) = (%v, %v), want nil and ErrNilRegistry", adapter, err)
+	}
+}
+
+func TestExporterCanStartAfterBindFailure(t *testing.T) {
+	var listenConfig net.ListenConfig
+	occupied, err := listenConfig.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := occupied.Addr().String()
+
+	exporter, err := NewExporter()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := exporter.ListenAndServe(address); err == nil {
+		t.Fatal("ListenAndServe() succeeded on an occupied address")
+	}
+	if err := occupied.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	serveResult := make(chan error, 1)
+	go func() { serveResult <- exporter.ListenAndServe(address) }()
+	client := &http.Client{Timeout: time.Second}
+	deadline := time.Now().Add(time.Second)
+	for {
+		request, requestErr := http.NewRequestWithContext(
+			t.Context(),
+			http.MethodGet,
+			"http://"+address+"/metrics",
+			http.NoBody,
+		)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		response, requestErr := client.Do(request)
+		if requestErr == nil {
+			_ = response.Body.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("exporter did not start after bind failure: %v", requestErr)
+		}
 		time.Sleep(10 * time.Millisecond)
-	})
-}
-
-func TestCollector(t *testing.T) {
-	registry := NewRegistry()
-	collector := NewCollector(registry, "test", "sub")
-
-	// 自定义指标
-	counter := collector.Counter("custom_counter", "Custom counter")
-	counter.Inc()
-
-	gauge := collector.Gauge("custom_gauge", "Custom gauge")
-	gauge.Set(100)
-
-	histogram := collector.Histogram("custom_histogram", "Custom histogram", nil)
-	histogram.Observe(1.5)
-
-	// 验证输出
-	output := registry.Gather()
-	if !strings.Contains(output, "test_sub_custom_counter") {
-		t.Error("expected custom counter with prefix")
+	}
+	if err := exporter.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-serveResult:
+		if err != nil {
+			t.Fatalf("ListenAndServe() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ListenAndServe() did not return after Shutdown")
 	}
 }
 
-func TestCollectorConvenienceMethods(t *testing.T) {
-	registry := NewRegistry()
-	collector := NewCollector(registry, "app", "")
-
-	collector.RecordDuration("request", time.Second)
-	collector.RecordCount("events", 10)
-	collector.SetGaugeValue("active", 5)
-
-	output := registry.Gather()
-	if !strings.Contains(output, "app_request_seconds") {
-		t.Error("expected duration metric")
-	}
-	if !strings.Contains(output, "app_events_total") {
-		t.Error("expected count metric")
-	}
-	if !strings.Contains(output, "app_active") {
-		t.Error("expected gauge metric")
+func TestDefaultsAreConfigured(t *testing.T) {
+	if len(DefaultBuckets()) == 0 || len(DefaultQuantiles()) == 0 {
+		t.Fatal("expected default histogram and summary configuration")
 	}
 }
 
-func TestDefaultBuckets(t *testing.T) {
-	if len(DefaultBuckets) == 0 {
-		t.Error("expected default buckets to be non-empty")
+func TestDefaultsReturnIndependentSnapshots(t *testing.T) {
+	buckets := DefaultBuckets()
+	wantBucket := buckets[0]
+	buckets[0] = -1
+	if got := DefaultBuckets()[0]; got != wantBucket {
+		t.Fatalf("DefaultBuckets()[0] = %v, want %v", got, wantBucket)
+	}
+
+	quantiles := DefaultQuantiles()
+	wantQuantile := quantiles[0.5]
+	quantiles[0.5] = -1
+	if got := DefaultQuantiles()[0.5]; got != wantQuantile {
+		t.Fatalf("DefaultQuantiles()[0.5] = %v, want %v", got, wantQuantile)
 	}
 }
 
-func TestDefaultQuantiles(t *testing.T) {
-	if len(DefaultQuantiles) == 0 {
-		t.Error("expected default quantiles to be non-empty")
+func gather(t *testing.T, registry *Registry) string {
+	t.Helper()
+	output, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
 	}
+	return output
+}
+
+func mustMetricsAdapter(t *testing.T, registry *Registry, namespace, subsystem string) *MetricsAdapter {
+	t.Helper()
+	adapter, err := NewMetricsAdapter(registry, namespace, subsystem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return adapter
 }

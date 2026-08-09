@@ -1,147 +1,54 @@
 package prometheus
 
-import (
-	"runtime"
-	"sync"
-	"time"
-)
+import "strings"
 
-// Collector 指标收集器
-type Collector struct {
+// Factory 使用统一命名空间和子系统创建指标。
+type Factory struct {
 	registry  *Registry
 	namespace string
 	subsystem string
-
-	// Go 运行时指标
-	goGoroutines   *PrometheusGauge
-	goMemAlloc     *PrometheusGauge
-	goMemSys       *PrometheusGauge
-	goGCPauseTotal *PrometheusCounter
-
-	mu   sync.RWMutex
-	done chan struct{} // 用于停止运行时指标收集 goroutine
 }
 
-// NewCollector 创建收集器
-func NewCollector(registry *Registry, namespace, subsystem string) *Collector {
-	c := &Collector{
-		registry:  registry,
-		namespace: namespace,
-		subsystem: subsystem,
-		done:      make(chan struct{}),
+// NewFactory 创建指标工厂；工厂不持有 goroutine 或其他生命周期资源。
+func NewFactory(registry *Registry, namespace, subsystem string) (*Factory, error) {
+	if registry == nil {
+		return nil, ErrNilRegistry
 	}
-
-	c.initRuntimeMetrics()
-	c.startRuntimeCollector()
-
-	return c
+	return &Factory{registry: registry, namespace: namespace, subsystem: subsystem}, nil
 }
 
-// initRuntimeMetrics 初始化运行时指标
-func (c *Collector) initRuntimeMetrics() {
-	prefix := c.namespace
-	if c.subsystem != "" {
-		prefix += "_" + c.subsystem
+// Counter 获取或注册计数器。
+func (f *Factory) Counter(name, help string, labels ...string) (*Counter, error) {
+	return f.registry.Counter(f.fullName(name), help, labels...)
+}
+
+// Gauge 获取或注册仪表。
+func (f *Factory) Gauge(name, help string, labels ...string) (*Gauge, error) {
+	return f.registry.Gauge(f.fullName(name), help, labels...)
+}
+
+// Histogram 获取或注册直方图。
+func (f *Factory) Histogram(name, help string, buckets []float64, labels ...string) (*Histogram, error) {
+	return f.registry.Histogram(f.fullName(name), help, buckets, labels...)
+}
+
+// Summary 获取或注册摘要指标。
+func (f *Factory) Summary(name, help string, quantiles map[float64]float64, labels ...string) (*Summary, error) {
+	return f.registry.Summary(f.fullName(name), help, quantiles, labels...)
+}
+
+func (f *Factory) fullName(name string) string {
+	return metricName(f.namespace, f.subsystem, name)
+}
+
+func metricName(namespace, subsystem, name string) string {
+	parts := make([]string, 0, 3)
+	if namespace != "" {
+		parts = append(parts, namespace)
 	}
-
-	// Go 运行时指标
-	c.goGoroutines = c.registry.Gauge(
-		prefix+"_go_goroutines",
-		"Number of goroutines",
-	)
-	c.goMemAlloc = c.registry.Gauge(
-		prefix+"_go_memstats_alloc_bytes",
-		"Number of bytes allocated and still in use",
-	)
-	c.goMemSys = c.registry.Gauge(
-		prefix+"_go_memstats_sys_bytes",
-		"Number of bytes obtained from system",
-	)
-	c.goGCPauseTotal = c.registry.Counter(
-		prefix+"_go_gc_pause_seconds_total",
-		"Total GC pause time in seconds",
-	)
-}
-
-// startRuntimeCollector 启动运行时指标收集
-func (c *Collector) startRuntimeCollector() {
-	go func() {
-		var lastGCPause uint64
-		ticker := time.NewTicker(15 * time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-c.done:
-				return
-			case <-ticker.C:
-				var m runtime.MemStats
-				runtime.ReadMemStats(&m)
-
-				c.goGoroutines.Set(float64(runtime.NumGoroutine()))
-				c.goMemAlloc.Set(float64(m.Alloc))
-				c.goMemSys.Set(float64(m.Sys))
-
-				// GC 暂停时间
-				gcPause := m.PauseTotalNs
-				if gcPause > lastGCPause {
-					c.goGCPauseTotal.Add(float64(gcPause-lastGCPause) / 1e9)
-					lastGCPause = gcPause
-				}
-			}
-		}
-	}()
-}
-
-// Stop 停止运行时指标收集 goroutine
-func (c *Collector) Stop() {
-	close(c.done)
-}
-
-// Counter 获取自定义 Counter
-func (c *Collector) Counter(name, help string, labels ...string) *PrometheusCounter {
-	return c.registry.Counter(c.fullName(name), help, labels...)
-}
-
-// Gauge 获取自定义 Gauge
-func (c *Collector) Gauge(name, help string, labels ...string) *PrometheusGauge {
-	return c.registry.Gauge(c.fullName(name), help, labels...)
-}
-
-// Histogram 获取自定义 Histogram
-func (c *Collector) Histogram(name, help string, buckets []float64, labels ...string) *PrometheusHistogram {
-	return c.registry.Histogram(c.fullName(name), help, buckets, labels...)
-}
-
-// Summary 获取自定义 Summary
-func (c *Collector) Summary(name, help string, quantiles map[float64]float64, labels ...string) *PrometheusSummary {
-	return c.registry.Summary(c.fullName(name), help, quantiles, labels...)
-}
-
-func (c *Collector) fullName(name string) string {
-	if c.namespace == "" {
-		return name
+	if subsystem != "" {
+		parts = append(parts, subsystem)
 	}
-	if c.subsystem == "" {
-		return c.namespace + "_" + name
-	}
-	return c.namespace + "_" + c.subsystem + "_" + name
-}
-
-// RecordDuration 记录持续时间
-func (c *Collector) RecordDuration(name string, duration time.Duration, labels ...string) {
-	h := c.Histogram(name+"_seconds", "Duration in seconds", DefaultBuckets, labels...)
-	h.Observe(duration.Seconds(), labels...)
-}
-
-// RecordCount 记录计数
-func (c *Collector) RecordCount(name string, count float64, labels ...string) {
-	counter := c.Counter(name+"_total", "Total count", labels...)
-	counter.Add(count, labels...)
-}
-
-// SetGaugeValue 设置仪表盘值
-func (c *Collector) SetGaugeValue(name string, value float64, labels ...string) {
-	gauge := c.Gauge(name, "Gauge value", labels...)
-	gauge.Set(value, labels...)
+	parts = append(parts, name)
+	return strings.Join(parts, "_")
 }

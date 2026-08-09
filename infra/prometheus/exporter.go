@@ -1,279 +1,281 @@
 package prometheus
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
 	"net/http"
-	"strings"
+	"sort"
 	"sync"
 	"time"
+
+	prom "github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+	dto "github.com/prometheus/client_model/go"
 
 	"github.com/hexagon-codes/toolkit/infra/observe"
 )
 
-// Exporter Prometheus 导出器
+// ErrExporterAlreadyStarted 表示同一导出器已经启动。
+var ErrExporterAlreadyStarted = errors.New("prometheus: exporter already started")
+
+// Exporter 通过 HTTP 暴露隔离的指标注册表。
 type Exporter struct {
-	// namespace 命名空间
 	namespace string
-
-	// subsystem 子系统
 	subsystem string
+	registry  *Registry
+	factory   *Factory
 
-	// registry 指标注册表
-	registry *Registry
-
-	// collector 指标收集器
-	collector *Collector
-
-	// server HTTP 服务器
+	mu     sync.RWMutex
 	server *http.Server
-
-	mu sync.RWMutex
 }
 
-// ExporterOption 导出器选项
+// ExporterOption 配置 Exporter。
 type ExporterOption func(*Exporter)
 
-// NewExporter 创建 Prometheus 导出器
-func NewExporter(opts ...ExporterOption) *Exporter {
-	e := &Exporter{
-		namespace: "app",
-		registry:  NewRegistry(),
-	}
-
+// NewExporter 创建导出器并注册官方 Go 运行时收集器。
+func NewExporter(opts ...ExporterOption) (*Exporter, error) {
+	exporter := &Exporter{namespace: "app", registry: NewRegistry()}
 	for _, opt := range opts {
-		opt(e)
+		if opt == nil {
+			continue
+		}
+		opt(exporter)
 	}
-
-	e.collector = NewCollector(e.registry, e.namespace, e.subsystem)
-
-	return e
+	if err := exporter.registry.Register(collectors.NewGoCollector()); err != nil {
+		return nil, fmt.Errorf("register Go runtime metrics: %w", err)
+	}
+	factory, err := NewFactory(exporter.registry, exporter.namespace, exporter.subsystem)
+	if err != nil {
+		return nil, err
+	}
+	exporter.factory = factory
+	return exporter, nil
 }
 
-// WithNamespace 设置命名空间
+// WithNamespace 设置应用指标命名空间。
 func WithNamespace(namespace string) ExporterOption {
-	return func(e *Exporter) {
-		e.namespace = namespace
-	}
+	return func(exporter *Exporter) { exporter.namespace = namespace }
 }
 
-// WithSubsystem 设置子系统
+// WithSubsystem 设置应用指标子系统。
 func WithSubsystem(subsystem string) ExporterOption {
-	return func(e *Exporter) {
-		e.subsystem = subsystem
-	}
+	return func(exporter *Exporter) { exporter.subsystem = subsystem }
 }
 
-// Registry 返回注册表
-func (e *Exporter) Registry() *Registry {
-	return e.registry
-}
+// Registry 返回隔离的指标注册表。
+func (e *Exporter) Registry() *Registry { return e.registry }
 
-// Collector 返回收集器
-func (e *Exporter) Collector() *Collector {
-	return e.collector
-}
+// Factory 返回应用指标工厂。
+func (e *Exporter) Factory() *Factory { return e.factory }
 
-// Handler 返回 HTTP 处理器
-func (e *Exporter) Handler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-		w.Write([]byte(e.registry.Gather()))
-	})
-}
+// Handler 返回注册表的 Prometheus 处理器。
+func (e *Exporter) Handler() http.Handler { return e.registry.Handler() }
 
-// ListenAndServe 启动 HTTP 服务器
+// ListenAndServe 提供 /metrics 服务，直到调用 Shutdown。
 func (e *Exporter) ListenAndServe(addr string) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", e.Handler())
 
 	e.mu.Lock()
-	e.server = &http.Server{
-		Addr:    addr,
-		Handler: mux,
+	if e.server != nil {
+		e.mu.Unlock()
+		return ErrExporterAlreadyStarted
 	}
+	var listenConfig net.ListenConfig
+	listener, err := listenConfig.Listen(context.Background(), "tcp", addr)
+	if err != nil {
+		e.mu.Unlock()
+		return err
+	}
+	server := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	e.server = server
 	e.mu.Unlock()
 
-	return e.server.ListenAndServe()
+	err = server.Serve(listener)
+	e.mu.Lock()
+	if e.server == server {
+		e.server = nil
+	}
+	e.mu.Unlock()
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
 }
 
-// Shutdown 关闭服务器
-func (e *Exporter) Shutdown() error {
+// Shutdown 优雅停止 HTTP 服务，多次调用是安全的。
+func (e *Exporter) Shutdown(ctx context.Context) error {
 	e.mu.RLock()
 	server := e.server
 	e.mu.RUnlock()
-
-	if server != nil {
-		return server.Close()
+	if server == nil {
+		return nil
 	}
-	return nil
+	return server.Shutdown(ctx)
 }
 
-// ============== Metrics Interface Adapter ==============
-
-// MetricsAdapter 将 observe.Metrics 适配到 Prometheus
+// MetricsAdapter 将 observe.Metrics 适配到 client_golang 指标。
 type MetricsAdapter struct {
 	registry  *Registry
 	namespace string
 	subsystem string
 }
 
-// NewMetricsAdapter 创建适配器
-func NewMetricsAdapter(registry *Registry, namespace, subsystem string) *MetricsAdapter {
-	return &MetricsAdapter{
-		registry:  registry,
-		namespace: namespace,
-		subsystem: subsystem,
+// NewMetricsAdapter 创建 observe.Metrics 适配器。
+func NewMetricsAdapter(registry *Registry, namespace, subsystem string) (*MetricsAdapter, error) {
+	if registry == nil {
+		return nil, ErrNilRegistry
 	}
+	return &MetricsAdapter{registry: registry, namespace: namespace, subsystem: subsystem}, nil
 }
 
-// Counter 获取 Counter
-func (a *MetricsAdapter) Counter(name string, tags ...string) observe.Counter {
-	fullName := a.fullName(name)
-	return &counterAdapter{
-		counter: a.registry.Counter(fullName, name),
+// Counter 获取绑定给定标签的计数器。
+func (a *MetricsAdapter) Counter(name string, tags ...observe.Tag) (observe.Counter, error) {
+	labelNames, labelValues, err := normalizeTags(tags)
+	if err != nil {
+		return nil, err
 	}
+	counter, err := a.registry.Counter(a.fullName(name), name, labelNames...)
+	if err != nil {
+		return nil, err
+	}
+	metric, err := counter.metric(labelValues...)
+	if err != nil {
+		return nil, err
+	}
+	return &counterAdapter{counter: metric}, nil
 }
 
-// Histogram 获取 Histogram
-func (a *MetricsAdapter) Histogram(name string, tags ...string) observe.Histogram {
-	fullName := a.fullName(name)
-	return &histogramAdapter{
-		histogram: a.registry.Histogram(fullName, name, DefaultBuckets),
+// Histogram 获取绑定给定标签的直方图。
+func (a *MetricsAdapter) Histogram(name string, tags ...observe.Tag) (observe.Histogram, error) {
+	labelNames, labelValues, err := normalizeTags(tags)
+	if err != nil {
+		return nil, err
 	}
+	histogram, err := a.registry.Histogram(a.fullName(name), name, DefaultBuckets(), labelNames...)
+	if err != nil {
+		return nil, err
+	}
+	observer, metric, err := histogram.metric(labelValues...)
+	if err != nil {
+		return nil, err
+	}
+	return &histogramAdapter{observer: observer, metric: metric}, nil
 }
 
-// Gauge 获取 Gauge
-func (a *MetricsAdapter) Gauge(name string, tags ...string) observe.Gauge {
-	fullName := a.fullName(name)
-	return &gaugeAdapter{
-		gauge: a.registry.Gauge(fullName, name),
+// Gauge 获取绑定给定标签的仪表。
+func (a *MetricsAdapter) Gauge(name string, tags ...observe.Tag) (observe.Gauge, error) {
+	labelNames, labelValues, err := normalizeTags(tags)
+	if err != nil {
+		return nil, err
 	}
+	gauge, err := a.registry.Gauge(a.fullName(name), name, labelNames...)
+	if err != nil {
+		return nil, err
+	}
+	metric, err := gauge.metric(labelValues...)
+	if err != nil {
+		return nil, err
+	}
+	return &gaugeAdapter{gauge: metric}, nil
 }
 
-// Timer 获取 Timer
-func (a *MetricsAdapter) Timer(name string, tags ...string) observe.Timer {
-	fullName := a.fullName(name)
-	return &timerAdapter{
-		histogram: a.registry.Histogram(fullName+"_seconds", name, DefaultBuckets),
+// Timer 获取绑定给定标签的计时器。
+func (a *MetricsAdapter) Timer(name string, tags ...observe.Tag) (observe.Timer, error) {
+	histogram, err := a.Histogram(name+"_seconds", tags...)
+	if err != nil {
+		return nil, err
 	}
+	return &timerAdapter{histogram: histogram}, nil
 }
 
 func (a *MetricsAdapter) fullName(name string) string {
-	parts := []string{}
-	if a.namespace != "" {
-		parts = append(parts, a.namespace)
-	}
-	if a.subsystem != "" {
-		parts = append(parts, a.subsystem)
-	}
-	parts = append(parts, name)
-	return strings.Join(parts, "_")
+	return metricName(a.namespace, a.subsystem, name)
 }
 
-// 确保实现了 observe.Metrics 接口
+func normalizeTags(tags []observe.Tag) (names, values []string, resultErr error) {
+	sorted := append([]observe.Tag(nil), tags...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+	names = make([]string, len(sorted))
+	values = make([]string, len(sorted))
+	for i, tag := range sorted {
+		if tag.Name == "" {
+			return nil, nil, errors.New("prometheus: tag name must not be empty")
+		}
+		if i > 0 && tag.Name == sorted[i-1].Name {
+			return nil, nil, fmt.Errorf("prometheus: duplicate tag %q", tag.Name)
+		}
+		names[i] = tag.Name
+		values[i] = tag.Value
+	}
+	return names, values, nil
+}
+
 var _ observe.Metrics = (*MetricsAdapter)(nil)
 
-// 适配器实现
+type counterAdapter struct{ counter prom.Counter }
 
-type counterAdapter struct {
-	counter *PrometheusCounter
-	mu      sync.Mutex
-	value   float64
+func (c *counterAdapter) Inc() { c.counter.Inc() }
+func (c *counterAdapter) Add(value float64) error {
+	if value < 0 {
+		return ErrNegativeCounterValue
+	}
+	c.counter.Add(value)
+	return nil
 }
-
-func (c *counterAdapter) Inc() {
-	c.counter.Inc()
-	c.mu.Lock()
-	c.value++
-	c.mu.Unlock()
-}
-
-func (c *counterAdapter) Add(v float64) {
-	c.counter.Add(v)
-	c.mu.Lock()
-	c.value += v
-	c.mu.Unlock()
-}
-
 func (c *counterAdapter) Value() float64 {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.value
+	var metric dto.Metric
+	if err := c.counter.Write(&metric); err != nil {
+		return 0
+	}
+	return metric.GetCounter().GetValue()
 }
 
 type histogramAdapter struct {
-	histogram *PrometheusHistogram
-	count     uint64
-	sum       float64
+	observer prom.Observer
+	metric   prom.Metric
 }
 
-func (h *histogramAdapter) Observe(v float64) {
-	h.histogram.Observe(v)
-	h.count++
-	h.sum += v
-}
-
+func (h *histogramAdapter) Observe(value float64) { h.observer.Observe(value) }
 func (h *histogramAdapter) Count() uint64 {
-	return h.count
+	var metric dto.Metric
+	if err := h.metric.Write(&metric); err != nil {
+		return 0
+	}
+	return metric.GetHistogram().GetSampleCount()
 }
-
 func (h *histogramAdapter) Sum() float64 {
-	return h.sum
+	var metric dto.Metric
+	if err := h.metric.Write(&metric); err != nil {
+		return 0
+	}
+	return metric.GetHistogram().GetSampleSum()
 }
 
-type gaugeAdapter struct {
-	gauge *PrometheusGauge
-	mu    sync.Mutex
-	value float64
-}
+type gaugeAdapter struct{ gauge prom.Gauge }
 
-func (g *gaugeAdapter) Set(v float64) {
-	g.gauge.Set(v)
-	g.mu.Lock()
-	g.value = v
-	g.mu.Unlock()
-}
-
-func (g *gaugeAdapter) Inc() {
-	g.gauge.Inc()
-	g.mu.Lock()
-	g.value++
-	g.mu.Unlock()
-}
-
-func (g *gaugeAdapter) Dec() {
-	g.gauge.Dec()
-	g.mu.Lock()
-	g.value--
-	g.mu.Unlock()
-}
-
-func (g *gaugeAdapter) Add(v float64) {
-	g.gauge.Add(v)
-	g.mu.Lock()
-	g.value += v
-	g.mu.Unlock()
-}
-
+func (g *gaugeAdapter) Set(value float64) { g.gauge.Set(value) }
+func (g *gaugeAdapter) Inc()              { g.gauge.Inc() }
+func (g *gaugeAdapter) Dec()              { g.gauge.Dec() }
+func (g *gaugeAdapter) Add(value float64) { g.gauge.Add(value) }
 func (g *gaugeAdapter) Value() float64 {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.value
+	var metric dto.Metric
+	if err := g.gauge.Write(&metric); err != nil {
+		return 0
+	}
+	return metric.GetGauge().GetValue()
 }
 
-type timerAdapter struct {
-	histogram *PrometheusHistogram
-}
+type timerAdapter struct{ histogram observe.Histogram }
 
-func (t *timerAdapter) ObserveDuration(d time.Duration) {
-	t.histogram.Observe(d.Seconds())
+func (t *timerAdapter) ObserveDuration(duration time.Duration) {
+	t.histogram.Observe(duration.Seconds())
 }
-
 func (t *timerAdapter) Time(fn func()) {
 	start := time.Now()
 	fn()
 	t.ObserveDuration(time.Since(start))
 }
-
-func (t *timerAdapter) NewTimer() *observe.TimerContext {
-	return observe.NewTimerContext(t)
-}
+func (t *timerAdapter) NewTimer() *observe.TimerContext { return observe.NewTimerContext(t) }

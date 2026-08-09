@@ -4,9 +4,8 @@
 //
 // 使用示例:
 //
-//	tracer := otel.NewOTelTracer(
+//	tracer := otel.NewTracer(
 //	    otel.WithServiceName("my-service"),
-//	    otel.WithEndpoint("localhost:4317"),
 //	)
 //	defer tracer.Shutdown(context.Background())
 //
@@ -16,7 +15,9 @@ package otel
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"time"
 
@@ -24,8 +25,8 @@ import (
 	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
-// OTelTracer OpenTelemetry 追踪器
-type OTelTracer struct {
+// Tracer OpenTelemetry 追踪器
+type Tracer struct {
 	// serviceName 服务名称
 	serviceName string
 
@@ -35,20 +36,28 @@ type OTelTracer struct {
 	// sampler 采样器
 	sampler Sampler
 
-	// propagator 传播器
-	propagator Propagator
-
 	// spans 活跃的 Span
 	spans sync.Map
 
 	// config 配置
-	config OTelConfig
+	config Config
 
 	mu sync.RWMutex
+
+	shutdownStarted bool
+	shutdownDone    chan struct{}
+	shutdownErr     error
+
+	errMu          sync.RWMutex
+	firstExportErr error
+	exportFailures uint64
 }
 
-// OTelConfig OpenTelemetry 配置
-type OTelConfig struct {
+// ErrTracerShutdown 表示追踪器已关闭，不能再接管新的导出器。
+var ErrTracerShutdown = errors.New("tracer is shut down")
+
+// Config OpenTelemetry 配置
+type Config struct {
 	// ServiceName 服务名称
 	ServiceName string
 
@@ -58,115 +67,133 @@ type OTelConfig struct {
 	// Environment 环境
 	Environment string
 
-	// Endpoint 导出端点
-	Endpoint string
-
-	// Headers 请求头
-	Headers map[string]string
-
 	// SamplingRate 采样率（0-1）
 	SamplingRate float64
-
-	// BatchSize 批量大小
-	BatchSize int
-
-	// BatchTimeout 批量超时
-	BatchTimeout time.Duration
-
-	// MaxQueueSize 最大队列大小
-	MaxQueueSize int
-
-	// Insecure 是否使用不安全连接
-	Insecure bool
 }
 
-// DefaultOTelConfig 返回默认配置
-func DefaultOTelConfig() OTelConfig {
-	return OTelConfig{
+// DefaultConfig 返回默认配置
+func DefaultConfig() Config {
+	return Config{
 		ServiceName:    "default",
 		ServiceVersion: "1.0.0",
 		Environment:    "development",
-		Endpoint:       "localhost:4317",
 		SamplingRate:   1.0,
-		BatchSize:      512,
-		BatchTimeout:   5 * time.Second,
-		MaxQueueSize:   2048,
-		Insecure:       true,
 	}
 }
 
-// OTelOption 配置选项
-type OTelOption func(*OTelConfig)
+// Option 配置选项
+type Option func(*Config)
 
 // WithServiceName 设置服务名称
-func WithServiceName(name string) OTelOption {
-	return func(c *OTelConfig) {
+func WithServiceName(name string) Option {
+	return func(c *Config) {
 		c.ServiceName = name
 	}
 }
 
 // WithServiceVersion 设置服务版本
-func WithServiceVersion(version string) OTelOption {
-	return func(c *OTelConfig) {
+func WithServiceVersion(version string) Option {
+	return func(c *Config) {
 		c.ServiceVersion = version
 	}
 }
 
 // WithEnvironment 设置环境
-func WithEnvironment(env string) OTelOption {
-	return func(c *OTelConfig) {
+func WithEnvironment(env string) Option {
+	return func(c *Config) {
 		c.Environment = env
 	}
 }
 
-// WithEndpoint 设置端点
-func WithEndpoint(endpoint string) OTelOption {
-	return func(c *OTelConfig) {
-		c.Endpoint = endpoint
-	}
-}
-
 // WithSamplingRate 设置采样率
-func WithSamplingRate(rate float64) OTelOption {
-	return func(c *OTelConfig) {
+func WithSamplingRate(rate float64) Option {
+	return func(c *Config) {
 		c.SamplingRate = rate
 	}
 }
 
-// WithBatchConfig 设置批量配置
-func WithBatchConfig(size int, timeout time.Duration) OTelOption {
-	return func(c *OTelConfig) {
-		c.BatchSize = size
-		c.BatchTimeout = timeout
-	}
-}
-
-// NewOTelTracer 创建 OpenTelemetry 追踪器
-func NewOTelTracer(opts ...OTelOption) *OTelTracer {
-	config := DefaultOTelConfig()
+// NewTracer 创建 OpenTelemetry 追踪器
+func NewTracer(opts ...Option) *Tracer {
+	config := DefaultConfig()
 	for _, opt := range opts {
-		opt(&config)
+		if opt != nil {
+			opt(&config)
+		}
 	}
 
-	t := &OTelTracer{
-		serviceName: config.ServiceName,
-		sampler:     NewProbabilitySampler(config.SamplingRate),
-		propagator:  NewW3CTraceContextPropagator(),
-		config:      config,
+	t := &Tracer{
+		serviceName:  config.ServiceName,
+		sampler:      NewProbabilitySampler(config.SamplingRate),
+		config:       config,
+		shutdownDone: make(chan struct{}),
 	}
 
 	return t
 }
 
-// SetExporter 设置导出器
-func (t *OTelTracer) SetExporter(exporter Exporter) {
+// SetExporter 设置并接管导出器所有权。
+//
+// 调用开始后，调用方不得继续使用或关闭 exporter。替换时新导出器立即生效，
+// 旧导出器会被关闭；旧导出器的关闭错误会返回，但不会撤销替换。
+// Tracer 已关闭时，传入的导出器也会被关闭，避免其后台任务泄漏。
+func (t *Tracer) SetExporter(ctx context.Context, exporter Exporter) error {
+	if isNilExporter(exporter) {
+		exporter = nil
+	}
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	if t.shutdownStarted {
+		t.mu.Unlock()
+		var shutdownErr error
+		if exporter != nil {
+			shutdownErr = exporter.Shutdown(ctx)
+		}
+		return errors.Join(ErrTracerShutdown, shutdownErr)
+	}
+	if sameExporter(t.exporter, exporter) {
+		t.mu.Unlock()
+		return nil
+	}
+	previous := t.exporter
 	t.exporter = exporter
+	t.mu.Unlock()
+
+	if previous == nil {
+		return nil
+	}
+	if err := previous.Shutdown(ctx); err != nil {
+		return fmt.Errorf("shutdown previous exporter: %w", err)
+	}
+	return nil
+}
+
+func sameExporter(first, second Exporter) bool {
+	firstNil := isNilExporter(first)
+	secondNil := isNilExporter(second)
+	if firstNil || secondNil {
+		return firstNil && secondNil
+	}
+	firstValue := reflect.ValueOf(first)
+	secondValue := reflect.ValueOf(second)
+	return firstValue.Type() == secondValue.Type() &&
+		firstValue.Type().Comparable() &&
+		firstValue.Interface() == secondValue.Interface()
+}
+
+func isNilExporter(exporter Exporter) bool {
+	if exporter == nil {
+		return true
+	}
+	value := reflect.ValueOf(exporter)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 // StartSpan 开始新的 Span
-func (t *OTelTracer) StartSpan(ctx context.Context, name string, opts ...observe.SpanOption) (context.Context, observe.Span) {
+func (t *Tracer) StartSpan(ctx context.Context, name string, opts ...observe.SpanOption) (context.Context, observe.Span) {
 	// 应用选项
 	cfg := &observe.SpanConfig{
 		Attributes: make(map[string]any),
@@ -192,7 +219,7 @@ func (t *OTelTracer) StartSpan(ctx context.Context, name string, opts ...observe
 	shouldSample := t.sampler.ShouldSample(traceID, name)
 
 	// 创建 Span
-	span := &OTelSpan{
+	span := &Span{
 		tracer:       t,
 		traceID:      traceID,
 		spanID:       spanID,
@@ -216,8 +243,14 @@ func (t *OTelTracer) StartSpan(ctx context.Context, name string, opts ...observe
 	span.attributes["service.version"] = t.config.ServiceVersion
 	span.attributes["deployment.environment"] = t.config.Environment
 
-	// 存储 Span
-	t.spans.Store(spanID, span)
+	// 关闭开始后不再接收新的记录型 Span，避免留下无法导出的活跃数据。
+	t.mu.RLock()
+	if t.shutdownStarted {
+		span.recording = false
+	} else {
+		t.spans.Store(spanID, span)
+	}
+	t.mu.RUnlock()
 
 	// 更新 context
 	ctx = observe.ContextWithSpan(ctx, span)
@@ -227,7 +260,7 @@ func (t *OTelTracer) StartSpan(ctx context.Context, name string, opts ...observe
 }
 
 // ExtractTraceID 提取 Trace ID
-func (t *OTelTracer) ExtractTraceID(ctx context.Context) string {
+func (t *Tracer) ExtractTraceID(ctx context.Context) string {
 	if traceID, ok := ctx.Value(traceIDKey{}).(string); ok {
 		return traceID
 	}
@@ -235,36 +268,63 @@ func (t *OTelTracer) ExtractTraceID(ctx context.Context) string {
 }
 
 // InjectTraceID 注入 Trace ID
-func (t *OTelTracer) InjectTraceID(ctx context.Context, traceID string) context.Context {
+func (t *Tracer) InjectTraceID(ctx context.Context, traceID string) context.Context {
 	return context.WithValue(ctx, traceIDKey{}, traceID)
 }
 
 // Shutdown 关闭追踪器
-func (t *OTelTracer) Shutdown(ctx context.Context) error {
-	// 导出所有剩余 Span
-	if t.exporter != nil {
-		spans := make([]*SpanData, 0)
-		t.spans.Range(func(key, value any) bool {
-			if span, ok := value.(*OTelSpan); ok {
-				spans = append(spans, span.toSpanData())
-			}
-			return true
-		})
-
-		if len(spans) > 0 {
-			t.exporter.ExportSpans(ctx, spans)
-		}
-
-		return t.exporter.Shutdown(ctx)
+func (t *Tracer) Shutdown(ctx context.Context) error {
+	t.mu.Lock()
+	if t.shutdownDone == nil {
+		t.shutdownDone = make(chan struct{})
 	}
-	return nil
+	if t.shutdownStarted {
+		done := t.shutdownDone
+		t.mu.Unlock()
+		select {
+		case <-done:
+			t.mu.RLock()
+			err := t.shutdownErr
+			t.mu.RUnlock()
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	t.shutdownStarted = true
+	exporter := t.exporter
+	t.exporter = nil
+	spans := make([]*SpanData, 0)
+	t.spans.Range(func(_, value any) bool {
+		if span, ok := value.(*Span); ok {
+			spans = append(spans, span.toSpanData())
+		}
+		return true
+	})
+	t.mu.Unlock()
+
+	var flushErr, exporterShutdownErr error
+	if exporter != nil {
+		if len(spans) > 0 {
+			flushErr = exporter.ExportSpans(ctx, spans)
+		}
+		exporterShutdownErr = exporter.Shutdown(ctx)
+	}
+	shutdownErr := errors.Join(t.exportErrorSnapshot(), flushErr, exporterShutdownErr)
+
+	t.mu.Lock()
+	t.shutdownErr = shutdownErr
+	close(t.shutdownDone)
+	t.mu.Unlock()
+	return shutdownErr
 }
 
 type traceIDKey struct{}
 
-// OTelSpan OpenTelemetry Span 实现
-type OTelSpan struct {
-	tracer       *OTelTracer
+// Span OpenTelemetry Span 实现
+type Span struct {
+	tracer       *Tracer
 	traceID      string
 	spanID       string
 	parentSpanID string
@@ -293,24 +353,24 @@ type SpanEvent struct {
 }
 
 // SpanID 返回 Span ID
-func (s *OTelSpan) SpanID() string {
+func (s *Span) SpanID() string {
 	return s.spanID
 }
 
 // TraceID 返回 Trace ID
-func (s *OTelSpan) TraceID() string {
+func (s *Span) TraceID() string {
 	return s.traceID
 }
 
 // SetName 设置名称
-func (s *OTelSpan) SetName(name string) {
+func (s *Span) SetName(name string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.name = name
 }
 
 // SetInput 设置输入
-func (s *OTelSpan) SetInput(input any) {
+func (s *Span) SetInput(input any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.input = input
@@ -318,7 +378,7 @@ func (s *OTelSpan) SetInput(input any) {
 }
 
 // SetOutput 设置输出
-func (s *OTelSpan) SetOutput(output any) {
+func (s *Span) SetOutput(output any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.output = output
@@ -326,7 +386,7 @@ func (s *OTelSpan) SetOutput(output any) {
 }
 
 // SetTokenUsage 设置 Token 使用量
-func (s *OTelSpan) SetTokenUsage(usage observe.TokenUsage) {
+func (s *Span) SetTokenUsage(usage observe.TokenUsage) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.tokenUsage = usage
@@ -336,14 +396,14 @@ func (s *OTelSpan) SetTokenUsage(usage observe.TokenUsage) {
 }
 
 // SetAttribute 设置属性
-func (s *OTelSpan) SetAttribute(key string, value any) {
+func (s *Span) SetAttribute(key string, value any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.attributes[key] = value
 }
 
 // SetAttributes 批量设置属性
-func (s *OTelSpan) SetAttributes(attrs map[string]any) {
+func (s *Span) SetAttributes(attrs map[string]any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for k, v := range attrs {
@@ -352,7 +412,7 @@ func (s *OTelSpan) SetAttributes(attrs map[string]any) {
 }
 
 // AddEvent 添加事件
-func (s *OTelSpan) AddEvent(name string, attrs ...any) {
+func (s *Span) AddEvent(name string, attrs ...any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -373,7 +433,7 @@ func (s *OTelSpan) AddEvent(name string, attrs ...any) {
 }
 
 // RecordError 记录错误
-func (s *OTelSpan) RecordError(err error) {
+func (s *Span) RecordError(err error) {
 	if err == nil {
 		return
 	}
@@ -395,7 +455,7 @@ func (s *OTelSpan) RecordError(err error) {
 }
 
 // SetStatus 设置状态
-func (s *OTelSpan) SetStatus(code observe.StatusCode, message string) {
+func (s *Span) SetStatus(code observe.StatusCode, message string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.status = code
@@ -403,7 +463,7 @@ func (s *OTelSpan) SetStatus(code observe.StatusCode, message string) {
 }
 
 // End 结束 Span
-func (s *OTelSpan) End() {
+func (s *Span) End() {
 	s.mu.Lock()
 	if s.ended {
 		s.mu.Unlock()
@@ -413,29 +473,50 @@ func (s *OTelSpan) End() {
 	s.endTime = time.Now()
 	s.mu.Unlock()
 
-	// 从追踪器中移除
+	// 删除与导出共享 exporter 生命周期读锁，替换和关闭会等待本次导出完成。
+	s.tracer.mu.RLock()
 	s.tracer.spans.Delete(s.spanID)
-
-	// 导出
 	if s.tracer.exporter != nil && s.recording {
-		s.tracer.exporter.ExportSpans(context.Background(), []*SpanData{s.toSpanData()})
+		s.tracer.recordExportError(s.tracer.exporter.ExportSpans(context.Background(), []*SpanData{s.toSpanData()}))
+	}
+	s.tracer.mu.RUnlock()
+}
+
+func (t *Tracer) recordExportError(err error) {
+	if err == nil {
+		return
+	}
+	t.errMu.Lock()
+	defer t.errMu.Unlock()
+	t.exportFailures++
+	if t.firstExportErr == nil {
+		t.firstExportErr = err
 	}
 }
 
+func (t *Tracer) exportErrorSnapshot() error {
+	t.errMu.RLock()
+	defer t.errMu.RUnlock()
+	if t.firstExportErr == nil {
+		return nil
+	}
+	return fmt.Errorf("span export failed %d times: %w", t.exportFailures, t.firstExportErr)
+}
+
 // EndWithError 结束并记录错误
-func (s *OTelSpan) EndWithError(err error) {
+func (s *Span) EndWithError(err error) {
 	s.RecordError(err)
 	s.SetStatus(observe.StatusCodeError, err.Error())
 	s.End()
 }
 
 // IsRecording 是否正在记录
-func (s *OTelSpan) IsRecording() bool {
+func (s *Span) IsRecording() bool {
 	return s.recording
 }
 
 // toSpanData 转换为导出数据
-func (s *OTelSpan) toSpanData() *SpanData {
+func (s *Span) toSpanData() *SpanData {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -478,5 +559,5 @@ type SpanData struct {
 }
 
 // 确保实现了接口
-var _ observe.Tracer = (*OTelTracer)(nil)
-var _ observe.Span = (*OTelSpan)(nil)
+var _ observe.Tracer = (*Tracer)(nil)
+var _ observe.Span = (*Span)(nil)

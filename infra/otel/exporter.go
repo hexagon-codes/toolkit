@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
@@ -16,9 +19,27 @@ type Exporter interface {
 	// ExportSpans 导出 Span 数据
 	ExportSpans(ctx context.Context, spans []*SpanData) error
 
-	// Shutdown 关闭导出器
+	// Shutdown 关闭导出器。首次调用必须启动全部后台任务的停止流程，且重复调用必须安全。
 	Shutdown(ctx context.Context) error
 }
+
+var (
+	// ErrExporterShutdown 表示导出器已经关闭，不能再接收新的 Span。
+	ErrExporterShutdown = errors.New("OTLP exporter is shut down")
+	// ErrExporterQueueFull 表示导出队列已达到容量上限。
+	ErrExporterQueueFull = errors.New("OTLP exporter queue is full")
+	// ErrInvalidExporterConfig 表示 OTLP 导出器配置无效。
+	ErrInvalidExporterConfig = errors.New("OTLP exporter configuration is invalid")
+	// ErrInvalidSpan 表示待导出的 Span 无效。
+	ErrInvalidSpan = errors.New("OTLP exporter span is invalid")
+)
+
+const (
+	defaultOTLPBatchSize    = 512
+	defaultOTLPBatchTimeout = 5 * time.Second
+	defaultOTLPMaxQueueSize = 2048
+	maxErrorResponseBytes   = 64 << 10
+)
 
 // ============== Console Exporter ==============
 
@@ -55,7 +76,9 @@ func (e *ConsoleExporter) ExportSpans(ctx context.Context, spans []*SpanData) er
 			return err
 		}
 
-		fmt.Fprintf(e.Writer, "%s\n", data)
+		if _, err := fmt.Fprintf(e.Writer, "%s\n", data); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -81,37 +104,65 @@ type OTLPExporter struct {
 	// Batch 批量配置
 	batchSize    int
 	batchTimeout time.Duration
+	maxQueueSize int
 	buffer       []*SpanData
+	inFlight     int
 	bufferMu     sync.Mutex
+	flushMu      sync.Mutex
+	closed       bool
 
-	// Shutdown
-	done      chan struct{}
-	closeOnce sync.Once
+	// 关闭生命周期
+	done           chan struct{}
+	loopDone       chan struct{}
+	closeOnce      sync.Once
+	errMu          sync.Mutex
+	firstExportErr error
+	exportFailures uint64
 }
 
 // OTLPExporterOption OTLP 导出器选项
 type OTLPExporterOption func(*OTLPExporter)
 
 // NewOTLPExporter 创建 OTLP 导出器
-func NewOTLPExporter(endpoint string, opts ...OTLPExporterOption) *OTLPExporter {
+func NewOTLPExporter(endpoint string, opts ...OTLPExporterOption) (*OTLPExporter, error) {
+	endpoint = strings.TrimRight(strings.TrimSpace(endpoint), "/")
 	e := &OTLPExporter{
 		endpoint:     endpoint,
 		headers:      make(map[string]string),
 		client:       &http.Client{Timeout: 30 * time.Second},
-		batchSize:    512,
-		batchTimeout: 5 * time.Second,
+		batchSize:    defaultOTLPBatchSize,
+		batchTimeout: defaultOTLPBatchTimeout,
+		maxQueueSize: defaultOTLPMaxQueueSize,
 		buffer:       make([]*SpanData, 0),
 		done:         make(chan struct{}),
+		loopDone:     make(chan struct{}),
 	}
 
 	for _, opt := range opts {
-		opt(e)
+		if opt != nil {
+			opt(e)
+		}
+	}
+	parsedEndpoint, err := url.ParseRequestURI(e.endpoint)
+	if err != nil || parsedEndpoint.Host == "" || (parsedEndpoint.Scheme != "http" && parsedEndpoint.Scheme != "https") ||
+		parsedEndpoint.User != nil || parsedEndpoint.RawQuery != "" || parsedEndpoint.Fragment != "" {
+		return nil, fmt.Errorf("%w: endpoint must be an absolute HTTP(S) URL without credentials, query, or fragment", ErrInvalidExporterConfig)
+	}
+	switch {
+	case e.batchSize <= 0:
+		return nil, fmt.Errorf("%w: batch size must be positive", ErrInvalidExporterConfig)
+	case e.batchTimeout <= 0:
+		return nil, fmt.Errorf("%w: batch timeout must be positive", ErrInvalidExporterConfig)
+	case e.maxQueueSize <= 0:
+		return nil, fmt.Errorf("%w: maximum queue size must be positive", ErrInvalidExporterConfig)
+	case e.maxQueueSize < e.batchSize:
+		return nil, fmt.Errorf("%w: maximum queue size must not be smaller than batch size", ErrInvalidExporterConfig)
 	}
 
 	// 启动批量导出
 	go e.batchLoop()
 
-	return e
+	return e, nil
 }
 
 // WithOTLPHeaders 设置请求头
@@ -130,10 +181,40 @@ func WithOTLPBatchSize(size int) OTLPExporterOption {
 	}
 }
 
+// WithOTLPBatchTimeout 设置定时刷新间隔。
+func WithOTLPBatchTimeout(timeout time.Duration) OTLPExporterOption {
+	return func(e *OTLPExporter) {
+		e.batchTimeout = timeout
+	}
+}
+
+// WithOTLPMaxQueueSize 设置已排队与在途 Span 的总容量上限。
+func WithOTLPMaxQueueSize(size int) OTLPExporterOption {
+	return func(e *OTLPExporter) {
+		e.maxQueueSize = size
+	}
+}
+
 // ExportSpans 导出 Span
 func (e *OTLPExporter) ExportSpans(ctx context.Context, spans []*SpanData) error {
+	snapshot := make([]*SpanData, len(spans))
+	for index, span := range spans {
+		if span == nil {
+			return fmt.Errorf("%w: span at index %d is nil", ErrInvalidSpan, index)
+		}
+		snapshot[index] = cloneSpanData(span)
+	}
+
 	e.bufferMu.Lock()
-	e.buffer = append(e.buffer, spans...)
+	if e.closed {
+		e.bufferMu.Unlock()
+		return ErrExporterShutdown
+	}
+	if len(e.buffer)+e.inFlight+len(snapshot) > e.maxQueueSize {
+		e.bufferMu.Unlock()
+		return fmt.Errorf("%w: capacity=%d", ErrExporterQueueFull, e.maxQueueSize)
+	}
+	e.buffer = append(e.buffer, snapshot...)
 	shouldFlush := len(e.buffer) >= e.batchSize
 	e.bufferMu.Unlock()
 
@@ -146,6 +227,9 @@ func (e *OTLPExporter) ExportSpans(ctx context.Context, spans []*SpanData) error
 
 // flush 刷新缓冲区
 func (e *OTLPExporter) flush(ctx context.Context) error {
+	e.flushMu.Lock()
+	defer e.flushMu.Unlock()
+
 	e.bufferMu.Lock()
 	if len(e.buffer) == 0 {
 		e.bufferMu.Unlock()
@@ -154,13 +238,39 @@ func (e *OTLPExporter) flush(ctx context.Context) error {
 
 	spans := e.buffer
 	e.buffer = make([]*SpanData, 0)
+	e.inFlight += len(spans)
 	e.bufferMu.Unlock()
 
-	return e.send(ctx, spans)
+	err := e.send(ctx, spans)
+	e.bufferMu.Lock()
+	e.inFlight -= len(spans)
+	if err != nil {
+		// 保留失败批次，下一次 flush 继续尝试，提供至少一次投递语义。
+		e.buffer = append(spans, e.buffer...)
+	}
+	e.bufferMu.Unlock()
+	return err
+}
+
+func cloneSpanData(span *SpanData) *SpanData {
+	clone := *span
+	clone.Attributes = make(map[string]any, len(span.Attributes))
+	for key, value := range span.Attributes {
+		clone.Attributes[key] = value
+	}
+	clone.Events = make([]SpanEvent, len(span.Events))
+	for index, event := range span.Events {
+		clone.Events[index] = event
+		clone.Events[index].Attributes = make(map[string]any, len(event.Attributes))
+		for key, value := range event.Attributes {
+			clone.Events[index].Attributes[key] = value
+		}
+	}
+	return &clone
 }
 
 // send 发送数据
-func (e *OTLPExporter) send(ctx context.Context, spans []*SpanData) error {
+func (e *OTLPExporter) send(ctx context.Context, spans []*SpanData) (err error) {
 	// 转换为 OTLP 格式
 	payload := e.toOTLPPayload(spans)
 
@@ -183,11 +293,10 @@ func (e *OTLPExporter) send(ctx context.Context, spans []*SpanData) error {
 	if err != nil {
 		return fmt.Errorf("send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { err = errors.Join(err, resp.Body.Close()) }()
 
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("export failed: status=%d, body=%s", resp.StatusCode, string(body))
+	if !isHTTPSuccess(resp.StatusCode) {
+		return newHTTPExportError("OTLP", resp.StatusCode, resp.Body)
 	}
 
 	return nil
@@ -195,8 +304,6 @@ func (e *OTLPExporter) send(ctx context.Context, spans []*SpanData) error {
 
 // toOTLPPayload 转换为 OTLP 格式
 func (e *OTLPExporter) toOTLPPayload(spans []*SpanData) map[string]any {
-	resourceSpans := make([]map[string]any, 0)
-
 	// 按服务分组
 	serviceSpans := make(map[string][]*SpanData)
 	for _, span := range spans {
@@ -206,9 +313,10 @@ func (e *OTLPExporter) toOTLPPayload(spans []*SpanData) map[string]any {
 		}
 		serviceSpans[serviceName] = append(serviceSpans[serviceName], span)
 	}
+	resourceSpans := make([]map[string]any, 0, len(serviceSpans))
 
 	for serviceName, svcSpans := range serviceSpans {
-		scopeSpans := make([]map[string]any, 0)
+		scopeSpans := make([]map[string]any, 0, 1)
 
 		otlpSpans := make([]map[string]any, len(svcSpans))
 		for i, span := range svcSpans {
@@ -240,7 +348,7 @@ func (e *OTLPExporter) toOTLPPayload(spans []*SpanData) map[string]any {
 
 // spanToOTLP 转换单个 Span
 func (e *OTLPExporter) spanToOTLP(span *SpanData) map[string]any {
-	attributes := make([]map[string]any, 0)
+	attributes := make([]map[string]any, 0, len(span.Attributes))
 	for k, v := range span.Attributes {
 		attributes = append(attributes, map[string]any{
 			"key":   k,
@@ -301,6 +409,9 @@ func (e *OTLPExporter) valueToOTLP(v any) map[string]any {
 
 // batchLoop 批量导出循环
 func (e *OTLPExporter) batchLoop() {
+	if e.loopDone != nil {
+		defer close(e.loopDone)
+	}
 	ticker := time.NewTicker(e.batchTimeout)
 	defer ticker.Stop()
 
@@ -309,17 +420,54 @@ func (e *OTLPExporter) batchLoop() {
 		case <-e.done:
 			return
 		case <-ticker.C:
-			e.flush(context.Background())
+			if err := e.flush(context.Background()); err != nil {
+				e.recordBackgroundError(err)
+			}
 		}
 	}
 }
 
-// Shutdown 关闭导出器，使用 sync.Once 防止重复关闭 channel 导致 panic
+func (e *OTLPExporter) recordBackgroundError(err error) {
+	if err == nil {
+		return
+	}
+	e.errMu.Lock()
+	defer e.errMu.Unlock()
+	e.exportFailures++
+	if e.firstExportErr == nil {
+		e.firstExportErr = err
+	}
+}
+
+func (e *OTLPExporter) backgroundError() error {
+	e.errMu.Lock()
+	defer e.errMu.Unlock()
+	if e.firstExportErr == nil {
+		return nil
+	}
+	return fmt.Errorf("OTLP background export failed %d times: %w", e.exportFailures, e.firstExportErr)
+}
+
+// Shutdown 停止后台循环，等待在途刷新完成并发送剩余数据。
 func (e *OTLPExporter) Shutdown(ctx context.Context) error {
+	e.bufferMu.Lock()
+	e.closed = true
+	e.bufferMu.Unlock()
 	e.closeOnce.Do(func() {
-		close(e.done)
+		if e.done != nil {
+			close(e.done)
+		}
 	})
-	return e.flush(ctx)
+	if e.loopDone != nil {
+		select {
+		case <-e.loopDone:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	flushErr := e.flush(ctx)
+	e.client.CloseIdleConnections()
+	return errors.Join(e.backgroundError(), flushErr)
 }
 
 // ============== Jaeger Exporter ==============
@@ -348,7 +496,7 @@ func (e *JaegerExporter) WithAuth(username, password string) *JaegerExporter {
 }
 
 // ExportSpans 导出 Span
-func (e *JaegerExporter) ExportSpans(ctx context.Context, spans []*SpanData) error {
+func (e *JaegerExporter) ExportSpans(ctx context.Context, spans []*SpanData) (err error) {
 	if len(spans) == 0 {
 		return nil
 	}
@@ -374,11 +522,10 @@ func (e *JaegerExporter) ExportSpans(ctx context.Context, spans []*SpanData) err
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { err = errors.Join(err, resp.Body.Close()) }()
 
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("jaeger export failed: status=%d, body=%s", resp.StatusCode, string(body))
+	if !isHTTPSuccess(resp.StatusCode) {
+		return newHTTPExportError("Jaeger", resp.StatusCode, resp.Body)
 	}
 
 	return nil
@@ -477,7 +624,7 @@ func NewZipkinExporter(endpoint, serviceName string) *ZipkinExporter {
 }
 
 // ExportSpans 导出 Span
-func (e *ZipkinExporter) ExportSpans(ctx context.Context, spans []*SpanData) error {
+func (e *ZipkinExporter) ExportSpans(ctx context.Context, spans []*SpanData) (err error) {
 	zipkinSpans := make([]map[string]any, len(spans))
 
 	for i, span := range spans {
@@ -525,11 +672,10 @@ func (e *ZipkinExporter) ExportSpans(ctx context.Context, spans []*SpanData) err
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { err = errors.Join(err, resp.Body.Close()) }()
 
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("zipkin export failed: status=%d, body=%s", resp.StatusCode, string(body))
+	if !isHTTPSuccess(resp.StatusCode) {
+		return newHTTPExportError("Zipkin", resp.StatusCode, resp.Body)
 	}
 
 	return nil
@@ -538,6 +684,31 @@ func (e *ZipkinExporter) ExportSpans(ctx context.Context, spans []*SpanData) err
 // Shutdown 关闭导出器
 func (e *ZipkinExporter) Shutdown(ctx context.Context) error {
 	return nil
+}
+
+func isHTTPSuccess(statusCode int) bool {
+	return statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices
+}
+
+// newHTTPExportError 有界读取错误响应，并明确标记诊断内容是否被截断。
+func newHTTPExportError(exporterName string, statusCode int, body io.Reader) error {
+	data, readErr := io.ReadAll(io.LimitReader(body, maxErrorResponseBytes+1))
+	truncated := len(data) > maxErrorResponseBytes
+	if truncated {
+		data = data[:maxErrorResponseBytes]
+	}
+
+	message := fmt.Sprintf(
+		"%s export failed: status=%d, body=%q, truncated=%t",
+		exporterName,
+		statusCode,
+		data,
+		truncated,
+	)
+	if readErr != nil {
+		return fmt.Errorf("%s, read error response: %w", message, readErr)
+	}
+	return errors.New(message)
 }
 
 // ============== Multi Exporter ==============
@@ -556,22 +727,22 @@ func NewMultiExporter(exporters ...Exporter) *MultiExporter {
 
 // ExportSpans 导出 Span
 func (e *MultiExporter) ExportSpans(ctx context.Context, spans []*SpanData) error {
-	var lastErr error
+	var exportErr error
 	for _, exporter := range e.exporters {
 		if err := exporter.ExportSpans(ctx, spans); err != nil {
-			lastErr = err
+			exportErr = errors.Join(exportErr, err)
 		}
 	}
-	return lastErr
+	return exportErr
 }
 
 // Shutdown 关闭导出器
 func (e *MultiExporter) Shutdown(ctx context.Context) error {
-	var lastErr error
+	var shutdownErr error
 	for _, exporter := range e.exporters {
 		if err := exporter.Shutdown(ctx); err != nil {
-			lastErr = err
+			shutdownErr = errors.Join(shutdownErr, err)
 		}
 	}
-	return lastErr
+	return shutdownErr
 }

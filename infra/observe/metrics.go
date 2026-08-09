@@ -10,26 +10,28 @@ type Metrics interface {
 	// Counter 获取或创建计数器
 	//
 	// Counter 是单调递增的指标，适用于统计请求数、错误数等
-	// tags 参数格式: key1, value1, key2, value2, ...
-	Counter(name string, tags ...string) Counter
+	Counter(name string, tags ...Tag) (Counter, error)
 
 	// Gauge 获取或创建仪表盘
 	//
 	// Gauge 可以增加或减少，适用于统计当前值如活跃连接数、内存使用等
-	// tags 参数格式: key1, value1, key2, value2, ...
-	Gauge(name string, tags ...string) Gauge
+	Gauge(name string, tags ...Tag) (Gauge, error)
 
 	// Histogram 获取或创建直方图
 	//
 	// Histogram 用于统计数值的分布，如响应时间、请求大小等
-	// tags 参数格式: key1, value1, key2, value2, ...
-	Histogram(name string, tags ...string) Histogram
+	Histogram(name string, tags ...Tag) (Histogram, error)
 
 	// Timer 获取或创建计时器
 	//
 	// Timer 用于测量操作的持续时间
-	// tags 参数格式: key1, value1, key2, value2, ...
-	Timer(name string, tags ...string) Timer
+	Timer(name string, tags ...Tag) (Timer, error)
+}
+
+// Tag 是类型化指标标签，用于避免畸形的键值参数列表。
+type Tag struct {
+	Name  string
+	Value string
 }
 
 // Counter 计数器接口
@@ -41,7 +43,7 @@ type Counter interface {
 	Inc()
 
 	// Add 增加指定值（必须 >= 0）
-	Add(v float64)
+	Add(v float64) error
 
 	// Value 获取当前值
 	Value() float64
@@ -158,9 +160,9 @@ const (
 	// MetricLLMCallErrors LLM 调用错误数
 	MetricLLMCallErrors = "llm_call_errors_total"
 	// MetricLLMPromptTokens 提示词 Token 数
-	MetricLLMPromptTokens = "llm_prompt_tokens_total"
+	MetricLLMPromptTokens = "llm_prompt_tokens_total" // #nosec G101 -- 指标名称，不是凭据。
 	// MetricLLMCompletionTokens 补全 Token 数
-	MetricLLMCompletionTokens = "llm_completion_tokens_total"
+	MetricLLMCompletionTokens = "llm_completion_tokens_total" // #nosec G101 -- 指标名称，不是凭据。
 )
 
 // Tool 相关指标

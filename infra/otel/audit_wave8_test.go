@@ -3,6 +3,7 @@ package otel
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,7 +29,7 @@ func (e *auditError) Error() string { return e.msg }
 // startRecordingSpan 创建一个正在记录的 span 并放入 ctx，便于注入测试
 func startRecordingSpan(t *testing.T, traceID, spanID string) context.Context {
 	t.Helper()
-	sp := &OTelSpan{
+	sp := &Span{
 		traceID:   traceID,
 		spanID:    spanID,
 		recording: true,
@@ -365,7 +366,7 @@ func TestMapCarrierEmptyAndMissing(t *testing.T) {
 
 // TestStartSpanParentChild 父子 span：子 span 应继承父 traceID 并记录 parentSpanID。
 func TestStartSpanParentChild(t *testing.T) {
-	tr := NewOTelTracer(WithServiceName("svc"))
+	tr := NewTracer(WithServiceName("svc"))
 	ctx := context.Background()
 
 	ctx, parent := tr.StartSpan(ctx, "parent")
@@ -376,7 +377,7 @@ func TestStartSpanParentChild(t *testing.T) {
 	if child.TraceID() != parentTrace {
 		t.Errorf("子 span traceID = %q, 应继承父 %q", child.TraceID(), parentTrace)
 	}
-	cs := child.(*OTelSpan)
+	cs := child.(*Span)
 	if cs.parentSpanID != parentSpanID {
 		t.Errorf("子 span parentSpanID = %q, want %q", cs.parentSpanID, parentSpanID)
 	}
@@ -386,13 +387,13 @@ func TestStartSpanParentChild(t *testing.T) {
 
 // TestStartSpanResourceAttributes StartSpan 应注入服务资源属性。
 func TestStartSpanResourceAttributes(t *testing.T) {
-	tr := NewOTelTracer(
+	tr := NewTracer(
 		WithServiceName("my-svc"),
 		WithServiceVersion("3.1.4"),
 		WithEnvironment("staging"),
 	)
 	_, span := tr.StartSpan(context.Background(), "op")
-	s := span.(*OTelSpan)
+	s := span.(*Span)
 	if s.attributes["service.name"] != "my-svc" {
 		t.Errorf("service.name = %v", s.attributes["service.name"])
 	}
@@ -407,12 +408,12 @@ func TestStartSpanResourceAttributes(t *testing.T) {
 
 // TestStartSpanInitialAttributes WithAttributes 初始属性应进入 span。
 func TestStartSpanInitialAttributes(t *testing.T) {
-	tr := NewOTelTracer()
+	tr := NewTracer()
 	_, span := tr.StartSpan(context.Background(), "op",
 		observe.WithAttributes(map[string]any{"custom": "x"}),
 		observe.WithSpanKind(observe.SpanKindServer),
 	)
-	s := span.(*OTelSpan)
+	s := span.(*Span)
 	if s.attributes["custom"] != "x" {
 		t.Error("初始属性 custom 丢失")
 	}
@@ -424,7 +425,7 @@ func TestStartSpanInitialAttributes(t *testing.T) {
 
 // TestSpanStoreCleanupOnEnd span 结束后应从 tracer.spans 中移除。
 func TestSpanStoreCleanupOnEnd(t *testing.T) {
-	tr := NewOTelTracer()
+	tr := NewTracer()
 	_, span := tr.StartSpan(context.Background(), "op")
 	id := span.SpanID()
 
@@ -439,9 +440,9 @@ func TestSpanStoreCleanupOnEnd(t *testing.T) {
 
 // TestSpanEndIdempotent 重复 End 应幂等，不重复导出。
 func TestSpanEndIdempotent(t *testing.T) {
-	tr := NewOTelTracer(WithSamplingRate(1.0))
+	tr := NewTracer(WithSamplingRate(1.0))
 	exp := &countingExporter{}
-	tr.SetExporter(exp)
+	mustSetExporter(t, tr, exp)
 
 	_, span := tr.StartSpan(context.Background(), "op")
 	span.End()
@@ -455,9 +456,9 @@ func TestSpanEndIdempotent(t *testing.T) {
 
 // TestSpanNotRecordingNoExport 未采样的 span 结束时不应导出。
 func TestSpanNotRecordingNoExport(t *testing.T) {
-	tr := NewOTelTracer(WithSamplingRate(0.0)) // NeverSample via probability 0
+	tr := NewTracer(WithSamplingRate(0.0)) // 采样概率为 0 时永不采样
 	exp := &countingExporter{}
-	tr.SetExporter(exp)
+	mustSetExporter(t, tr, exp)
 
 	_, span := tr.StartSpan(context.Background(), "op")
 	if span.IsRecording() {
@@ -471,9 +472,9 @@ func TestSpanNotRecordingNoExport(t *testing.T) {
 
 // TestSpanRecordErrorNil RecordError(nil) 不应记录任何东西。
 func TestSpanRecordErrorNil(t *testing.T) {
-	tr := NewOTelTracer()
+	tr := NewTracer()
 	_, span := tr.StartSpan(context.Background(), "op")
-	s := span.(*OTelSpan)
+	s := span.(*Span)
 	before := len(s.events)
 	span.RecordError(nil)
 	if len(s.events) != before {
@@ -484,9 +485,9 @@ func TestSpanRecordErrorNil(t *testing.T) {
 
 // TestSpanRecordErrorAttrs RecordError 应记录属性与 exception 事件。
 func TestSpanRecordErrorAttrs(t *testing.T) {
-	tr := NewOTelTracer()
+	tr := NewTracer()
 	_, span := tr.StartSpan(context.Background(), "op")
-	s := span.(*OTelSpan)
+	s := span.(*Span)
 	span.RecordError(&auditError{"boom"})
 	if s.attributes[observe.AttrErrorMessage] != "boom" {
 		t.Errorf("error.message = %v", s.attributes[observe.AttrErrorMessage])
@@ -505,9 +506,9 @@ func TestSpanRecordErrorAttrs(t *testing.T) {
 
 // TestSpanEndWithError EndWithError 应设置错误状态并结束。
 func TestSpanEndWithError(t *testing.T) {
-	tr := NewOTelTracer()
+	tr := NewTracer()
 	_, span := tr.StartSpan(context.Background(), "op")
-	s := span.(*OTelSpan)
+	s := span.(*Span)
 	span.EndWithError(&auditError{"fatal"})
 	if s.status != observe.StatusCodeError {
 		t.Errorf("status = %v, want Error", s.status)
@@ -519,9 +520,9 @@ func TestSpanEndWithError(t *testing.T) {
 
 // TestSpanAddEventOddAttrs AddEvent 奇数个属性参数：最后一个无配对的应被丢弃，不应 panic / 越界。
 func TestSpanAddEventOddAttrs(t *testing.T) {
-	tr := NewOTelTracer()
+	tr := NewTracer()
 	_, span := tr.StartSpan(context.Background(), "op")
-	s := span.(*OTelSpan)
+	s := span.(*Span)
 	// 3 个参数 = 1.5 对，循环 i<len-1=2，仅处理 i=0 => key0/val0
 	span.AddEvent("ev", "key0", "val0", "dangling")
 	if len(s.events) != 1 {
@@ -539,9 +540,9 @@ func TestSpanAddEventOddAttrs(t *testing.T) {
 
 // TestSpanAddEventNonStringKey 非字符串 key 应被跳过。
 func TestSpanAddEventNonStringKey(t *testing.T) {
-	tr := NewOTelTracer()
+	tr := NewTracer()
 	_, span := tr.StartSpan(context.Background(), "op")
-	s := span.(*OTelSpan)
+	s := span.(*Span)
 	span.AddEvent("ev", 123, "val") // key 不是 string
 	if len(s.events[0].Attributes) != 0 {
 		t.Error("非字符串 key 应被跳过")
@@ -551,9 +552,9 @@ func TestSpanAddEventNonStringKey(t *testing.T) {
 
 // TestSpanSetTokenUsage Token 用量应写入对应属性。
 func TestSpanSetTokenUsage(t *testing.T) {
-	tr := NewOTelTracer()
+	tr := NewTracer()
 	_, span := tr.StartSpan(context.Background(), "op")
-	s := span.(*OTelSpan)
+	s := span.(*Span)
 	span.SetTokenUsage(observe.TokenUsage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30})
 	if s.attributes[observe.AttrLLMTotalTokens] != 30 {
 		t.Errorf("total tokens = %v", s.attributes[observe.AttrLLMTotalTokens])
@@ -563,9 +564,9 @@ func TestSpanSetTokenUsage(t *testing.T) {
 
 // TestSpanSetInputOutput SetInput/SetOutput 写入属性。
 func TestSpanSetInputOutput(t *testing.T) {
-	tr := NewOTelTracer()
+	tr := NewTracer()
 	_, span := tr.StartSpan(context.Background(), "op")
-	s := span.(*OTelSpan)
+	s := span.(*Span)
 	span.SetInput("in")
 	span.SetOutput("out")
 	if s.attributes["input"] != "in" || s.attributes["output"] != "out" {
@@ -576,10 +577,10 @@ func TestSpanSetInputOutput(t *testing.T) {
 
 // TestSpanSetName SetName 修改名称。
 func TestSpanSetName(t *testing.T) {
-	tr := NewOTelTracer()
+	tr := NewTracer()
 	_, span := tr.StartSpan(context.Background(), "old")
 	span.SetName("new")
-	if span.(*OTelSpan).name != "new" {
+	if span.(*Span).name != "new" {
 		t.Error("SetName 未生效")
 	}
 	span.End()
@@ -587,7 +588,7 @@ func TestSpanSetName(t *testing.T) {
 
 // TestSpanConcurrentMutation 并发设置属性/事件不应 data race。
 func TestSpanConcurrentMutation(t *testing.T) {
-	tr := NewOTelTracer()
+	tr := NewTracer()
 	_, span := tr.StartSpan(context.Background(), "op")
 
 	var wg sync.WaitGroup
@@ -607,7 +608,7 @@ func TestSpanConcurrentMutation(t *testing.T) {
 
 // TestExtractInjectTraceID Tracer 的 ExtractTraceID/InjectTraceID 闭环。
 func TestExtractInjectTraceID(t *testing.T) {
-	tr := NewOTelTracer()
+	tr := NewTracer()
 	ctx := tr.InjectTraceID(context.Background(), "tid-123")
 	if tr.ExtractTraceID(ctx) != "tid-123" {
 		t.Error("Inject/ExtractTraceID 不一致")
@@ -619,9 +620,9 @@ func TestExtractInjectTraceID(t *testing.T) {
 
 // TestTracerShutdownExportsActiveSpans Shutdown 时应导出仍活跃（未 End）的 span。
 func TestTracerShutdownExportsActiveSpans(t *testing.T) {
-	tr := NewOTelTracer(WithSamplingRate(1.0))
+	tr := NewTracer(WithSamplingRate(1.0))
 	exp := &countingExporter{}
-	tr.SetExporter(exp)
+	mustSetExporter(t, tr, exp)
 
 	// 启动但不结束
 	tr.StartSpan(context.Background(), "leaked-1")
@@ -640,7 +641,7 @@ func TestTracerShutdownExportsActiveSpans(t *testing.T) {
 
 // TestTracerShutdownNilExporter 无 exporter 时 Shutdown 不应 panic 并返回 nil。
 func TestTracerShutdownNilExporter(t *testing.T) {
-	tr := NewOTelTracer()
+	tr := NewTracer()
 	if err := tr.Shutdown(context.Background()); err != nil {
 		t.Errorf("nil exporter Shutdown 应返回 nil, got %v", err)
 	}
@@ -648,9 +649,9 @@ func TestTracerShutdownNilExporter(t *testing.T) {
 
 // TestToSpanDataSnapshot toSpanData 返回的是深拷贝快照，后续修改不应影响已导出数据。
 func TestToSpanDataSnapshot(t *testing.T) {
-	tr := NewOTelTracer()
+	tr := NewTracer()
 	_, span := tr.StartSpan(context.Background(), "op")
-	s := span.(*OTelSpan)
+	s := span.(*Span)
 	span.SetAttribute("a", 1)
 	span.AddEvent("e1")
 
@@ -695,6 +696,15 @@ type failingExporter struct{ err error }
 
 func (e *failingExporter) ExportSpans(ctx context.Context, spans []*SpanData) error { return e.err }
 func (e *failingExporter) Shutdown(ctx context.Context) error                       { return e.err }
+
+func mustNewOTLPExporter(t *testing.T, endpoint string, options ...OTLPExporterOption) *OTLPExporter {
+	t.Helper()
+	exporter, err := NewOTLPExporter(endpoint, options...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return exporter
+}
 
 // TestConsoleExporterPretty Pretty/非 Pretty 都应输出。
 func TestConsoleExporterPretty(t *testing.T) {
@@ -763,7 +773,7 @@ func TestOTLPExporterBatchFlushBySize(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	exp := NewOTLPExporter(srv.URL, WithOTLPBatchSize(2))
+	exp := mustNewOTLPExporter(t, srv.URL, WithOTLPBatchSize(2))
 	defer exp.Shutdown(context.Background())
 
 	// 第一次：1 个，未达 batchSize=2，不 flush
@@ -798,7 +808,7 @@ func TestOTLPExporterFlushOnShutdown(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	exp := NewOTLPExporter(srv.URL, WithOTLPBatchSize(1000))
+	exp := mustNewOTLPExporter(t, srv.URL, WithOTLPBatchSize(1000))
 	// 放入少量，不触发 size flush
 	exp.ExportSpans(context.Background(), []*SpanData{mkSpan("x")})
 	if atomic.LoadInt32(&got) != 0 {
@@ -822,13 +832,232 @@ func TestOTLPExporterShutdownIdempotent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	exp := NewOTLPExporter(srv.URL)
+	exp := mustNewOTLPExporter(t, srv.URL)
 	if err := exp.Shutdown(context.Background()); err != nil {
 		t.Fatalf("首次 Shutdown 失败: %v", err)
 	}
 	// 第二次不应 panic
 	if err := exp.Shutdown(context.Background()); err != nil {
 		t.Fatalf("二次 Shutdown 失败: %v", err)
+	}
+}
+
+func TestOTLPExporterShutdownWaitsForBackgroundFlush(t *testing.T) {
+	requestStarted := make(chan struct{}, 1)
+	releaseRequest := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requestStarted <- struct{}{}
+		<-releaseRequest
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	exporter := &OTLPExporter{
+		endpoint:     server.URL,
+		headers:      make(map[string]string),
+		client:       server.Client(),
+		batchSize:    100,
+		batchTimeout: time.Millisecond,
+		maxQueueSize: 2048,
+		buffer:       make([]*SpanData, 0),
+		done:         make(chan struct{}),
+		loopDone:     make(chan struct{}),
+	}
+	go exporter.batchLoop()
+
+	if err := exporter.ExportSpans(context.Background(), []*SpanData{mkSpan("pending")}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		close(releaseRequest)
+		t.Fatal("background flush did not start")
+	}
+
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- exporter.Shutdown(context.Background()) }()
+	prematureReturn := false
+	select {
+	case <-shutdownDone:
+		prematureReturn = true
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseRequest)
+	if !prematureReturn {
+		if err := <-shutdownDone; err != nil {
+			t.Fatalf("Shutdown() error = %v", err)
+		}
+	}
+	if prematureReturn {
+		t.Fatal("Shutdown() returned before the background flush completed")
+	}
+}
+
+func TestOTLPExporterRejectsExportAfterShutdown(t *testing.T) {
+	exporter := mustNewOTLPExporter(t, "http://127.0.0.1")
+	if err := exporter.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := exporter.ExportSpans(context.Background(), []*SpanData{mkSpan("late")}); err == nil {
+		t.Fatal("ExportSpans() after Shutdown returned nil")
+	}
+}
+
+func TestNewOTLPExporterRejectsInvalidConfig(t *testing.T) {
+	tests := []struct {
+		name     string
+		endpoint string
+		options  []OTLPExporterOption
+	}{
+		{name: "empty endpoint"},
+		{name: "relative endpoint", endpoint: "localhost:4318"},
+		{name: "unsupported scheme", endpoint: "ftp://example.com"},
+		{name: "invalid batch size", endpoint: "https://example.com", options: []OTLPExporterOption{WithOTLPBatchSize(0)}},
+		{name: "invalid batch timeout", endpoint: "https://example.com", options: []OTLPExporterOption{WithOTLPBatchTimeout(0)}},
+		{name: "invalid queue size", endpoint: "https://example.com", options: []OTLPExporterOption{WithOTLPMaxQueueSize(0)}},
+		{
+			name:     "queue smaller than batch",
+			endpoint: "https://example.com",
+			options: []OTLPExporterOption{
+				WithOTLPBatchSize(2),
+				WithOTLPMaxQueueSize(1),
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := NewOTLPExporter(test.endpoint, test.options...); !errors.Is(err, ErrInvalidExporterConfig) {
+				t.Fatalf("NewOTLPExporter() error = %v, want ErrInvalidExporterConfig", err)
+			}
+		})
+	}
+}
+
+func TestOTLPExporterQueueLimitIncludesInFlightSpans(t *testing.T) {
+	requestStarted := make(chan struct{}, 1)
+	releaseRequest := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requestStarted <- struct{}{}
+		<-releaseRequest
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	exporter := mustNewOTLPExporter(
+		t,
+		server.URL,
+		WithOTLPBatchSize(2),
+		WithOTLPMaxQueueSize(2),
+	)
+	if err := exporter.ExportSpans(context.Background(), []*SpanData{mkSpan("in-flight")}); err != nil {
+		t.Fatal(err)
+	}
+	flushDone := make(chan error, 1)
+	go func() { flushDone <- exporter.flush(context.Background()) }()
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		close(releaseRequest)
+		t.Fatal("flush did not start")
+	}
+
+	if err := exporter.ExportSpans(context.Background(), []*SpanData{mkSpan("queued")}); err != nil {
+		close(releaseRequest)
+		t.Fatal(err)
+	}
+	if err := exporter.ExportSpans(context.Background(), []*SpanData{mkSpan("overflow")}); !errors.Is(err, ErrExporterQueueFull) {
+		close(releaseRequest)
+		t.Fatalf("ExportSpans() error = %v, want ErrExporterQueueFull", err)
+	}
+
+	close(releaseRequest)
+	if err := <-flushDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := exporter.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOTLPExporterSnapshotsBufferedSpans(t *testing.T) {
+	body := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		payload, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Error(err)
+		}
+		body <- string(payload)
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	exporter := mustNewOTLPExporter(t, server.URL, WithOTLPBatchSize(2))
+	span := mkSpan("snapshot")
+	span.Attributes["service.name"] = "before"
+	span.Events = []SpanEvent{{Name: "event", Attributes: map[string]any{"state": "before"}}}
+	if err := exporter.ExportSpans(context.Background(), []*SpanData{span}); err != nil {
+		t.Fatal(err)
+	}
+	span.Attributes["service.name"] = "after"
+	span.Events[0].Attributes["state"] = "after"
+
+	if err := exporter.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got := <-body
+	if strings.Contains(got, "after") || !strings.Contains(got, "before") {
+		t.Fatalf("exported payload did not preserve the accepted snapshot: %s", got)
+	}
+}
+
+func TestTracerBoundsRepeatedExportFailures(t *testing.T) {
+	sentinel := errors.New("export unavailable")
+	tracer := NewTracer()
+	mustSetExporter(t, tracer, &failingExporter{err: sentinel})
+	for index := 0; index < 100; index++ {
+		_, span := tracer.StartSpan(context.Background(), "failure")
+		span.End()
+	}
+
+	err := tracer.Shutdown(context.Background())
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("Shutdown() error = %v, want sentinel", err)
+	}
+	if occurrences := strings.Count(err.Error(), sentinel.Error()); occurrences > 2 {
+		t.Fatalf("Shutdown() repeated the same failure %d times", occurrences)
+	}
+}
+
+func TestTracerConcurrentExporterSwapAndSpanEnd(t *testing.T) {
+	tracer := NewTracer()
+	var waitGroup sync.WaitGroup
+	errCh := make(chan error, 1)
+	waitGroup.Add(2)
+	go func() {
+		defer waitGroup.Done()
+		for index := 0; index < 1000; index++ {
+			if err := tracer.SetExporter(context.Background(), &countingExporter{}); err != nil {
+				errCh <- err
+				return
+			}
+		}
+	}()
+	go func() {
+		defer waitGroup.Done()
+		for index := 0; index < 1000; index++ {
+			_, span := tracer.StartSpan(context.Background(), "concurrent")
+			span.End()
+		}
+	}()
+	waitGroup.Wait()
+	close(errCh)
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	if err := tracer.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -840,7 +1069,7 @@ func TestOTLPExporterServerError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	exp := NewOTLPExporter(srv.URL, WithOTLPBatchSize(1))
+	exp := mustNewOTLPExporter(t, srv.URL, WithOTLPBatchSize(1))
 	defer exp.Shutdown(context.Background())
 
 	err := exp.ExportSpans(context.Background(), []*SpanData{mkSpan("x")})
@@ -861,7 +1090,7 @@ func TestOTLPExporterHeaders(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	exp := NewOTLPExporter(srv.URL,
+	exp := mustNewOTLPExporter(t, srv.URL,
 		WithOTLPBatchSize(1),
 		WithOTLPHeaders(map[string]string{"X-Custom": "yes"}),
 	)
@@ -882,7 +1111,7 @@ func TestOTLPExporterEmptyFlush(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	exp := NewOTLPExporter(srv.URL)
+	exp := mustNewOTLPExporter(t, srv.URL)
 	if err := exp.flush(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -894,7 +1123,7 @@ func TestOTLPExporterEmptyFlush(t *testing.T) {
 
 // TestOTLPPayloadGrouping 按 service.name 分组到不同 resourceSpans。
 func TestOTLPPayloadGrouping(t *testing.T) {
-	exp := NewOTLPExporter("http://x")
+	exp := mustNewOTLPExporter(t, "http://x")
 	defer exp.Shutdown(context.Background())
 
 	spans := []*SpanData{
@@ -914,7 +1143,7 @@ func TestOTLPPayloadGrouping(t *testing.T) {
 
 // TestOTLPValueConversion valueToOTLP 类型映射。
 func TestOTLPValueConversion(t *testing.T) {
-	exp := NewOTLPExporter("http://x")
+	exp := mustNewOTLPExporter(t, "http://x")
 	defer exp.Shutdown(context.Background())
 
 	tests := []struct {
@@ -938,7 +1167,7 @@ func TestOTLPValueConversion(t *testing.T) {
 
 // TestOTLPSpanKindOffset spanToOTLP 的 kind 应 +1（OTLP kind 从 1 开始）。
 func TestOTLPSpanKindOffset(t *testing.T) {
-	exp := NewOTLPExporter("http://x")
+	exp := mustNewOTLPExporter(t, "http://x")
 	defer exp.Shutdown(context.Background())
 
 	span := mkSpan("x")
@@ -1084,8 +1313,8 @@ func TestExporterEndToEndViaTracer(t *testing.T) {
 		return sb.Write(p)
 	}), Pretty: false}
 
-	tr := NewOTelTracer(WithSamplingRate(1.0), WithServiceName("e2e"))
-	tr.SetExporter(exp)
+	tr := NewTracer(WithSamplingRate(1.0), WithServiceName("e2e"))
+	mustSetExporter(t, tr, exp)
 
 	_, span := tr.StartSpan(context.Background(), "e2e-op")
 	span.SetAttribute("foo", "bar")

@@ -169,9 +169,9 @@ const (
 	// LLM 属性
 	AttrLLMProvider         = "llm.provider"
 	AttrLLMModel            = "llm.model"
-	AttrLLMPromptTokens     = "llm.prompt_tokens"
-	AttrLLMCompletionTokens = "llm.completion_tokens"
-	AttrLLMTotalTokens      = "llm.total_tokens"
+	AttrLLMPromptTokens     = "llm.prompt_tokens"     // #nosec G101 -- 遥测属性名称，不是凭据。
+	AttrLLMCompletionTokens = "llm.completion_tokens" // #nosec G101 -- 遥测属性名称，不是凭据。
+	AttrLLMTotalTokens      = "llm.total_tokens"      // #nosec G101 -- 遥测属性名称，不是凭据。
 
 	// Tool 属性
 	AttrToolName   = "tool.name"

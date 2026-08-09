@@ -7,10 +7,11 @@ import (
 )
 
 func TestNewOTelTracer(t *testing.T) {
-	tracer := NewOTelTracer()
+	tracer := NewTracer()
 
 	if tracer == nil {
 		t.Fatal("expected non-nil tracer")
+		return
 	}
 
 	if tracer.serviceName != "default" {
@@ -19,7 +20,7 @@ func TestNewOTelTracer(t *testing.T) {
 }
 
 func TestNewOTelTracerWithOptions(t *testing.T) {
-	tracer := NewOTelTracer(
+	tracer := NewTracer(
 		WithServiceName("test-service"),
 		WithServiceVersion("2.0.0"),
 		WithEnvironment("production"),
@@ -39,11 +40,17 @@ func TestNewOTelTracerWithOptions(t *testing.T) {
 	}
 }
 
+func TestNewTracerIgnoresNilOptions(t *testing.T) {
+	if tracer := NewTracer(nil); tracer == nil {
+		t.Fatal("NewTracer(nil) returned nil")
+	}
+}
+
 func TestStartSpan(t *testing.T) {
-	tracer := NewOTelTracer(WithServiceName("test"))
+	tracer := NewTracer(WithServiceName("test"))
 	ctx := context.Background()
 
-	ctx, span := tracer.StartSpan(ctx, "test-operation")
+	_, span := tracer.StartSpan(ctx, "test-operation")
 
 	if span == nil {
 		t.Fatal("expected non-nil span")
@@ -61,11 +68,11 @@ func TestStartSpan(t *testing.T) {
 }
 
 func TestSpanAttributes(t *testing.T) {
-	tracer := NewOTelTracer()
+	tracer := NewTracer()
 	ctx := context.Background()
 
 	_, span := tracer.StartSpan(ctx, "test")
-	otelSpan := span.(*OTelSpan)
+	otelSpan := span.(*Span)
 
 	span.SetAttribute("key", "value")
 	if otelSpan.attributes["key"] != "value" {
@@ -87,11 +94,11 @@ func TestSpanAttributes(t *testing.T) {
 }
 
 func TestSpanEvents(t *testing.T) {
-	tracer := NewOTelTracer()
+	tracer := NewTracer()
 	ctx := context.Background()
 
 	_, span := tracer.StartSpan(ctx, "test")
-	otelSpan := span.(*OTelSpan)
+	otelSpan := span.(*Span)
 
 	span.AddEvent("event1", "key", "value")
 
@@ -107,11 +114,11 @@ func TestSpanEvents(t *testing.T) {
 }
 
 func TestSpanRecordError(t *testing.T) {
-	tracer := NewOTelTracer()
+	tracer := NewTracer()
 	ctx := context.Background()
 
 	_, span := tracer.StartSpan(ctx, "test")
-	otelSpan := span.(*OTelSpan)
+	otelSpan := span.(*Span)
 
 	err := &testError{msg: "test error"}
 	span.RecordError(err)
@@ -268,7 +275,7 @@ func TestMultiExporter(t *testing.T) {
 }
 
 func TestTracerShutdown(t *testing.T) {
-	tracer := NewOTelTracer()
+	tracer := NewTracer()
 
 	err := tracer.Shutdown(context.Background())
 	if err != nil {
