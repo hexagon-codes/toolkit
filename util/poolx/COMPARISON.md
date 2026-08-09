@@ -56,7 +56,9 @@
 gopool.Go(fn)
 
 // poolx - 同样简洁
-poolx.Go(fn)
+if err := poolx.Go(fn); err != nil {
+    return err
+}
 
 // ants - 需要创建池
 p, _ := ants.NewPool(100)
@@ -141,15 +143,24 @@ results, err := group.Wait()
 | 功能 | poolx | ants | gopool |
 |------|:---------:|:----:|:------:|
 | 任务优先级 | ✅ | ❌ | ❌ |
-| 单任务超时 | ✅ | ❌ | ❌ |
+| Context 协作取消 | ✅ | ❌ | ❌ |
 | 任务 ID | ✅ | ❌ | ❌ |
 | 优先级队列 | ✅ | ❌ | ❌ |
 
 **示例**:
 ```go
-// poolx 任务选项
+// 超时必须由接收 context 的任务协作处理
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+err := p.SubmitWithContext(ctx, func(ctx context.Context) {
+    defer cancel()
+    fn(ctx)
+})
+if err != nil {
+    cancel()
+}
+
+// 优先级和任务 ID
 p.SubmitWithOptions(fn,
-    poolx.WithTaskTimeout(5*time.Second),
     poolx.WithTaskPriority(poolx.PriorityHigh),
     poolx.WithTaskID(123),
 )
@@ -199,7 +210,6 @@ p := poolx.New("auto",
 | AfterTask | ✅ | ❌ | ❌ |
 | OnPanic | ✅ | ✅ | ✅ |
 | OnReject | ✅ | ❌ | ❌ |
-| OnTimeout | ✅ | ❌ | ❌ |
 | OnWorkerStart | ✅ | ❌ | ❌ |
 | OnWorkerStop | ✅ | ❌ | ❌ |
 | OnScaleUp | ✅ | ❌ | ❌ |
@@ -548,11 +558,19 @@ future := poolx.SubmitFunc(p, func() (Result, error) {
 })
 result, err := future.Get()
 
-// 带优先级和超时
+// 带优先级
 p.SubmitWithOptions(fn,
     poolx.WithTaskPriority(poolx.PriorityHigh),
-    poolx.WithTaskTimeout(5*time.Second),
 )
+
+// 带协作式超时
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+if err := p.SubmitWithContext(ctx, func(ctx context.Context) {
+    defer cancel()
+    runTask(ctx)
+}); err != nil {
+    cancel()
+}
 ```
 
 ---
@@ -596,7 +614,7 @@ p.SubmitWithOptions(fn,
 // 创建池
 p := poolx.New("name", opts...)
 p := poolx.NewPoolWithFunc("name", fn, opts...)
-mp := poolx.NewMultiPool(size, poolSize, strategy, opts...)
+mp, err := poolx.NewMultiPool(size, poolSize, strategy, opts...)
 
 // 任务提交
 p.Submit(fn)
@@ -604,7 +622,7 @@ p.TrySubmit(fn)
 p.SubmitBatch(fns)           // ✨ 批量提交
 p.TrySubmitBatch(fns)        // ✨ 非阻塞批量提交
 p.SubmitWait(fn)
-p.SubmitWithContext(ctx, fn)
+p.SubmitWithContext(ctx, contextTask) // contextTask: func(context.Context)
 p.SubmitWithOptions(fn, opts...)
 
 // Future 模式
@@ -627,8 +645,8 @@ p.Waiting()
 p.Metrics()
 
 // 全局函数
-poolx.Go(fn)
-poolx.GoCtx(ctx, fn)
+err := poolx.Go(fn)
+err = poolx.GoCtx(ctx, contextTask)
 poolx.SetCap(cap)
 poolx.DefaultPool()
 poolx.GetPool(name)

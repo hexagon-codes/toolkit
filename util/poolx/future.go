@@ -2,6 +2,7 @@ package poolx
 
 import (
 	"context"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -124,6 +125,11 @@ func (f *Future[T]) GetWithTimeout(timeout time.Duration) (T, error) {
 
 // GetWithContext blocks until the future completes or context is canceled.
 func (f *Future[T]) GetWithContext(ctx context.Context) (T, error) {
+	if ctx == nil {
+		var zero T
+		return zero, invalidArgumentError("context must not be nil")
+	}
+
 	select {
 	case <-f.done:
 		f.mu.Lock()
@@ -173,14 +179,17 @@ func (f *Future[T]) Done() <-chan struct{} {
 // Returns a Future that can be used to retrieve the result.
 func SubmitFunc[T any](p *Pool, fn func() (T, error)) *Future[T] {
 	future := NewFuture[T]()
+	if p == nil {
+		future.Fail(invalidArgumentError("pool must not be nil"))
+		return future
+	}
+	if fn == nil {
+		future.Fail(invalidArgumentError("task function must not be nil"))
+		return future
+	}
 
 	err := p.Submit(func() {
-		result, err := fn()
-		if err != nil {
-			future.Fail(err)
-		} else {
-			future.Complete(result)
-		}
+		executeFutureTask(future, fn)
 	})
 
 	if err != nil {
@@ -192,14 +201,28 @@ func SubmitFunc[T any](p *Pool, fn func() (T, error)) *Future[T] {
 
 // SubmitFuncCtx submits a function with context support.
 // The context is passed to the function and can be used for cancellation.
-func SubmitFuncCtx[T any](p *Pool, ctx context.Context, fn func(context.Context) (T, error)) *Future[T] {
+func SubmitFuncCtx[T any](ctx context.Context, p *Pool, fn func(context.Context) (T, error)) *Future[T] {
 	future := NewFuture[T]()
+	if ctx == nil {
+		future.Fail(invalidArgumentError("context must not be nil"))
+		return future
+	}
+	if p == nil {
+		future.Fail(invalidArgumentError("pool must not be nil"))
+		return future
+	}
+	if fn == nil {
+		future.Fail(invalidArgumentError("task function must not be nil"))
+		return future
+	}
 
 	// Create a child context that can be canceled
 	childCtx, cancel := context.WithCancel(ctx)
 	future.cancelFn = cancel
 
-	err := p.SubmitWithContext(ctx, func() {
+	err := p.SubmitWithContext(childCtx, func(taskCtx context.Context) {
+		defer cancel()
+
 		// Check if already canceled
 		select {
 		case <-childCtx.Done():
@@ -208,12 +231,7 @@ func SubmitFuncCtx[T any](p *Pool, ctx context.Context, fn func(context.Context)
 		default:
 		}
 
-		result, err := fn(childCtx)
-		if err != nil {
-			future.Fail(err)
-		} else {
-			future.Complete(result)
-		}
+		executeFutureTask(future, func() (T, error) { return fn(taskCtx) })
 	})
 
 	if err != nil {
@@ -228,14 +246,17 @@ func SubmitFuncCtx[T any](p *Pool, ctx context.Context, fn func(context.Context)
 // Returns nil if no worker is available.
 func TrySubmitFunc[T any](p *Pool, fn func() (T, error)) *Future[T] {
 	future := NewFuture[T]()
+	if p == nil {
+		future.Fail(invalidArgumentError("pool must not be nil"))
+		return future
+	}
+	if fn == nil {
+		future.Fail(invalidArgumentError("task function must not be nil"))
+		return future
+	}
 
 	ok := p.TrySubmit(func() {
-		result, err := fn()
-		if err != nil {
-			future.Fail(err)
-		} else {
-			future.Complete(result)
-		}
+		executeFutureTask(future, fn)
 	})
 
 	if !ok {
@@ -243,6 +264,24 @@ func TrySubmitFunc[T any](p *Pool, fn func() (T, error)) *Future[T] {
 	}
 
 	return future
+}
+
+// executeFutureTask 确保任务无论正常返回、报错还是 panic 都会终结 Future。
+// panic 会在写入 Future 后继续向 worker 传播，以保留指标与处理器语义。
+func executeFutureTask[T any](future *Future[T], fn func() (T, error)) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			future.Fail(newTaskPanicError(recovered))
+			panic(recovered)
+		}
+	}()
+
+	result, err := fn()
+	if err != nil {
+		future.Fail(err)
+		return
+	}
+	future.Complete(result)
 }
 
 // ============================================================================
@@ -389,15 +428,13 @@ func (p *Promise[T]) Future() *Future[T] {
 // Async executes a function asynchronously and returns a Future.
 // Uses the default pool.
 func Async[T any](fn func() (T, error)) *Future[T] {
-	initDefaultPool()
-	return SubmitFunc(defaultPool, fn)
+	return SubmitFunc(initDefaultPool(), fn)
 }
 
 // AsyncCtx executes a function asynchronously with context.
 // Uses the default pool.
 func AsyncCtx[T any](ctx context.Context, fn func(context.Context) (T, error)) *Future[T] {
-	initDefaultPool()
-	return SubmitFuncCtx(defaultPool, ctx, fn)
+	return SubmitFuncCtx(ctx, initDefaultPool(), fn)
 }
 
 // Await waits for a future and returns its result.
@@ -425,7 +462,7 @@ func AwaitAll[T any](futures ...*Future[T]) ([]T, error) {
 // AwaitFirst waits for the first future to complete and returns its result.
 // It uses a cancellable context so that goroutines waiting on remaining futures
 // are released once the first result arrives, preventing goroutine leaks.
-func AwaitFirst[T any](futures ...*Future[T]) (T, int, error) {
+func AwaitFirst[T any](futures ...*Future[T]) (value T, index int, err error) {
 	if len(futures) == 0 {
 		var zero T
 		return zero, -1, ErrInvalidArg
@@ -461,34 +498,29 @@ func AwaitFirst[T any](futures ...*Future[T]) (T, int, error) {
 
 // AwaitAny waits for any future to complete successfully.
 // Returns the first successful result, or the last error if all fail.
-func AwaitAny[T any](futures ...*Future[T]) (T, int, error) {
+func AwaitAny[T any](futures ...*Future[T]) (value T, index int, err error) {
 	if len(futures) == 0 {
 		var zero T
 		return zero, -1, ErrInvalidArg
 	}
 
-	type result struct {
-		value T
-		index int
-		err   error
-	}
-
-	resultCh := make(chan result, len(futures))
-
+	cases := make([]reflect.SelectCase, len(futures))
 	for i, f := range futures {
-		go func(idx int, future *Future[T]) {
-			val, err := future.Get()
-			resultCh <- result{value: val, index: idx, err: err}
-		}(i, f)
+		cases[i] = reflect.SelectCase{
+			Dir:  reflect.SelectRecv,
+			Chan: reflect.ValueOf(f.Done()),
+		}
 	}
 
 	var lastErr error
-	for i := 0; i < len(futures); i++ {
-		r := <-resultCh
-		if r.err == nil {
-			return r.value, r.index, nil
+	for range futures {
+		chosen, _, _ := reflect.Select(cases)
+		result, resultErr := futures[chosen].Get()
+		if resultErr == nil {
+			return result, chosen, nil
 		}
-		lastErr = r.err
+		lastErr = resultErr
+		cases[chosen].Chan = reflect.Value{}
 	}
 
 	var zero T

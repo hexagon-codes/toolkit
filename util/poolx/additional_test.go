@@ -128,7 +128,7 @@ func TestSubmitFuncCtx(t *testing.T) {
 	defer p.Release()
 
 	ctx := context.Background()
-	future := SubmitFuncCtx(p, ctx, func(ctx context.Context) (int, error) {
+	future := SubmitFuncCtx(ctx, p, func(ctx context.Context) (int, error) {
 		return 42, nil
 	})
 
@@ -154,7 +154,7 @@ func TestSubmitFuncCtx_Canceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately
 
-	future := SubmitFuncCtx(p, ctx, func(ctx context.Context) (int, error) {
+	future := SubmitFuncCtx(ctx, p, func(ctx context.Context) (int, error) {
 		return 42, nil
 	})
 
@@ -390,7 +390,6 @@ func TestHookType_String(t *testing.T) {
 		{HookAfterTask, "AfterTask"},
 		{HookOnPanic, "OnPanic"},
 		{HookOnReject, "OnReject"},
-		{HookOnTimeout, "OnTimeout"},
 		{HookOnWorkerStart, "OnWorkerStart"},
 		{HookOnWorkerStop, "OnWorkerStop"},
 		{HookOnScaleUp, "OnScaleUp"},

@@ -38,7 +38,7 @@ func main() {
 	// 示例 5: 非阻塞模式
 	nonBlockingExample()
 
-	// 示例 6: 任务超时
+	// 示例 6: Context 协作式任务超时
 	taskTimeoutExample()
 
 	// 示例 7: 多池负载均衡
@@ -239,36 +239,41 @@ func nonBlockingExample() {
 	fmt.Println()
 }
 
-// taskTimeoutExample 演示单任务超时
+// taskTimeoutExample 演示由 context 驱动的协作式单任务超时
 func taskTimeoutExample() {
 	fmt.Println("--- 示例 6: 任务超时 ---")
-
-	var timedOut atomic.Bool
-
-	hooks := poolx.NewHookBuilder().
-		OnTimeout(func(info *poolx.TaskInfo) {
-			timedOut.Store(true)
-		}).
-		Build()
 
 	p := poolx.New("timeout-pool",
 		poolx.WithMaxWorkers(2),
 		poolx.WithAutoScale(false),
-		poolx.WithHooks(hooks),
 	)
 	defer p.Release()
 
-	// 提交一个带短超时的任务
-	err := p.SubmitWithOptions(func() {
-		time.Sleep(100 * time.Millisecond) // 任务需要 100ms
-	}, poolx.WithTaskTimeout(10*time.Millisecond)) // 10ms 后超时
+	// 调用方创建并持有超时 context，任务通过监听 Done 协作结束。
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	taskDone := make(chan struct{})
+	err := p.SubmitWithContext(ctx, func(taskCtx context.Context) {
+		defer close(taskDone)
+
+		timer := time.NewTimer(100 * time.Millisecond)
+		defer timer.Stop()
+
+		select {
+		case <-timer.C:
+		case <-taskCtx.Done():
+		}
+	})
 
 	if err != nil {
-		fmt.Printf("提交错误: %v\n", err)
+		fmt.Printf("SubmitWithContext failed: %v\n", err)
+		fmt.Println()
+		return
 	}
 
-	time.Sleep(150 * time.Millisecond)
-	fmt.Printf("任务超时: %v\n", timedOut.Load())
+	<-taskDone
+	fmt.Printf("Task timed out: %v\n", ctx.Err() == context.DeadlineExceeded)
 	fmt.Println()
 }
 
@@ -277,9 +282,14 @@ func multiPoolExample() {
 	fmt.Println("--- 示例 7: 多池负载均衡 ---")
 
 	// 创建 3 个池，每个 4 个 worker，使用轮询策略
-	mp := poolx.NewMultiPool(3, 4, poolx.RoundRobin,
+	mp, err := poolx.NewMultiPool(3, 4, poolx.RoundRobin,
 		poolx.WithAutoScale(false),
 	)
+	if err != nil {
+		fmt.Printf("NewMultiPool failed: %v\n", err)
+		fmt.Println()
+		return
+	}
 	defer mp.Release()
 
 	var counter atomic.Int32

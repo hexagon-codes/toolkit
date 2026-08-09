@@ -54,8 +54,13 @@ type AutoScaler struct {
 	pool   *Pool
 
 	// State
-	running     atomic.Bool
+	running atomic.Bool
+
+	// lifecycleMu 串行化 Start/Stop，并保证新循环只能在旧循环退出后启动。
+	lifecycleMu sync.Mutex
 	stopCh      chan struct{}
+	loopDone    chan struct{}
+
 	mu          sync.Mutex
 	lastScale   time.Time
 	emaLoad     float64 // Exponential moving average of load
@@ -91,40 +96,37 @@ func NewAutoScaler(pool *Pool, config ScalerConfig) *AutoScaler {
 	return &AutoScaler{
 		config: config,
 		pool:   pool,
-		stopCh: make(chan struct{}),
 	}
 }
 
 // Start begins the auto-scaling loop
 func (s *AutoScaler) Start() {
-	if s.running.Swap(true) {
-		return // Already running
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.running.Load() {
+		return
 	}
 
-	// 重新创建 stopCh 以支持重启
-	s.mu.Lock()
 	s.stopCh = make(chan struct{})
-	s.mu.Unlock()
+	s.loopDone = make(chan struct{})
+	s.running.Store(true)
 
-	go s.scalingLoop()
+	go s.scalingLoop(s.stopCh, s.loopDone)
 }
 
 // Stop stops the auto-scaling loop
 func (s *AutoScaler) Stop() {
-	if !s.running.Swap(false) {
-		return // Not running
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if !s.running.Load() {
+		return
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Only close if not already closed
-	select {
-	case <-s.stopCh:
-		// Already closed
-	default:
-		close(s.stopCh)
-	}
+	s.running.Store(false)
+	close(s.stopCh)
+	<-s.loopDone
+	s.stopCh = nil
+	s.loopDone = nil
 }
 
 // IsRunning returns true if the scaler is active
@@ -132,16 +134,17 @@ func (s *AutoScaler) IsRunning() bool {
 	return s.running.Load()
 }
 
-// scalingLoop is the main auto-scaling goroutine
-func (s *AutoScaler) scalingLoop() {
+// scalingLoop 运行单代自动伸缩循环，并在退出时通知 Stop。
+func (s *AutoScaler) scalingLoop(stopCh <-chan struct{}, loopDone chan<- struct{}) {
 	ticker := time.NewTicker(s.config.ScaleInterval)
 	defer ticker.Stop()
+	defer close(loopDone)
 
 	for {
 		select {
 		case <-ticker.C:
 			s.checkAndScale()
-		case <-s.stopCh:
+		case <-stopCh:
 			return
 		}
 	}

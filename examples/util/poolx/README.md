@@ -26,7 +26,7 @@
 - Future 模式获取异步结果
 - Hook 生命周期回调
 - 非阻塞模式
-- 任务超时
+- Context 协作式任务超时
 - 多池负载均衡
 - Map/ForEach 并行操作
 - **批量提交 SubmitBatch** ✨
@@ -132,13 +132,13 @@ go test ./util/poolx/... -bench=. -benchmem
 | 基本提交 | ✅ | ✅ | ✅ |
 | 非阻塞提交 | ✅ (~34ns) | ✅ (~100ns) | ❌ |
 | **批量提交** | ✅ | ❌ | ❌ |
-| Context 支持 | ✅ | ❌ | ✅ |
+| Context 协作式取消与超时 | ✅ | ❌ | ✅ |
 | 单函数池 | ✅ | ✅ | ❌ |
 | Future 模式 | ✅ | ❌ | ❌ |
 | 优先级队列 | ✅ | ❌ | ❌ |
 | 自动扩缩容 | ✅ | ❌ | ✅ |
 | Hook 系统 | ✅ (10+) | ❌ | ❌ |
-| 任务超时 | ✅ | ❌ | ❌ |
+| Context 协作式任务超时 | ✅ | ❌ | ❌ |
 | 多池调度 | ✅ | ✅ | ❌ |
 | **Work Stealing** | ✅ | ❌ | ❌ |
 | **分片计数器** | ✅ | ❌ | ❌ |
@@ -150,7 +150,7 @@ go test ./util/poolx/... -bench=. -benchmem
 // 创建池
 poolx.New(name, opts...)
 poolx.NewPoolWithFunc(name, fn, opts...)
-poolx.NewMultiPool(size, poolSize, strategy, opts...)
+mp, err := poolx.NewMultiPool(size, poolSize, strategy, opts...)
 
 // 任务提交
 p.Submit(fn)                    // 阻塞提交
@@ -158,7 +158,7 @@ p.TrySubmit(fn)                 // 非阻塞提交 (~34ns)
 p.SubmitBatch(fns)              // 批量提交
 p.TrySubmitBatch(fns)           // 非阻塞批量提交
 p.SubmitWait(fn)                // 提交并等待完成
-p.SubmitWithContext(ctx, fn)    // Context 支持
+p.SubmitWithContext(ctx, contextTask) // contextTask: func(context.Context)
 p.SubmitWithOptions(fn, opts)   // 带选项提交
 
 // Future 模式

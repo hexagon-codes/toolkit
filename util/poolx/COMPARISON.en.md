@@ -56,7 +56,9 @@ This document compares three Go goroutine pool implementations:
 gopool.Go(fn)
 
 // poolx - equally simple
-poolx.Go(fn)
+if err := poolx.Go(fn); err != nil {
+    return err
+}
 
 // ants - requires pool creation
 p, _ := ants.NewPool(100)
@@ -141,15 +143,24 @@ results, err := group.Wait()
 | Feature | poolx | ants | gopool |
 |---------|:---------:|:----:|:------:|
 | Task priority | ✅ | ❌ | ❌ |
-| Per-task timeout | ✅ | ❌ | ❌ |
+| Cooperative context cancellation | ✅ | ❌ | ❌ |
 | Task ID | ✅ | ❌ | ❌ |
 | Priority queue | ✅ | ❌ | ❌ |
 
 **Example**:
 ```go
-// poolx task options
+// Timeouts require cooperation from a task that receives context
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+err := p.SubmitWithContext(ctx, func(ctx context.Context) {
+    defer cancel()
+    fn(ctx)
+})
+if err != nil {
+    cancel()
+}
+
+// Priority and task ID
 p.SubmitWithOptions(fn,
-    poolx.WithTaskTimeout(5*time.Second),
     poolx.WithTaskPriority(poolx.PriorityHigh),
     poolx.WithTaskID(123),
 )
@@ -199,7 +210,6 @@ p := poolx.New("auto",
 | AfterTask | ✅ | ❌ | ❌ |
 | OnPanic | ✅ | ✅ | ✅ |
 | OnReject | ✅ | ❌ | ❌ |
-| OnTimeout | ✅ | ❌ | ❌ |
 | OnWorkerStart | ✅ | ❌ | ❌ |
 | OnWorkerStop | ✅ | ❌ | ❌ |
 | OnScaleUp | ✅ | ❌ | ❌ |
@@ -548,11 +558,19 @@ future := poolx.SubmitFunc(p, func() (Result, error) {
 })
 result, err := future.Get()
 
-// With priority and timeout
+// With priority
 p.SubmitWithOptions(fn,
     poolx.WithTaskPriority(poolx.PriorityHigh),
-    poolx.WithTaskTimeout(5*time.Second),
 )
+
+// With a cooperative timeout
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+if err := p.SubmitWithContext(ctx, func(ctx context.Context) {
+    defer cancel()
+    runTask(ctx)
+}); err != nil {
+    cancel()
+}
 ```
 
 ---
@@ -596,7 +614,7 @@ p.SubmitWithOptions(fn,
 // Create pool
 p := poolx.New("name", opts...)
 p := poolx.NewPoolWithFunc("name", fn, opts...)
-mp := poolx.NewMultiPool(size, poolSize, strategy, opts...)
+mp, err := poolx.NewMultiPool(size, poolSize, strategy, opts...)
 
 // Task submit
 p.Submit(fn)
@@ -604,7 +622,7 @@ p.TrySubmit(fn)
 p.SubmitBatch(fns)           // ✨ batch submit
 p.TrySubmitBatch(fns)        // ✨ non-blocking batch submit
 p.SubmitWait(fn)
-p.SubmitWithContext(ctx, fn)
+p.SubmitWithContext(ctx, contextTask) // contextTask: func(context.Context)
 p.SubmitWithOptions(fn, opts...)
 
 // Future pattern
@@ -627,8 +645,8 @@ p.Waiting()
 p.Metrics()
 
 // Global functions
-poolx.Go(fn)
-poolx.GoCtx(ctx, fn)
+err := poolx.Go(fn)
+err = poolx.GoCtx(ctx, contextTask)
 poolx.SetCap(cap)
 poolx.DefaultPool()
 poolx.GetPool(name)

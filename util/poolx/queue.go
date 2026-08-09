@@ -198,7 +198,7 @@ func (h priorityHeap) Swap(i, j int) {
 
 func (h *priorityHeap) Push(x any) {
 	n := len(*h)
-	task := x.(*PriorityTask)
+	task := mustPoolValue[*PriorityTask](x)
 	task.index = n
 	*h = append(*h, task)
 }
@@ -223,10 +223,10 @@ type PriorityQueue struct {
 
 // NewPriorityQueue creates a new priority queue with optional capacity.
 // If cap <= 0, the queue is unbounded.
-func NewPriorityQueue(cap int) *PriorityQueue {
+func NewPriorityQueue(capacity int) *PriorityQueue {
 	pq := &PriorityQueue{
 		heap: make(priorityHeap, 0),
-		cap:  cap,
+		cap:  capacity,
 	}
 	pq.cond = sync.NewCond(&pq.lock)
 	heap.Init(&pq.heap)
@@ -263,7 +263,7 @@ func (pq *PriorityQueue) Pop() func() {
 		return nil
 	}
 
-	task := heap.Pop(&pq.heap).(*PriorityTask)
+	task := mustPoolValue[*PriorityTask](heap.Pop(&pq.heap))
 	return task.fn
 }
 
@@ -320,7 +320,7 @@ func (pq *PriorityQueue) PopWait(done <-chan struct{}) func() {
 		}
 	}
 
-	task := heap.Pop(&pq.heap).(*PriorityTask)
+	task := mustPoolValue[*PriorityTask](heap.Pop(&pq.heap))
 	return task.fn
 }
 
@@ -376,14 +376,14 @@ type dequeBuffer[T any] struct {
 
 func newDequeBuffer[T any](capacity int64) *dequeBuffer[T] {
 	// Round up to power of 2
-	cap := int64(1)
-	for cap < capacity {
-		cap <<= 1
+	bufferCapacity := int64(1)
+	for bufferCapacity < capacity {
+		bufferCapacity <<= 1
 	}
 
 	buf := &dequeBuffer[T]{
-		items: make([]atomic.Pointer[T], cap),
-		mask:  cap - 1,
+		items: make([]atomic.Pointer[T], bufferCapacity),
+		mask:  bufferCapacity - 1,
 	}
 	return buf
 }

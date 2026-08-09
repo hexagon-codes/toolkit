@@ -204,4 +204,3 @@ func (c *FastCounter) Reset() {
 		c.shards[i].value.Store(0)
 	}
 }
-

@@ -217,7 +217,7 @@ func BenchmarkSpinlock(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			lock.Lock()
-			lock.Unlock()
+			lock.Unlock() //nolint:staticcheck // 此基准测试仅用于测量加锁和解锁开销。
 		}
 	})
 }
@@ -229,7 +229,7 @@ func BenchmarkMutex(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			mu.Lock()
-			mu.Unlock()
+			mu.Unlock() //nolint:staticcheck // 此基准测试仅用于测量加锁和解锁开销。
 		}
 	})
 }
@@ -315,12 +315,17 @@ func BenchmarkGo(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Go(func() {})
+		if err := Go(func() {}); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkMultiPoolSubmit(b *testing.B) {
-	mp := NewMultiPool(4, int32(runtime.NumCPU()), RoundRobin)
+	mp, err := NewMultiPool(4, int32(runtime.NumCPU()), RoundRobin)
+	if err != nil {
+		b.Fatal(err)
+	}
 	defer mp.Release()
 
 	b.ResetTimer()

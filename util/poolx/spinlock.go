@@ -140,8 +140,8 @@ func (p *PaddedAtomicInt32) Add(delta int32) int32 {
 }
 
 // CompareAndSwap atomically compares and swaps
-func (p *PaddedAtomicInt32) CompareAndSwap(old, new int32) bool {
-	return p.value.CompareAndSwap(old, new)
+func (p *PaddedAtomicInt32) CompareAndSwap(old, newValue int32) bool {
+	return p.value.CompareAndSwap(old, newValue)
 }
 
 // PaddedAtomicInt64 is an atomic int64 with cache line padding
@@ -167,8 +167,8 @@ func (p *PaddedAtomicInt64) Add(delta int64) int64 {
 }
 
 // CompareAndSwap atomically compares and swaps
-func (p *PaddedAtomicInt64) CompareAndSwap(old, new int64) bool {
-	return p.value.CompareAndSwap(old, new)
+func (p *PaddedAtomicInt64) CompareAndSwap(old, newValue int64) bool {
+	return p.value.CompareAndSwap(old, newValue)
 }
 
 // PaddedAtomicUint64 is an atomic uint64 with cache line padding
@@ -194,6 +194,6 @@ func (p *PaddedAtomicUint64) Add(delta uint64) uint64 {
 }
 
 // CompareAndSwap atomically compares and swaps
-func (p *PaddedAtomicUint64) CompareAndSwap(old, new uint64) bool {
-	return p.value.CompareAndSwap(old, new)
+func (p *PaddedAtomicUint64) CompareAndSwap(old, newValue uint64) bool {
+	return p.value.CompareAndSwap(old, newValue)
 }

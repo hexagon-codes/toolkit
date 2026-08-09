@@ -2,7 +2,9 @@ package poolx
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"reflect"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -318,10 +320,10 @@ type workerStack struct {
 	_      CacheLinePad
 }
 
-func newWorkerStack(cap int) *workerStack {
+func newWorkerStack(capacity int) *workerStack {
 	return &workerStack{
-		items: make([]*worker, cap),
-		cap:   cap,
+		items: make([]*worker, capacity),
+		cap:   capacity,
 	}
 }
 
@@ -383,9 +385,7 @@ func (s *workerStack) retrieveExpiry(duration time.Duration) []*worker {
 	}
 
 	// Rebuild ring from surviving items
-	for i, w := range surviving {
-		s.items[i] = w
-	}
+	copy(s.items, surviving)
 	s.head = len(surviving)
 	s.len = len(surviving)
 
@@ -401,7 +401,6 @@ type task struct {
 	fn        func()
 	submitted int64 // UnixNano timestamp (lazy init, 0 = not set)
 	priority  int
-	timeout   time.Duration
 	id        uint64
 }
 
@@ -411,28 +410,33 @@ var taskPool = sync.Pool{
 	},
 }
 
+func mustPoolValue[T any](value any) T {
+	typed, ok := value.(T)
+	if !ok {
+		panic(fmt.Sprintf("poolx: unexpected pooled value type %T", value))
+	}
+	return typed
+}
+
 // acquireTaskFast is the fast path for simple task submission (no options, no hooks)
 func acquireTaskFast(fn func()) *task {
-	t := taskPool.Get().(*task)
+	t := mustPoolValue[*task](taskPool.Get())
 	t.fn = fn
 	t.submitted = 0 // Lazy init - only set when needed
 	t.priority = 0
-	t.timeout = 0
 	t.id = 0
 	return t
 }
 
 func acquireTaskWithOptions(fn func(), opts *TaskOptions) *task {
-	t := taskPool.Get().(*task)
+	t := mustPoolValue[*task](taskPool.Get())
 	t.fn = fn
 	t.submitted = time.Now().UnixNano()
 	if opts != nil {
 		t.priority = opts.Priority
-		t.timeout = opts.Timeout
 		t.id = opts.ID
 	} else {
 		t.priority = PriorityNormal
-		t.timeout = 0
 		t.id = 0
 	}
 	return t
@@ -449,7 +453,6 @@ func (t *task) getSubmittedTime() time.Time {
 func releaseTask(t *task) {
 	t.fn = nil
 	t.priority = 0
-	t.timeout = 0
 	t.id = 0
 	taskPool.Put(t)
 }
@@ -545,7 +548,7 @@ func (w *worker) processLocalQueue() {
 
 	// Try to steal from other workers if enabled
 	if w.pool.stealingScheduler != nil {
-		stolen := w.pool.stealingScheduler.Steal(w.id)
+		stolen := w.pool.stealingScheduler.steal(w.id)
 		if stolen != nil {
 			w.pool.metrics.StolenTasks.Add(1)
 			w.execute(stolen)
@@ -569,7 +572,6 @@ func (w *worker) execute(t *task) {
 			SubmittedAt: submittedTime,
 			StartedAt:   startTime,
 			WaitTime:    waitTime,
-			Timeout:     t.timeout,
 		}
 	}
 
@@ -578,15 +580,7 @@ func (w *worker) execute(t *task) {
 		w.pool.hooks.Trigger(HookBeforeTask, taskInfo)
 	}
 
-	// Execute with timeout if specified
-	var panicked bool
-	var panicVal any
-
-	if t.timeout > 0 {
-		panicked, panicVal = w.executeWithTimeout(t)
-	} else {
-		panicked, panicVal = w.executeDirect(t)
-	}
+	panicked, panicVal := w.executeDirect(t)
 
 	execTime := time.Since(startTime)
 
@@ -600,8 +594,8 @@ func (w *worker) execute(t *task) {
 			// 包装 panic handler 调用，防止它本身 panic 导致 goroutine 崩溃
 			func() {
 				defer func() {
-					if r := recover(); r != nil {
-						// PanicHandler 本身 panic 了，静默处理
+					if recover() != nil {
+						return
 					}
 				}()
 				w.pool.config.PanicHandler(panicVal)
@@ -642,55 +636,6 @@ func (w *worker) executeDirect(t *task) (panicked bool, panicVal any) {
 	}()
 	t.fn()
 	return false, nil
-}
-
-// executeWithTimeout 执行带超时的任务。
-// 注意：如果超时触发，任务 goroutine 会在后台继续运行，但结果会被忽略。
-// 这是 Go 的基本限制 - goroutine 无法被强制终止。
-// 如果任务需要提前停止，应在任务函数中检查取消信号。
-// 建议使用 SubmitWithContext 来支持可取消的任务。
-func (w *worker) executeWithTimeout(t *task) (panicked bool, panicVal any) {
-	type result struct {
-		panicked bool
-		panicVal any
-	}
-	resultCh := make(chan result, 1)
-
-	// Copy the function to avoid race when task is released
-	fn := t.fn
-
-	go func() {
-		var r result
-		defer func() {
-			if rec := recover(); rec != nil {
-				r.panicked = true
-				r.panicVal = rec
-			}
-			// Use select to avoid blocking if nobody is listening
-			select {
-			case resultCh <- r:
-			default:
-			}
-		}()
-		fn()
-	}()
-
-	select {
-	case res := <-resultCh:
-		return res.panicked, res.panicVal
-	case <-time.After(t.timeout):
-		// Trigger timeout hook
-		if w.pool.hooks != nil && w.pool.hooks.HasHooks(HookOnTimeout) {
-			w.pool.hooks.Trigger(HookOnTimeout, &TaskInfo{
-				ID:          t.id,
-				PoolName:    w.pool.name,
-				WorkerID:    w.id,
-				SubmittedAt: t.getSubmittedTime(),
-				Timeout:     t.timeout,
-			})
-		}
-		return false, nil
-	}
 }
 
 func (w *worker) finish() {
@@ -864,12 +809,12 @@ func New(name string, opts ...Option) *Pool {
 		p.workers = newWorkerStack(int(config.MaxWorkers))
 		// 预分配 worker 对象到缓存
 		for range config.MaxWorkers {
-			w := p.workerCache.Get().(*worker)
+			w := mustPoolValue[*worker](p.workerCache.Get())
 			p.workerCache.Put(w)
 		}
 		// 预分配 task 对象到缓存
 		for range config.QueueSize {
-			t := taskPool.Get().(*task)
+			t := mustPoolValue[*task](taskPool.Get())
 			taskPool.Put(t)
 		}
 	}
@@ -938,7 +883,7 @@ func (p *Pool) createWorker() *worker {
 	id := p.workerID.Add(1)
 
 	// Get from cache or create new
-	w := p.workerCache.Get().(*worker)
+	w := mustPoolValue[*worker](p.workerCache.Get())
 	w.pool = p
 	w.id = id
 	w.lastActive.Store(time.Now().UnixNano())
@@ -1152,7 +1097,6 @@ func (p *Pool) SubmitWithOptions(fn func(), opts ...TaskOption) error {
 			PoolName:    p.name,
 			Priority:    t.priority,
 			SubmittedAt: t.getSubmittedTime(),
-			Timeout:     t.timeout,
 		})
 	}
 
@@ -1387,23 +1331,41 @@ func (p *Pool) TrySubmitBatch(fns []func()) int {
 
 // SubmitWait submits a task and waits for completion
 func (p *Pool) SubmitWait(fn func()) error {
-	done := make(chan struct{})
+	if fn == nil {
+		return invalidArgumentError("task function must not be nil")
+	}
+
+	result := make(chan error, 1)
 	err := p.Submit(func() {
-		defer close(done)
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				result <- newTaskPanicError(recovered)
+				panic(recovered)
+			}
+			result <- nil
+		}()
 		fn()
 	})
 	if err != nil {
 		return err
 	}
-	<-done
-	return nil
+	return <-result
 }
 
-// SubmitWithContext submits a task with context support.
-// 当 context 被取消时，会及时唤醒等待中的 goroutine 并返回 ctx.Err()。
-func (p *Pool) SubmitWithContext(ctx context.Context, fn func()) error {
+// SubmitWithContext 提交接收 context 的协作式任务。
+// context 在排队期间取消时返回 ctx.Err()；任务开始后由任务自身响应取消。
+func (p *Pool) SubmitWithContext(ctx context.Context, fn func(context.Context)) error {
+	if ctx == nil {
+		return invalidArgumentError("context must not be nil")
+	}
+	if fn == nil {
+		return invalidArgumentError("task function must not be nil")
+	}
 	if p.state.Load() == stateClosed {
 		return ErrPoolClosed
+	}
+	taskFn := func() {
+		fn(ctx)
 	}
 
 	// 检查 context 是否已取消
@@ -1414,7 +1376,7 @@ func (p *Pool) SubmitWithContext(ctx context.Context, fn func()) error {
 	}
 
 	// 快速路径：尝试非阻塞提交
-	if p.TrySubmit(fn) {
+	if p.TrySubmit(taskFn) {
 		return nil
 	}
 
@@ -1450,7 +1412,7 @@ func (p *Pool) SubmitWithContext(ctx context.Context, fn func()) error {
 			p.lock.Unlock()
 			close(done)
 			p.metrics.SubmittedTasks.Add(1)
-			t := acquireTaskFast(fn)
+			t := acquireTaskFast(taskFn)
 			w.taskCh <- t
 			return nil
 		}
@@ -1460,7 +1422,7 @@ func (p *Pool) SubmitWithContext(ctx context.Context, fn func()) error {
 			close(done)
 			w.run()
 			p.metrics.SubmittedTasks.Add(1)
-			t := acquireTaskFast(fn)
+			t := acquireTaskFast(taskFn)
 			w.taskCh <- t
 			return nil
 		}
@@ -1707,7 +1669,7 @@ func (p *Pool) CloseNow() {
 // 简单用法 (类似 ByteDance gopool):
 //
 //	pool.Go(func() { /* task */ })           // 异步执行
-//	pool.GoCtx(ctx, func() { /* task */ })   // 带 Context
+//	pool.GoCtx(ctx, func(ctx context.Context) { /* 协作式任务 */ }) // 带 Context
 //	pool.TryGo(func() { /* task */ })        // 非阻塞
 //	pool.GoWait(func() { /* task */ })       // 同步等待
 //
@@ -1719,109 +1681,134 @@ func (p *Pool) CloseNow() {
 // ============================================================================
 
 var (
-	defaultPool *Pool
-	defaultOnce sync.Once
+	defaultPool   atomic.Pointer[Pool]
+	defaultPoolMu sync.Mutex
 )
 
-func initDefaultPool() {
-	defaultOnce.Do(func() {
-		defaultPool = New("default")
-	})
+func initDefaultPool() *Pool {
+	if p := defaultPool.Load(); p != nil {
+		return p
+	}
+
+	defaultPoolMu.Lock()
+	defer defaultPoolMu.Unlock()
+	if p := defaultPool.Load(); p != nil {
+		return p
+	}
+
+	p := New("default")
+	defaultPool.Store(p)
+	return p
 }
 
 // Go executes a function asynchronously using the default pool.
 // This is the simplest way to run a task in the pool.
-func Go(fn func()) {
-	initDefaultPool()
-	_ = defaultPool.Submit(fn)
+func Go(fn func()) error {
+	return initDefaultPool().Submit(fn)
 }
 
-// GoCtx executes a function with context support.
-// Returns error if context is cancelled before submission.
-func GoCtx(ctx context.Context, fn func()) error {
-	initDefaultPool()
-	return defaultPool.SubmitWithContext(ctx, fn)
+// GoCtx 使用默认池提交接收 context 的协作式任务。
+func GoCtx(ctx context.Context, fn func(context.Context)) error {
+	return initDefaultPool().SubmitWithContext(ctx, fn)
 }
 
 // TryGo attempts to execute without blocking. Returns false if pool is busy.
 func TryGo(fn func()) bool {
-	initDefaultPool()
-	return defaultPool.TrySubmit(fn)
+	return initDefaultPool().TrySubmit(fn)
 }
 
 // GoWait executes a function and waits for completion.
-func GoWait(fn func()) {
-	initDefaultPool()
-	_ = defaultPool.SubmitWait(fn)
+func GoWait(fn func()) error {
+	return initDefaultPool().SubmitWait(fn)
 }
 
 // GoBatch submits multiple functions efficiently. Returns number of submitted tasks.
-func GoBatch(fns []func()) int {
-	initDefaultPool()
-	n, _ := defaultPool.SubmitBatch(fns)
-	return n
+func GoBatch(fns []func()) (int, error) {
+	return initDefaultPool().SubmitBatch(fns)
 }
 
 // Parallel executes multiple functions in parallel and waits for all to complete.
-func Parallel(fns ...func()) {
+func Parallel(fns ...func()) error {
 	if len(fns) == 0 {
-		return
+		return nil
 	}
-	initDefaultPool()
-	done := make(chan struct{}, len(fns))
+	p := initDefaultPool()
+	results := make(chan error, len(fns))
+	submitted := 0
+	var submitErr error
 	for _, fn := range fns {
 		f := fn
-		_ = defaultPool.Submit(func() {
+		if err := p.Submit(func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					results <- newTaskPanicError(recovered)
+					panic(recovered)
+				}
+				results <- nil
+			}()
 			f()
-			done <- struct{}{}
-		})
+		}); err != nil {
+			submitErr = err
+			break
+		}
+		submitted++
 	}
-	for range fns {
-		<-done
+
+	errList := make([]error, 0, submitted+1)
+	if submitErr != nil {
+		errList = append(errList, submitErr)
 	}
+	for range submitted {
+		if err := <-results; err != nil {
+			errList = append(errList, err)
+		}
+	}
+	return errors.Join(errList...)
 }
 
 // SetCap sets the default pool capacity
-func SetCap(cap int32) {
-	initDefaultPool()
-	defaultPool.Tune(cap)
+func SetCap(capacity int32) {
+	initDefaultPool().Tune(capacity)
 }
 
 // SetPanicHandler sets the panic handler for the default pool
 func SetPanicHandler(handler func(any)) {
-	initDefaultPool()
-	defaultPool.lock.Lock()
-	defer defaultPool.lock.Unlock()
-	defaultPool.config.PanicHandler = handler
+	p := initDefaultPool()
+	p.lock.Lock()
+	defer p.lock.Unlock()
+	p.config.PanicHandler = handler
 }
 
 // Running returns the number of running workers in the default pool
 func Running() int32 {
-	initDefaultPool()
-	return defaultPool.Running()
+	return initDefaultPool().Running()
 }
 
 // Free returns available worker slots in the default pool
 func Free() int32 {
-	initDefaultPool()
-	return defaultPool.Free()
+	return initDefaultPool().Free()
 }
 
 // Cap returns the capacity of the default pool
 func Cap() int32 {
-	initDefaultPool()
-	return defaultPool.Cap()
+	return initDefaultPool().Cap()
 }
 
 // DefaultPool returns the default pool instance
 func DefaultPool() *Pool {
-	initDefaultPool()
-	return defaultPool
+	return initDefaultPool()
 }
 
-// SetDefaultPool replaces the default pool
-func SetDefaultPool(p *Pool) {
-	defaultPool = p
+// SetDefaultPool 替换默认池，但不接管旧池的关闭责任。
+func SetDefaultPool(p *Pool) error {
+	if p == nil {
+		return invalidArgumentError("default pool must not be nil")
+	}
+
+	defaultPoolMu.Lock()
+	defaultPool.Store(p)
+	defaultPoolMu.Unlock()
+	return nil
 }
 
 // ============================================================================
@@ -1836,7 +1823,7 @@ func GetPool(name string) (*Pool, bool) {
 	if !ok {
 		return nil, false
 	}
-	return v.(*Pool), true
+	return mustPoolValue[*Pool](v), true
 }
 
 // MustGetPool gets a named pool (panics if not found)
@@ -1862,7 +1849,7 @@ func UnregisterPool(name string) {
 // RangePool iterates over all named pools
 func RangePool(fn func(name string, p *Pool) bool) {
 	namedPools.Range(func(key, value any) bool {
-		return fn(key.(string), value.(*Pool))
+		return fn(mustPoolValue[string](key), mustPoolValue[*Pool](value))
 	})
 }
 
@@ -1887,8 +1874,12 @@ type MultiPool struct {
 	strategy LoadBalancingStrategy
 }
 
-// NewMultiPool creates a new multi-pool
-func NewMultiPool(size int, poolSize int32, strategy LoadBalancingStrategy, opts ...Option) *MultiPool {
+// NewMultiPool 创建多池实例，配置无效时返回错误。
+func NewMultiPool(size int, poolSize int32, strategy LoadBalancingStrategy, opts ...Option) (*MultiPool, error) {
+	if size <= 0 {
+		return nil, invalidConfigurationError("multi-pool size must be greater than zero")
+	}
+
 	pools := make([]*Pool, size)
 	for i := range size {
 		pools[i] = New(fmt.Sprintf("multipool-%d", i), append(opts, WithMaxWorkers(poolSize))...)
@@ -1896,7 +1887,7 @@ func NewMultiPool(size int, poolSize int32, strategy LoadBalancingStrategy, opts
 	return &MultiPool{
 		pools:    pools,
 		strategy: strategy,
-	}
+	}, nil
 }
 
 // Submit submits a task
@@ -1925,17 +1916,17 @@ func (mp *MultiPool) roundRobin() *Pool {
 }
 
 func (mp *MultiPool) leastTasks() *Pool {
-	min := mp.pools[0]
-	minTasks := min.Running() + min.Waiting()
+	leastPool := mp.pools[0]
+	minTasks := leastPool.Running() + leastPool.Waiting()
 
 	for _, p := range mp.pools[1:] {
 		tasks := p.Running() + p.Waiting()
 		if tasks < minTasks {
-			min = p
+			leastPool = p
 			minTasks = tasks
 		}
 	}
-	return min
+	return leastPool
 }
 
 // Running returns total running workers across all pools
@@ -2022,9 +2013,18 @@ type ObjectPool[T any] struct {
 	reset   func(*T)
 }
 
-// NewObjectPool creates an object pool
-func NewObjectPool[T any](factory func() T, reset func(*T)) *ObjectPool[T] {
-	return &ObjectPool[T]{
+// NewObjectPool 创建对象池，factory 配置无效时返回错误。
+func NewObjectPool[T any](factory func() T, reset func(*T)) (*ObjectPool[T], error) {
+	if factory == nil {
+		return nil, invalidConfigurationError("object pool factory must not be nil")
+	}
+
+	initial, err := objectPoolFactoryValue(factory)
+	if err != nil {
+		return nil, err
+	}
+
+	p := &ObjectPool[T]{
 		pool: sync.Pool{
 			New: func() any {
 				return factory()
@@ -2033,11 +2033,28 @@ func NewObjectPool[T any](factory func() T, reset func(*T)) *ObjectPool[T] {
 		factory: factory,
 		reset:   reset,
 	}
+	p.pool.Put(initial)
+	return p, nil
+}
+
+func objectPoolFactoryValue[T any](factory func() T) (T, error) {
+	value := factory()
+	reflected := reflect.ValueOf(value)
+	if !reflected.IsValid() {
+		return value, invalidConfigurationError("object pool factory must return a non-nil value")
+	}
+	switch reflected.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
+		if reflected.IsNil() {
+			return value, invalidConfigurationError("object pool factory must return a non-nil value")
+		}
+	}
+	return value, nil
 }
 
 // Get gets an object
 func (p *ObjectPool[T]) Get() T {
-	return p.pool.Get().(T)
+	return mustPoolValue[T](p.pool.Get())
 }
 
 // Put returns an object
@@ -2063,7 +2080,8 @@ func NewByteSlicePool(size int) *ByteSlicePool {
 	return &ByteSlicePool{
 		pool: sync.Pool{
 			New: func() any {
-				return make([]byte, size)
+				buffer := make([]byte, size)
+				return &buffer
 			},
 		},
 		size: size,
@@ -2072,13 +2090,15 @@ func NewByteSlicePool(size int) *ByteSlicePool {
 
 // Get gets a byte slice
 func (p *ByteSlicePool) Get() []byte {
-	return p.pool.Get().([]byte)[:p.size]
+	buffer := mustPoolValue[*[]byte](p.pool.Get())
+	return (*buffer)[:p.size]
 }
 
 // Put returns a byte slice
 func (p *ByteSlicePool) Put(b []byte) {
 	if cap(b) >= p.size {
-		p.pool.Put(b[:p.size])
+		b = b[:p.size]
+		p.pool.Put(&b)
 	}
 }
 
@@ -2096,7 +2116,8 @@ func NewBufferPool(initialSize int) *BufferPool {
 	return &BufferPool{
 		pool: sync.Pool{
 			New: func() any {
-				return make([]byte, 0, initialSize)
+				buffer := make([]byte, 0, initialSize)
+				return &buffer
 			},
 		},
 	}
@@ -2104,12 +2125,14 @@ func NewBufferPool(initialSize int) *BufferPool {
 
 // Get gets a buffer
 func (p *BufferPool) Get() []byte {
-	return p.pool.Get().([]byte)[:0]
+	buffer := mustPoolValue[*[]byte](p.pool.Get())
+	return (*buffer)[:0]
 }
 
 // Put returns a buffer
 func (p *BufferPool) Put(b []byte) {
-	p.pool.Put(b[:0])
+	b = b[:0]
+	p.pool.Put(&b)
 }
 
 // ============================================================================

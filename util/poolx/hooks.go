@@ -25,8 +25,6 @@ const (
 	HookOnPanic
 	// HookOnReject is called when a task is rejected
 	HookOnReject
-	// HookOnTimeout is called when a task times out
-	HookOnTimeout
 	// HookOnWorkerStart is called when a worker starts
 	HookOnWorkerStart
 	// HookOnWorkerStop is called when a worker stops
@@ -52,8 +50,6 @@ func (h HookType) String() string {
 		return "OnPanic"
 	case HookOnReject:
 		return "OnReject"
-	case HookOnTimeout:
-		return "OnTimeout"
 	case HookOnWorkerStart:
 		return "OnWorkerStart"
 	case HookOnWorkerStop:
@@ -83,7 +79,6 @@ type TaskInfo struct {
 	WaitTime    time.Duration // Time spent waiting in queue
 	ExecTime    time.Duration // Time spent executing
 	Error       any           // Error or panic value
-	Timeout     time.Duration // Task timeout (zero means no timeout)
 }
 
 // WorkerInfo contains information about a worker for hooks
@@ -217,9 +212,8 @@ func (h *Hooks) TriggerAsync(hookType HookType, data any) {
 // safeCall calls a hook function with panic recovery
 func (h *Hooks) safeCall(hookType HookType, fn HookFunc, data any) {
 	defer func() {
-		if r := recover(); r != nil {
-			// Hook panicked, log but don't propagate
-			// This prevents hooks from crashing the pool
+		if recover() != nil {
+			return
 		}
 	}()
 	fn(hookType, data)
@@ -288,12 +282,6 @@ func (b *HookBuilder) OnPanic(fn TypedTaskHook) *HookBuilder {
 // OnReject registers a hook called when a task is rejected
 func (b *HookBuilder) OnReject(fn TypedTaskHook) *HookBuilder {
 	b.hooks.RegisterTask(HookOnReject, fn)
-	return b
-}
-
-// OnTimeout registers a hook called when a task times out
-func (b *HookBuilder) OnTimeout(fn TypedTaskHook) *HookBuilder {
-	b.hooks.RegisterTask(HookOnTimeout, fn)
 	return b
 }
 

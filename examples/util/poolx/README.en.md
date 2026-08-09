@@ -26,7 +26,7 @@ Demonstrates basic pool operations:
 - Future pattern for async result retrieval
 - Hook lifecycle callbacks
 - Non-blocking mode
-- Task timeout
+- Cooperative task timeout with context
 - Multi-pool load balancing
 - Map/ForEach parallel operations
 - **Batch submit SubmitBatch** ✨
@@ -132,13 +132,13 @@ Typical results:
 | Basic submit | ✅ | ✅ | ✅ |
 | Non-blocking submit | ✅ (~34ns) | ✅ (~100ns) | ❌ |
 | **Batch submit** | ✅ | ❌ | ❌ |
-| Context support | ✅ | ❌ | ✅ |
+| Cooperative context cancellation and timeout | ✅ | ❌ | ✅ |
 | Single-func pool | ✅ | ✅ | ❌ |
 | Future pattern | ✅ | ❌ | ❌ |
 | Priority queue | ✅ | ❌ | ❌ |
 | Auto scaling | ✅ | ❌ | ✅ |
 | Hook system | ✅ (10+) | ❌ | ❌ |
-| Task timeout | ✅ | ❌ | ❌ |
+| Cooperative task timeout with context | ✅ | ❌ | ❌ |
 | Multi-pool scheduling | ✅ | ✅ | ❌ |
 | **Work Stealing** | ✅ | ❌ | ❌ |
 | **Sharded counter** | ✅ | ❌ | ❌ |
@@ -150,7 +150,7 @@ Typical results:
 // Create pool
 poolx.New(name, opts...)
 poolx.NewPoolWithFunc(name, fn, opts...)
-poolx.NewMultiPool(size, poolSize, strategy, opts...)
+mp, err := poolx.NewMultiPool(size, poolSize, strategy, opts...)
 
 // Task submit
 p.Submit(fn)                    // blocking submit
@@ -158,7 +158,7 @@ p.TrySubmit(fn)                 // non-blocking submit (~34ns)
 p.SubmitBatch(fns)              // batch submit
 p.TrySubmitBatch(fns)           // non-blocking batch submit
 p.SubmitWait(fn)                // submit and wait for completion
-p.SubmitWithContext(ctx, fn)    // Context support
+p.SubmitWithContext(ctx, contextTask) // contextTask: func(context.Context)
 p.SubmitWithOptions(fn, opts)   // submit with options
 
 // Future pattern

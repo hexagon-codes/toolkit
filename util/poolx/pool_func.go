@@ -44,9 +44,6 @@ type PoolWithFunc struct {
 	// Hooks
 	hooks *Hooks
 
-	// Auto-scaler
-	scaler *AutoScaler
-
 	// Creation time
 	createdAt time.Time
 
@@ -141,7 +138,7 @@ func (p *PoolWithFunc) createWorker() *workerFunc {
 	}
 
 	id := p.workerID.Add(1)
-	w := p.workerCache.Get().(*workerFunc)
+	w := mustPoolValue[*workerFunc](p.workerCache.Get())
 	w.pool = p
 	w.id = id
 	w.lastActive.Store(time.Now().UnixNano())
@@ -611,7 +608,11 @@ func (w *workerFunc) execute(arg any) {
 			if w.pool.config.PanicHandler != nil {
 				// 包装 panic handler 调用，防止它本身 panic
 				func() {
-					defer func() { recover() }()
+					defer func() {
+						if recover() != nil {
+							return
+						}
+					}()
 					w.pool.config.PanicHandler(r)
 				}()
 			}
@@ -643,10 +644,10 @@ type workerFuncStack struct {
 	lock   Spinlock
 }
 
-func newWorkerFuncStack(cap int) *workerFuncStack {
+func newWorkerFuncStack(capacity int) *workerFuncStack {
 	return &workerFuncStack{
-		items: make([]*workerFunc, cap),
-		cap:   cap,
+		items: make([]*workerFunc, capacity),
+		cap:   capacity,
 	}
 }
 

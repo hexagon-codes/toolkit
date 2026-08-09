@@ -187,7 +187,7 @@ func contextCancellationExample() {
 	var started, completed atomic.Int32
 
 	// 提交一个长时间运行的任务
-	future := poolx.SubmitFuncCtx(p, ctx, func(ctx context.Context) (string, error) {
+	future := poolx.SubmitFuncCtx(ctx, p, func(ctx context.Context) (string, error) {
 		started.Add(1)
 		select {
 		case <-time.After(1 * time.Second):
@@ -293,13 +293,15 @@ func globalPoolExample() {
 	var counter atomic.Int32
 
 	// 使用 Go() 简单异步执行
-	poolx.Go(func() {
+	if err := poolx.Go(func() {
 		counter.Add(1)
-	})
+	}); err != nil {
+		fmt.Printf("Go submission failed: %v\n", err)
+	}
 
 	// 使用 GoCtx() 带 context 执行
 	ctx := context.Background()
-	err := poolx.GoCtx(ctx, func() {
+	err := poolx.GoCtx(ctx, func(context.Context) {
 		counter.Add(1)
 	})
 	if err != nil {

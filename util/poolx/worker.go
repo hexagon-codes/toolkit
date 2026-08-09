@@ -12,9 +12,8 @@ import (
 
 // TaskOptions contains optional settings for a task
 type TaskOptions struct {
-	Priority int           // Task priority (higher = more important)
-	Timeout  time.Duration // Per-task timeout (0 = no timeout)
-	ID       uint64        // Task ID (auto-generated if 0)
+	Priority int    // 任务优先级，数值越大优先级越高
+	ID       uint64 // 任务 ID，0 表示自动生成
 }
 
 // TaskOption is a function that configures TaskOptions
@@ -24,13 +23,6 @@ type TaskOption func(*TaskOptions)
 func WithTaskPriority(priority int) TaskOption {
 	return func(o *TaskOptions) {
 		o.Priority = priority
-	}
-}
-
-// WithTaskTimeout sets the per-task timeout
-func WithTaskTimeout(timeout time.Duration) TaskOption {
-	return func(o *TaskOptions) {
-		o.Timeout = timeout
 	}
 }
 
@@ -84,8 +76,8 @@ func (s *StealingScheduler) Unregister(id int32) {
 	}
 }
 
-// Steal attempts to steal a task from another worker
-func (s *StealingScheduler) Steal(thiefID int32) *task {
+// steal 尝试从其他工作协程窃取任务。
+func (s *StealingScheduler) steal(thiefID int32) *task {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -161,10 +153,10 @@ type WorkerStack struct {
 }
 
 // NewWorkerStack creates a new worker stack with the given capacity
-func NewWorkerStack(cap int) *WorkerStack {
+func NewWorkerStack(capacity int) *WorkerStack {
 	return &WorkerStack{
-		items: make([]WorkerInterface, cap),
-		cap:   cap,
+		items: make([]WorkerInterface, capacity),
+		cap:   capacity,
 	}
 }
 
@@ -230,9 +222,7 @@ func (s *WorkerStack) RetrieveExpiry(duration time.Duration) []WorkerInterface {
 	}
 
 	// Rebuild ring from surviving items
-	for i, w := range surviving {
-		s.items[i] = w
-	}
+	copy(s.items, surviving)
 	s.head = len(surviving)
 	s.len = len(surviving)
 
@@ -314,20 +304,20 @@ func (m *TaskMetrics) Record(duration time.Duration, err bool) {
 	// Update min/max atomically
 	nanos := int64(duration)
 	for {
-		min := m.MinTime.Load()
-		if min != 0 && min <= nanos {
+		minimum := m.MinTime.Load()
+		if minimum != 0 && minimum <= nanos {
 			break
 		}
-		if m.MinTime.CompareAndSwap(min, nanos) {
+		if m.MinTime.CompareAndSwap(minimum, nanos) {
 			break
 		}
 	}
 	for {
-		max := m.MaxTime.Load()
-		if max >= nanos {
+		maximum := m.MaxTime.Load()
+		if maximum >= nanos {
 			break
 		}
-		if m.MaxTime.CompareAndSwap(max, nanos) {
+		if m.MaxTime.CompareAndSwap(maximum, nanos) {
 			break
 		}
 	}

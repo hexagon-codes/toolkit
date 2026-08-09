@@ -92,7 +92,7 @@ func TestPool_SubmitWithContext(t *testing.T) {
 	defer cancel()
 
 	var executed atomic.Bool
-	err := p.SubmitWithContext(ctx, func() {
+	err := p.SubmitWithContext(ctx, func(context.Context) {
 		executed.Store(true)
 	})
 
@@ -122,7 +122,7 @@ func TestPool_SubmitWithContext_Cancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := p.SubmitWithContext(ctx, func() {})
+	err := p.SubmitWithContext(ctx, func(context.Context) {})
 
 	// 应该返回 context 错误
 	if err != context.Canceled {
@@ -455,9 +455,11 @@ func TestPool_MetricsSuccessRate(t *testing.T) {
 func TestGo(t *testing.T) {
 	var executed atomic.Bool
 
-	Go(func() {
+	if err := Go(func() {
 		executed.Store(true)
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	time.Sleep(100 * time.Millisecond)
 
@@ -469,7 +471,7 @@ func TestGo(t *testing.T) {
 func TestGoCtx(t *testing.T) {
 	var executed atomic.Bool
 
-	err := GoCtx(context.Background(), func() {
+	err := GoCtx(context.Background(), func(context.Context) {
 		executed.Store(true)
 	})
 
@@ -570,7 +572,10 @@ func TestRangePool(t *testing.T) {
 // ============================================================================
 
 func TestMultiPool_RoundRobin(t *testing.T) {
-	mp := NewMultiPool(4, 2, RoundRobin)
+	mp, err := NewMultiPool(4, 2, RoundRobin)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer mp.Release()
 
 	var counter atomic.Int32
@@ -578,7 +583,7 @@ func TestMultiPool_RoundRobin(t *testing.T) {
 
 	for i := 0; i < 100; i++ {
 		wg.Add(1)
-		err := mp.Submit(func() {
+		err = mp.Submit(func() {
 			counter.Add(1)
 			wg.Done()
 		})
@@ -595,7 +600,10 @@ func TestMultiPool_RoundRobin(t *testing.T) {
 }
 
 func TestMultiPool_LeastTasks(t *testing.T) {
-	mp := NewMultiPool(4, 2, LeastTasks)
+	mp, err := NewMultiPool(4, 2, LeastTasks)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer mp.Release()
 
 	var counter atomic.Int32
@@ -603,7 +611,7 @@ func TestMultiPool_LeastTasks(t *testing.T) {
 
 	for i := 0; i < 50; i++ {
 		wg.Add(1)
-		err := mp.Submit(func() {
+		err = mp.Submit(func() {
 			counter.Add(1)
 			wg.Done()
 		})
@@ -620,7 +628,10 @@ func TestMultiPool_LeastTasks(t *testing.T) {
 }
 
 func TestMultiPool_TrySubmit(t *testing.T) {
-	mp := NewMultiPool(2, 4, RoundRobin)
+	mp, err := NewMultiPool(2, 4, RoundRobin)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer mp.Release()
 
 	var counter atomic.Int32
@@ -645,7 +656,10 @@ func TestMultiPool_TrySubmit(t *testing.T) {
 }
 
 func TestMultiPool_RunningFree(t *testing.T) {
-	mp := NewMultiPool(4, 2, RoundRobin, WithAutoScale(false), WithMinWorkers(0))
+	mp, err := NewMultiPool(4, 2, RoundRobin, WithAutoScale(false), WithMinWorkers(0))
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer mp.Release()
 
 	if mp.Free() != 8 {
@@ -669,7 +683,10 @@ func TestMultiPool_RunningFree(t *testing.T) {
 }
 
 func TestMultiPool_Reboot(t *testing.T) {
-	mp := NewMultiPool(2, 2, RoundRobin, WithAutoScale(false))
+	mp, err := NewMultiPool(2, 2, RoundRobin, WithAutoScale(false))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	var counter atomic.Int32
 	_ = mp.Submit(func() {
@@ -814,7 +831,7 @@ func TestObjectPool(t *testing.T) {
 	createCount := 0
 	resetCount := 0
 
-	pool := NewObjectPool(
+	pool, err := NewObjectPool(
 		func() *int {
 			createCount++
 			v := 0
@@ -825,6 +842,9 @@ func TestObjectPool(t *testing.T) {
 			**v = 0
 		},
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	obj1 := pool.Get()
 	*obj1 = 42
@@ -1678,29 +1698,6 @@ func TestPool_SubmitWithOptions(t *testing.T) {
 	}
 }
 
-func TestPool_TaskTimeout(t *testing.T) {
-	var timeoutCalled atomic.Bool
-
-	hooks := NewHookBuilder().
-		OnTimeout(func(info *TaskInfo) {
-			timeoutCalled.Store(true)
-		}).
-		Build()
-
-	p := New("test", WithMaxWorkers(2), WithAutoScale(false), WithHooks(hooks))
-	defer p.Release()
-
-	_ = p.SubmitWithOptions(func() {
-		time.Sleep(200 * time.Millisecond)
-	}, WithTaskTimeout(50*time.Millisecond))
-
-	time.Sleep(150 * time.Millisecond)
-
-	if !timeoutCalled.Load() {
-		t.Error("OnTimeout hook should be called")
-	}
-}
-
 // ============================================================================
 // SubmitBatch 测试
 // ============================================================================
@@ -1947,9 +1944,11 @@ func TestPool_WithWorkStealing(t *testing.T) {
 
 func TestSimpleAPI_Go(t *testing.T) {
 	var executed atomic.Bool
-	Go(func() {
+	if err := Go(func() {
 		executed.Store(true)
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 	time.Sleep(50 * time.Millisecond)
 	if !executed.Load() {
 		t.Error("Go should execute the function")
@@ -1971,9 +1970,11 @@ func TestSimpleAPI_TryGo(t *testing.T) {
 
 func TestSimpleAPI_GoWait(t *testing.T) {
 	var executed atomic.Bool
-	GoWait(func() {
+	if err := GoWait(func() {
 		executed.Store(true)
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if !executed.Load() {
 		t.Error("GoWait should execute synchronously")
 	}
@@ -1987,7 +1988,10 @@ func TestSimpleAPI_GoBatch(t *testing.T) {
 			counter.Add(1)
 		}
 	}
-	n := GoBatch(batch)
+	n, err := GoBatch(batch)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if n != 10 {
 		t.Errorf("GoBatch should submit 10, got %d", n)
 	}
@@ -1999,11 +2003,13 @@ func TestSimpleAPI_GoBatch(t *testing.T) {
 
 func TestSimpleAPI_Parallel(t *testing.T) {
 	var c1, c2, c3 atomic.Bool
-	Parallel(
+	if err := Parallel(
 		func() { c1.Store(true) },
 		func() { c2.Store(true) },
 		func() { c3.Store(true) },
-	)
+	); err != nil {
+		t.Fatal(err)
+	}
 	if !c1.Load() || !c2.Load() || !c3.Load() {
 		t.Error("Parallel should execute all functions")
 	}
