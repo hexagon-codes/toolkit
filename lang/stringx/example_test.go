@@ -7,7 +7,6 @@ import (
 )
 
 func ExampleBytesToString() {
-	// 零拷贝转换 []byte 到 string
 	b := []byte("hello world")
 	s := stringx.BytesToString(b)
 
@@ -16,10 +15,9 @@ func ExampleBytesToString() {
 	// hello world
 }
 
-func ExampleString2Bytes() {
-	// 零拷贝转换 string 到 []byte
+func ExampleStringToBytes() {
 	s := "hello world"
-	b := stringx.String2Bytes(s)
+	b := stringx.StringToBytes(s)
 
 	fmt.Println(string(b))
 	// Output:
@@ -31,7 +29,7 @@ func ExampleBytesToString_roundtrip() {
 	original := "Hello, 世界!"
 
 	// string -> bytes -> string
-	bytes := stringx.String2Bytes(original)
+	bytes := stringx.StringToBytes(original)
 	result := stringx.BytesToString(bytes)
 
 	fmt.Println(result)

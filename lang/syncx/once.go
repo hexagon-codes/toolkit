@@ -158,16 +158,16 @@ func (o *OnceErr[T]) Do(fn func() (T, error)) (T, error) {
 //
 // 返回:
 //   - T: 值
-//   - error: 错误
 //   - bool: 是否已初始化
+//   - error: 错误
 //
 // 注意: 此方法是并发安全的。
-func (o *OnceErr[T]) Value() (T, error, bool) {
+func (o *OnceErr[T]) Value() (value T, initialized bool, err error) {
 	if o.initialized.Load() {
-		return o.value, o.err, true
+		return o.value, true, o.err
 	}
 	var zero T
-	return zero, nil, false
+	return zero, false, nil
 }
 
 // IsInitialized 检查是否已初始化

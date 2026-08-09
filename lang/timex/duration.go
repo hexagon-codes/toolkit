@@ -40,13 +40,13 @@ func FormatDuration(d time.Duration) string {
 	}
 
 	days := d / (24 * time.Hour)
-	d = d % (24 * time.Hour)
+	d %= 24 * time.Hour
 	hours := d / time.Hour
-	d = d % time.Hour
+	d %= time.Hour
 	minutes := d / time.Minute
-	d = d % time.Minute
+	d %= time.Minute
 	seconds := d / time.Second
-	d = d % time.Second
+	d %= time.Second
 	millis := d / time.Millisecond
 
 	if days > 0 {
@@ -97,33 +97,34 @@ func FormatDurationShort(d time.Duration) string {
 	}
 
 	days := d / (24 * time.Hour)
-	d = d % (24 * time.Hour)
+	d %= 24 * time.Hour
 	hours := d / time.Hour
-	d = d % time.Hour
+	d %= time.Hour
 	minutes := d / time.Minute
-	d = d % time.Minute
+	d %= time.Minute
 	seconds := d / time.Second
 
 	var result string
-	if days > 0 {
+	switch {
+	case days > 0:
 		if hours > 0 {
 			result = fmt.Sprintf("%dd%dh", days, hours)
 		} else {
 			result = fmt.Sprintf("%dd", days)
 		}
-	} else if hours > 0 {
+	case hours > 0:
 		if minutes > 0 {
 			result = fmt.Sprintf("%dh%dm", hours, minutes)
 		} else {
 			result = fmt.Sprintf("%dh", hours)
 		}
-	} else if minutes > 0 {
+	case minutes > 0:
 		if seconds > 0 {
 			result = fmt.Sprintf("%dm%ds", minutes, seconds)
 		} else {
 			result = fmt.Sprintf("%dm", minutes)
 		}
-	} else {
+	default:
 		result = fmt.Sprintf("%ds", seconds)
 	}
 
@@ -169,26 +170,25 @@ func ParseDuration(s string) (time.Duration, error) {
 
 		var d time.Duration
 		negative := matches[1] == "-"
-
-		if matches[2] != "" {
-			days, _ := strconv.ParseInt(matches[2], 10, 64)
-			d += time.Duration(days) * 24 * time.Hour
+		parts := []struct {
+			value string
+			unit  time.Duration
+		}{
+			{matches[2], 24 * time.Hour},
+			{matches[3], time.Hour},
+			{matches[4], time.Minute},
+			{matches[5], time.Second},
+			{matches[6], time.Millisecond},
 		}
-		if matches[3] != "" {
-			hours, _ := strconv.ParseInt(matches[3], 10, 64)
-			d += time.Duration(hours) * time.Hour
-		}
-		if matches[4] != "" {
-			minutes, _ := strconv.ParseInt(matches[4], 10, 64)
-			d += time.Duration(minutes) * time.Minute
-		}
-		if matches[5] != "" {
-			seconds, _ := strconv.ParseInt(matches[5], 10, 64)
-			d += time.Duration(seconds) * time.Second
-		}
-		if matches[6] != "" {
-			millis, _ := strconv.ParseInt(matches[6], 10, 64)
-			d += time.Duration(millis) * time.Millisecond
+		for _, part := range parts {
+			if part.value == "" {
+				continue
+			}
+			value, err := strconv.ParseInt(part.value, 10, 64)
+			if err != nil {
+				return 0, fmt.Errorf("invalid duration component %q: %w", part.value, err)
+			}
+			d += time.Duration(value) * part.unit
 		}
 
 		if negative {

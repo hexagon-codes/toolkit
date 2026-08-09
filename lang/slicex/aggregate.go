@@ -25,13 +25,13 @@ func Min[T mathx.Ordered](slice []T) T {
 		var zero T
 		return zero
 	}
-	min := slice[0]
+	minimum := slice[0]
 	for _, v := range slice[1:] {
-		if v < min {
-			min = v
+		if v < minimum {
+			minimum = v
 		}
 	}
-	return min
+	return minimum
 }
 
 // Max 返回切片中的最大值
@@ -50,13 +50,13 @@ func Max[T mathx.Ordered](slice []T) T {
 		var zero T
 		return zero
 	}
-	max := slice[0]
+	maximum := slice[0]
 	for _, v := range slice[1:] {
-		if v > max {
-			max = v
+		if v > maximum {
+			maximum = v
 		}
 	}
-	return max
+	return maximum
 }
 
 // MinMax 同时返回切片中的最小值和最大值
@@ -71,21 +71,21 @@ func Max[T mathx.Ordered](slice []T) T {
 // 示例:
 //
 //	min, max := slicex.MinMax([]int{3, 1, 4, 1, 5})  // 1, 5
-func MinMax[T mathx.Ordered](slice []T) (T, T) {
+func MinMax[T mathx.Ordered](slice []T) (minimum, maximum T) {
 	if len(slice) == 0 {
 		var zero T
 		return zero, zero
 	}
-	min, max := slice[0], slice[0]
+	minimum, maximum = slice[0], slice[0]
 	for _, v := range slice[1:] {
-		if v < min {
-			min = v
+		if v < minimum {
+			minimum = v
 		}
-		if v > max {
-			max = v
+		if v > maximum {
+			maximum = v
 		}
 	}
-	return min, max
+	return minimum, maximum
 }
 
 // MinBy 使用自定义比较函数返回最小元素
@@ -108,13 +108,13 @@ func MinBy[T any](slice []T, less func(a, b T) bool) (T, bool) {
 		var zero T
 		return zero, false
 	}
-	min := slice[0]
+	minimum := slice[0]
 	for _, v := range slice[1:] {
-		if less(v, min) {
-			min = v
+		if less(v, minimum) {
+			minimum = v
 		}
 	}
-	return min, true
+	return minimum, true
 }
 
 // MaxBy 使用自定义比较函数返回最大元素
@@ -137,13 +137,13 @@ func MaxBy[T any](slice []T, less func(a, b T) bool) (T, bool) {
 		var zero T
 		return zero, false
 	}
-	max := slice[0]
+	maximum := slice[0]
 	for _, v := range slice[1:] {
-		if less(max, v) {
-			max = v
+		if less(maximum, v) {
+			maximum = v
 		}
 	}
-	return max, true
+	return maximum, true
 }
 
 // MinByKey 根据提取的键返回最小元素
@@ -166,15 +166,15 @@ func MinByKey[T any, K mathx.Ordered](slice []T, keyFn func(T) K) (T, bool) {
 		var zero T
 		return zero, false
 	}
-	min := slice[0]
-	minKey := keyFn(min)
+	minimum := slice[0]
+	minKey := keyFn(minimum)
 	for _, v := range slice[1:] {
 		if key := keyFn(v); key < minKey {
-			min = v
+			minimum = v
 			minKey = key
 		}
 	}
-	return min, true
+	return minimum, true
 }
 
 // MaxByKey 根据提取的键返回最大元素
@@ -197,15 +197,15 @@ func MaxByKey[T any, K mathx.Ordered](slice []T, keyFn func(T) K) (T, bool) {
 		var zero T
 		return zero, false
 	}
-	max := slice[0]
-	maxKey := keyFn(max)
+	maximum := slice[0]
+	maxKey := keyFn(maximum)
 	for _, v := range slice[1:] {
 		if key := keyFn(v); key > maxKey {
-			max = v
+			maximum = v
 			maxKey = key
 		}
 	}
-	return max, true
+	return maximum, true
 }
 
 // Sum 计算切片元素之和

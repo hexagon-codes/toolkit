@@ -68,12 +68,12 @@ values := conv.MapValues(m)
 
 ### stringx - 字符串工具
 
-高性能字符串操作，包括零拷贝转换。
+字符串转换和切片辅助函数。
 
 ```go
 import "github.com/hexagon-codes/toolkit/lang/stringx"
 
-// 零拷贝转换（使用 unsafe，需谨慎）
+// 安全复制转换
 str := stringx.BytesToString([]byte("hello"))
 bytes := stringx.StringToBytes("world")
 
@@ -82,10 +82,7 @@ result := stringx.StringToSlice([]int{1, 2, 3})
 // result = []any{1, 2, 3}
 ```
 
-**警告**：
-- `BytesToString` 和 `StringToBytes` 使用 unsafe 指针
-- 不要修改转换后的数据
-- 仅在性能关键路径使用
+转换结果拥有独立存储；修改源 `[]byte` 或返回的 `[]byte` 不会改变另一侧数据。
 
 ### timex - 时间工具
 
@@ -229,6 +226,53 @@ defer pool.Put(buf)
 - Singleflight: 防缓存击穿、减少数据库压力、API去重
 - Pool: 减少 GC 压力、高频对象复用
 
+### errorx - 错误与并发任务处理
+
+```go
+import "github.com/hexagon-codes/toolkit/lang/errorx"
+
+// 返回通道只产生一次任务完成结果
+if err := <-errorx.SafeGo(func() { runTask() }); err != nil {
+    return err
+}
+
+fallback, err := errorx.Err[int](loadErr).UnwrapOrElse(func(err error) int {
+    log.Printf("load failed: %v", err)
+    return 0
+})
+if err != nil {
+    return err
+}
+```
+
+`SafeGo` 不会丢弃 panic 或 nil 任务错误。`Result.UnwrapOrElse` 同时返回值与错误，以便调用方处理无效回调。
+
+### contextx - Context 生命周期工具
+
+```go
+import "github.com/hexagon-codes/toolkit/lang/contextx"
+
+if err := contextx.Run(ctx, func(taskCtx context.Context) error {
+    return runTask(taskCtx)
+}); err != nil {
+    return err
+}
+
+if err := contextx.RunTimeout(ctx, 5*time.Second, func(taskCtx context.Context) error {
+    return runTask(taskCtx)
+}); err != nil {
+    return err
+}
+
+pool, err := contextx.NewPool(ctx, 10)
+if err != nil {
+    return err
+}
+defer pool.Close()
+```
+
+`Run` 与 `RunTimeout` 同步执行任务，任务通过收到的 context 协作响应取消；`NewPool` 对 context 和容量进行显式校验。
+
 ## 安装
 
 ```bash
@@ -345,23 +389,9 @@ conv.String(User{Name: "Alice"}) // "Alice"
 
 ## 性能考虑
 
-### unsafe 操作
+### 字符串转换
 
-`stringx.BytesToString()` 和 `StringToBytes()` 使用 unsafe 指针：
-
-**优点**：
-- 零拷贝，性能极高
-- 避免内存分配
-
-**缺点**：
-- 修改数据会导致未定义行为
-- 需要确保数据生命周期正确
-
-**使用场景**：
-- ✅ 只读操作
-- ✅ 性能关键路径
-- ❌ 需要修改数据
-- ❌ 数据生命周期不确定
+`stringx.BytesToString()` 和 `StringToBytes()` 使用标准 Go 复制转换，优先保证所有权和并发语义。性能敏感路径应先用 benchmark 证明转换是瓶颈，再在局部实现专用优化。
 
 ### reflect 使用
 

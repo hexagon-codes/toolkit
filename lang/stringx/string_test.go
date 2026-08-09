@@ -2,7 +2,14 @@ package stringx
 
 import (
 	"bytes"
+	"strings"
 	"testing"
+)
+
+var (
+	benchmarkStringSink string
+	benchmarkBytesSink  []byte
+	benchmarkSliceSink  []any
 )
 
 func TestBytesToString(t *testing.T) {
@@ -27,7 +34,7 @@ func TestBytesToString(t *testing.T) {
 	}
 }
 
-func TestString2Bytes(t *testing.T) {
+func TestStringToBytes(t *testing.T) {
 	tests := []struct {
 		name     string
 		input    string
@@ -41,11 +48,30 @@ func TestString2Bytes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := String2Bytes(tt.input)
+			result := StringToBytes(tt.input)
 			if !bytes.Equal(result, tt.expected) {
-				t.Errorf("String2Bytes(%v) = %v, want %v", tt.input, result, tt.expected)
+				t.Errorf("StringToBytes(%v) = %v, want %v", tt.input, result, tt.expected)
 			}
 		})
+	}
+}
+
+func TestStringToBytesEmptyPreservesNil(t *testing.T) {
+	if converted := StringToBytes(""); converted != nil {
+		t.Fatalf("StringToBytes(empty) = %#v, want nil", converted)
+	}
+}
+
+func TestString2BytesCompatibility(t *testing.T) {
+	source := strings.Repeat("legacy", 2)
+	converted := String2Bytes(source)
+	if !bytes.Equal(converted, []byte(source)) {
+		t.Fatalf("String2Bytes() = %q, want %q", converted, source)
+	}
+
+	converted[0] = 'L'
+	if source != "legacylegacy" {
+		t.Fatalf("String2Bytes must not expose string storage, got %q", source)
 	}
 }
 
@@ -61,7 +87,7 @@ func TestRoundTrip(t *testing.T) {
 	for _, original := range tests {
 		t.Run(original, func(t *testing.T) {
 			// string -> bytes -> string
-			b := String2Bytes(original)
+			b := StringToBytes(original)
 			result := BytesToString(b)
 			if result != original {
 				t.Errorf("Round trip failed: got %v, want %v", result, original)
@@ -70,7 +96,7 @@ func TestRoundTrip(t *testing.T) {
 			// bytes -> string -> bytes
 			originalBytes := []byte(original)
 			s := BytesToString(originalBytes)
-			resultBytes := String2Bytes(s)
+			resultBytes := StringToBytes(s)
 			if !bytes.Equal(resultBytes, originalBytes) {
 				t.Errorf("Round trip failed: got %v, want %v", resultBytes, originalBytes)
 			}
@@ -83,45 +109,47 @@ func TestSafety(t *testing.T) {
 	original := []byte("hello")
 	str := BytesToString(original)
 
-	// 修改原始 []byte
-	// 注意：这个测试展示了 unsafe 的风险
-	// 在实际使用中，不应该修改通过 BytesToString 转换的原始数据
-	originalCopy := make([]byte, len(original))
-	copy(originalCopy, original)
+	original[0] = 'H'
+	if str != "hello" {
+		t.Fatalf("BytesToString must not alias mutable input, got %q", str)
+	}
 
-	if str != string(originalCopy) {
-		t.Errorf("Safety test failed: str changed after []byte modification")
+	source := strings.Repeat("world", 2)
+	converted := StringToBytes(source)
+	converted[0] = 'W'
+	if source != "worldworld" {
+		t.Fatalf("StringToBytes must not expose string storage, got %q", source)
 	}
 }
 
 func BenchmarkBytesToString(b *testing.B) {
 	data := []byte("hello world, this is a benchmark test string")
 
-	b.Run("unsafe", func(b *testing.B) {
+	b.Run("toolkit_safe_copy", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			_ = BytesToString(data)
+			benchmarkStringSink = BytesToString(data)
 		}
 	})
 
 	b.Run("standard", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			_ = string(data)
+			benchmarkStringSink = string(data)
 		}
 	})
 }
 
-func BenchmarkString2Bytes(b *testing.B) {
+func BenchmarkStringToBytes(b *testing.B) {
 	str := "hello world, this is a benchmark test string"
 
-	b.Run("unsafe", func(b *testing.B) {
+	b.Run("toolkit_safe_copy", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			_ = String2Bytes(str)
+			benchmarkBytesSink = StringToBytes(str)
 		}
 	})
 
 	b.Run("standard", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			_ = []byte(str)
+			benchmarkBytesSink = []byte(str)
 		}
 	})
 }
@@ -138,14 +166,14 @@ func BenchmarkLargeData(b *testing.B) {
 	b.Run("BytesToString_1MB", func(b *testing.B) {
 		b.SetBytes(int64(len(data)))
 		for i := 0; i < b.N; i++ {
-			_ = BytesToString(data)
+			benchmarkStringSink = BytesToString(data)
 		}
 	})
 
-	b.Run("String2Bytes_1MB", func(b *testing.B) {
+	b.Run("StringToBytes_1MB", func(b *testing.B) {
 		b.SetBytes(int64(len(str)))
 		for i := 0; i < b.N; i++ {
-			_ = String2Bytes(str)
+			benchmarkBytesSink = StringToBytes(str)
 		}
 	})
 }
@@ -245,7 +273,7 @@ func BenchmarkStringToSlice(b *testing.B) {
 	for _, bm := range benchmarks {
 		b.Run(bm.name, func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
-				_ = StringToSlice(bm.input)
+				benchmarkSliceSink = StringToSlice(bm.input)
 			}
 		})
 	}

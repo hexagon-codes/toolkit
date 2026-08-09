@@ -25,11 +25,11 @@ import (
 //	conv.String(45.67)        // "45.67"
 //	conv.String(true)         // "true"
 //	conv.String([]byte("a"))  // "a"
-func String(any any) string {
-	if any == nil {
+func String(value any) string {
+	if value == nil {
 		return ""
 	}
-	switch value := any.(type) {
+	switch value := value.(type) {
 	case string:
 		return value
 	case []byte:

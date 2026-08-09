@@ -1,6 +1,7 @@
 package stream
 
 import (
+	"reflect"
 	"strconv"
 	"testing"
 )
@@ -90,6 +91,17 @@ func TestDistinct(t *testing.T) {
 	expected := []int{1, 2, 3}
 	if len(result) != len(expected) {
 		t.Errorf("expected %d elements, got %d", len(expected), len(result))
+	}
+}
+
+func TestDistinctHandlesMixedComparableValues(t *testing.T) {
+	firstSlice := []int{2}
+	secondSlice := []int{2}
+	input := []any{1, 1, firstSlice, secondSlice, "x", "x", map[string]int{"a": 1}, nil, nil}
+	want := []any{1, firstSlice, secondSlice, "x", map[string]int{"a": 1}, nil}
+
+	if got := FromSlice(input).Distinct().Collect(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Distinct() = %#v, want %#v", got, want)
 	}
 }
 

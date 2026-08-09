@@ -33,7 +33,7 @@ func T2[A, B any](a A, b B) Tuple2[A, B] {
 //
 //	t := tuple.T2("name", 18)
 //	name, age := t.Unpack()  // "name", 18
-func (t Tuple2[A, B]) Unpack() (A, B) {
+func (t Tuple2[A, B]) Unpack() (first A, second B) {
 	return t.First, t.Second
 }
 
@@ -85,7 +85,7 @@ func T3[A, B, C any](a A, b B, c C) Tuple3[A, B, C] {
 //
 //	t := tuple.T3("name", 18, true)
 //	name, age, active := t.Unpack()
-func (t Tuple3[A, B, C]) Unpack() (A, B, C) {
+func (t Tuple3[A, B, C]) Unpack() (first A, second B, third C) {
 	return t.First, t.Second, t.Third
 }
 
@@ -127,7 +127,7 @@ func T4[A, B, C, D any](a A, b B, c C, d D) Tuple4[A, B, C, D] {
 //
 //	t := tuple.T4("name", 18, true, 3.14)
 //	a, b, c, d := t.Unpack()
-func (t Tuple4[A, B, C, D]) Unpack() (A, B, C, D) {
+func (t Tuple4[A, B, C, D]) Unpack() (first A, second B, third C, fourth D) {
 	return t.First, t.Second, t.Third, t.Fourth
 }
 

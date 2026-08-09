@@ -95,7 +95,11 @@ func NewTypedPool[T any](newFunc func() T) *TypedPool[T] {
 // 返回:
 //   - T: 从池中获取的对象
 func (p *TypedPool[T]) Get() T {
-	return p.pool.Get().(T)
+	value, ok := p.pool.Get().(T)
+	if !ok {
+		panic("syncx: typed pool returned an unexpected value type")
+	}
+	return value
 }
 
 // Put 将对象放回池中

@@ -3,6 +3,8 @@ package contextx
 import (
 	"context"
 	"errors"
+	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -109,6 +111,16 @@ func TestTypeSafeKey(t *testing.T) {
 	}
 	if got.ID != user.ID || got.Name != user.Name {
 		t.Errorf("expected %+v, got %+v", user, got)
+	}
+}
+
+func TestKeysWithSameNameAndTypeRemainDistinct(t *testing.T) {
+	first := NewKey[string]("shared-name")
+	second := NewKey[string]("shared-name")
+	ctx := WithValue(context.Background(), first, "first-value")
+
+	if value, ok := Value(ctx, second); ok {
+		t.Fatalf("Value() = (%q, true) for a distinct key instance", value)
 	}
 }
 
@@ -293,13 +305,18 @@ func TestGoWithCanceledContext(t *testing.T) {
 
 func TestRun(t *testing.T) {
 	ctx := context.Background()
+	var received context.Context
 
-	err := Run(ctx, func() error {
+	err := Run(ctx, func(taskCtx context.Context) error {
+		received = taskCtx
 		return nil
 	})
 
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
+	}
+	if received != ctx {
+		t.Error("Run must pass the caller context to the task")
 	}
 }
 
@@ -307,7 +324,7 @@ func TestRunWithError(t *testing.T) {
 	ctx := context.Background()
 	expectedErr := errors.New("test error")
 
-	err := Run(ctx, func() error {
+	err := Run(ctx, func(context.Context) error {
 		return expectedErr
 	})
 
@@ -316,32 +333,180 @@ func TestRunWithError(t *testing.T) {
 	}
 }
 
-func TestRunWithCancel(t *testing.T) {
+func TestRunRejectsNilInputs(t *testing.T) {
+	var nilContext context.Context
+	tests := []struct {
+		name    string
+		run     func() error
+		wantErr error
+	}{
+		{
+			name: "nil context",
+			run: func() error {
+				return Run(nilContext, func(context.Context) error { return nil })
+			},
+			wantErr: ErrNilContext,
+		},
+		{
+			name:    "nil task",
+			run:     func() error { return Run(context.Background(), nil) },
+			wantErr: ErrNilTask,
+		},
+		{
+			name: "timeout nil context",
+			run: func() error {
+				return RunTimeout(nilContext, time.Second, func(context.Context) error { return nil })
+			},
+			wantErr: ErrNilContext,
+		},
+		{
+			name:    "timeout nil task",
+			run:     func() error { return RunTimeout(context.Background(), time.Second, nil) },
+			wantErr: ErrNilTask,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.run(); !errors.Is(err, test.wantErr) {
+				t.Fatalf("run error = %v, want %v", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestRunWithCancelWaitsForTaskExit(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
+	taskStarted := make(chan struct{})
+	taskObservedCancel := make(chan struct{})
+	allowTaskExit := make(chan struct{})
+	result := make(chan error, 1)
+	var releaseOnce sync.Once
+	releaseTask := func() {
+		releaseOnce.Do(func() { close(allowTaskExit) })
+	}
+	defer releaseTask()
 
 	go func() {
-		time.Sleep(50 * time.Millisecond)
-		cancel()
+		result <- Run(ctx, func(taskCtx context.Context) error {
+			close(taskStarted)
+			<-taskCtx.Done()
+			close(taskObservedCancel)
+			<-allowTaskExit
+			return taskCtx.Err()
+		})
 	}()
 
-	err := Run(ctx, func() error {
-		time.Sleep(1 * time.Second)
-		return nil
-	})
+	select {
+	case <-taskStarted:
+	case <-time.After(time.Second):
+		t.Fatal("task did not start")
+	}
 
-	if err != context.Canceled {
+	cancel()
+	select {
+	case <-taskObservedCancel:
+	case <-time.After(time.Second):
+		t.Fatal("task did not observe cancellation")
+	}
+
+	select {
+	case err := <-result:
+		t.Fatalf("Run returned before the task exited: %v", err)
+	default:
+	}
+
+	releaseTask()
+	var err error
+	select {
+	case err = <-result:
+	case <-time.After(time.Second):
+		t.Fatal("Run did not return after the task exited")
+	}
+
+	if !errors.Is(err, context.Canceled) {
 		t.Errorf("expected context.Canceled, got %v", err)
 	}
 }
 
 func TestRunTimeout(t *testing.T) {
-	err := RunTimeout(50*time.Millisecond, func() error {
-		time.Sleep(1 * time.Second)
-		return nil
-	})
+	taskObservedTimeout := make(chan struct{})
+	allowTaskExit := make(chan struct{})
+	result := make(chan error, 1)
+	var releaseOnce sync.Once
+	releaseTask := func() {
+		releaseOnce.Do(func() { close(allowTaskExit) })
+	}
+	defer releaseTask()
 
-	if err != context.DeadlineExceeded {
+	go func() {
+		result <- RunTimeout(context.Background(), 20*time.Millisecond, func(ctx context.Context) error {
+			<-ctx.Done()
+			close(taskObservedTimeout)
+			<-allowTaskExit
+			return ctx.Err()
+		})
+	}()
+
+	select {
+	case <-taskObservedTimeout:
+	case <-time.After(time.Second):
+		t.Fatal("task did not observe timeout")
+	}
+
+	select {
+	case err := <-result:
+		t.Fatalf("RunTimeout returned before the task exited: %v", err)
+	default:
+	}
+
+	releaseTask()
+	var err error
+	select {
+	case err = <-result:
+	case <-time.After(time.Second):
+		t.Fatal("RunTimeout did not return after the task exited")
+	}
+
+	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("expected context.DeadlineExceeded, got %v", err)
+	}
+}
+
+func TestRunTimeoutUsesParentContext(t *testing.T) {
+	type parentValueKey struct{}
+	parent := context.WithValue(context.Background(), parentValueKey{}, "parent value")
+	parent, cancel := context.WithCancel(parent)
+	taskStarted := make(chan struct{})
+	result := make(chan error, 1)
+
+	go func() {
+		result <- RunTimeout(parent, time.Hour, func(ctx context.Context) error {
+			if got := ctx.Value(parentValueKey{}); got != "parent value" {
+				return errors.New("parent context value was not propagated")
+			}
+			close(taskStarted)
+			<-ctx.Done()
+			return ctx.Err()
+		})
+	}()
+
+	select {
+	case <-taskStarted:
+	case err := <-result:
+		t.Fatalf("task exited before parent cancellation: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("task did not start")
+	}
+	cancel()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("RunTimeout() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RunTimeout did not propagate parent cancellation")
 	}
 }
 
@@ -462,19 +627,42 @@ func TestWaitGroupContext(t *testing.T) {
 	}
 }
 
+func TestWaitGroupContextNewBatchDoesNotReusePreviousErrors(t *testing.T) {
+	sentinel := errors.New("first batch failed")
+	group := NewWaitGroupContext(context.Background())
+
+	group.Go(func(context.Context) error {
+		return sentinel
+	})
+	if err := group.Wait(); !errors.Is(err, sentinel) {
+		t.Fatalf("first Wait() error = %v, want %v", err, sentinel)
+	}
+
+	group.Go(func(context.Context) error {
+		return nil
+	})
+	if err := group.Wait(); err != nil {
+		t.Fatalf("second Wait() error = %v, want nil", err)
+	}
+}
+
 func TestWaitGroupContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	wg := NewWaitGroupContext(ctx)
+	taskStarted := make(chan struct{})
 
 	wg.Go(func(ctx context.Context) error {
-		time.Sleep(1 * time.Second)
-		return nil
+		close(taskStarted)
+		<-ctx.Done()
+		return ctx.Err()
 	})
 
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		cancel()
-	}()
+	select {
+	case <-taskStarted:
+	case <-time.After(time.Second):
+		t.Fatal("task did not start")
+	}
+	cancel()
 
 	err := wg.Wait()
 	if err != context.Canceled {
@@ -482,9 +670,87 @@ func TestWaitGroupContextCancel(t *testing.T) {
 	}
 }
 
+func TestWaitGroupContextCanceledWaitDoesNotLeakWaiters(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	group := NewWaitGroupContext(ctx)
+	taskStarted := make(chan struct{})
+	releaseTask := make(chan struct{})
+	taskFinished := make(chan struct{})
+
+	group.Go(func(context.Context) error {
+		close(taskStarted)
+		defer close(taskFinished)
+		<-releaseTask
+		return nil
+	})
+
+	select {
+	case <-taskStarted:
+	case <-time.After(time.Second):
+		t.Fatal("task did not start")
+	}
+	defer func() {
+		close(releaseTask)
+		<-taskFinished
+	}()
+
+	cancel()
+	before := runtime.NumGoroutine()
+	const waitCalls = 32
+	for i := 0; i < waitCalls; i++ {
+		if err := group.Wait(); !errors.Is(err, context.Canceled) {
+			t.Fatalf("Wait() = %v, want context.Canceled", err)
+		}
+	}
+	runtime.Gosched()
+	after := runtime.NumGoroutine()
+
+	if leaked := after - before; leaked > 2 {
+		t.Fatalf("repeated canceled Wait calls retained %d goroutines", leaked)
+	}
+}
+
+func TestNewPoolRejectsInvalidConfiguration(t *testing.T) {
+	tests := []struct {
+		name    string
+		ctx     context.Context
+		size    int
+		wantErr error
+		wantMsg string
+	}{
+		{name: "nil context", ctx: nil, size: 1, wantErr: ErrNilPoolContext, wantMsg: "contextx: pool context must not be nil"},
+		{name: "zero size", ctx: context.Background(), size: 0, wantErr: ErrInvalidPoolSize, wantMsg: "contextx: pool size must be greater than zero"},
+		{name: "negative size", ctx: context.Background(), size: -1, wantErr: ErrInvalidPoolSize, wantMsg: "contextx: pool size must be greater than zero"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pool, err := NewPool(tt.ctx, tt.size)
+			if pool != nil {
+				t.Fatal("NewPool() returned a pool for invalid configuration")
+			}
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("NewPool() error = %v, want %v", err, tt.wantErr)
+			}
+			if err.Error() != tt.wantMsg {
+				t.Fatalf("NewPool() error = %q, want %q", err, tt.wantMsg)
+			}
+		})
+	}
+}
+
+func newTestPool(ctx context.Context, t *testing.T, size int) *Pool {
+	t.Helper()
+	pool, err := NewPool(ctx, size)
+	if err != nil {
+		t.Fatalf("NewPool() error = %v", err)
+	}
+	return pool
+}
+
 func TestPool(t *testing.T) {
 	ctx := context.Background()
-	pool := NewPool(ctx, 2)
+	pool := newTestPool(ctx, t, 2)
 
 	var count atomic.Int32
 
@@ -506,9 +772,33 @@ func TestPool(t *testing.T) {
 	}
 }
 
+func TestPoolTaskObservesParentCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	pool := newTestPool(ctx, t, 1)
+	defer pool.Close()
+	taskStarted := make(chan struct{})
+
+	pool.Go(func(taskCtx context.Context) error {
+		close(taskStarted)
+		<-taskCtx.Done()
+		return taskCtx.Err()
+	})
+
+	select {
+	case <-taskStarted:
+	case <-time.After(time.Second):
+		t.Fatal("task did not start")
+	}
+	cancel()
+
+	if err := pool.Wait(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Wait() error = %v, want context.Canceled", err)
+	}
+}
+
 func TestPoolClose(t *testing.T) {
 	ctx := context.Background()
-	pool := NewPool(ctx, 2)
+	pool := newTestPool(ctx, t, 2)
 
 	var started atomic.Int32
 
@@ -534,7 +824,7 @@ func TestPoolCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately
 
-	pool := NewPool(ctx, 2)
+	pool := newTestPool(ctx, t, 2)
 
 	var executed atomic.Bool
 	pool.Go(func(ctx context.Context) error {

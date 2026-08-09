@@ -12,7 +12,7 @@ import (
 func TestBug3_Pool_WaitSurfacesTaskError(t *testing.T) {
 	sentinel := errors.New("task failed")
 
-	p := NewPool(context.Background(), 2)
+	p := newTestPool(context.Background(), t, 2)
 	p.Go(func(ctx context.Context) error { return nil })
 	p.Go(func(ctx context.Context) error { return sentinel })
 
@@ -27,7 +27,7 @@ func TestBug3_Pool_WaitSurfacesTaskError(t *testing.T) {
 
 // All-nil tasks must still report success.
 func TestBug3_Pool_WaitNilWhenNoTaskError(t *testing.T) {
-	p := NewPool(context.Background(), 2)
+	p := newTestPool(context.Background(), t, 2)
 	p.Go(func(ctx context.Context) error { return nil })
 	p.Go(func(ctx context.Context) error { return nil })
 	if err := p.Wait(); err != nil {

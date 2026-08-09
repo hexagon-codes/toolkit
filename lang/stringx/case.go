@@ -3,6 +3,7 @@ package stringx
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // CamelCase 转换为小驼峰格式
@@ -23,9 +24,8 @@ func CamelCase(s string) string {
 	builder.WriteString(strings.ToLower(words[0]))
 
 	for i := 1; i < len(words); i++ {
-		if len(words[i]) > 0 {
-			builder.WriteString(strings.ToUpper(words[i][:1]))
-			builder.WriteString(strings.ToLower(words[i][1:]))
+		if words[i] != "" {
+			builder.WriteString(capitalizeWord(words[i]))
 		}
 	}
 
@@ -45,9 +45,8 @@ func PascalCase(s string) string {
 	var builder strings.Builder
 
 	for _, word := range words {
-		if len(word) > 0 {
-			builder.WriteString(strings.ToUpper(word[:1]))
-			builder.WriteString(strings.ToLower(word[1:]))
+		if word != "" {
+			builder.WriteString(capitalizeWord(word))
 		}
 	}
 
@@ -91,13 +90,22 @@ func TitleCase(s string) string {
 		if i > 0 {
 			builder.WriteString(" ")
 		}
-		if len(word) > 0 {
-			builder.WriteString(strings.ToUpper(word[:1]))
-			builder.WriteString(strings.ToLower(word[1:]))
+		if word != "" {
+			builder.WriteString(capitalizeWord(word))
 		}
 	}
 
 	return builder.String()
+}
+
+// capitalizeWord 将首个完整 rune 转为大写，其余部分转为小写。
+func capitalizeWord(word string) string {
+	if word == "" {
+		return ""
+	}
+
+	_, size := utf8.DecodeRuneInString(word)
+	return strings.ToUpper(word[:size]) + strings.ToLower(word[size:])
 }
 
 // splitWords 将字符串分割为单词列表
@@ -109,14 +117,15 @@ func splitWords(s string) []string {
 	var hasPrev bool
 
 	for _, r := range s {
-		if r == '_' || r == '-' || r == ' ' || r == '\t' {
+		switch {
+		case r == '_' || r == '-' || r == ' ' || r == '\t':
 			// 分隔符
 			if currentWord.Len() > 0 {
 				words = append(words, currentWord.String())
 				currentWord.Reset()
 			}
 			hasPrev = false
-		} else if unicode.IsUpper(r) {
+		case unicode.IsUpper(r):
 			// 大写字母：可能是新单词的开始
 			if currentWord.Len() > 0 && hasPrev {
 				// 检查是否是连续大写（如 "XMLParser"）
@@ -128,17 +137,19 @@ func splitWords(s string) []string {
 			currentWord.WriteRune(r)
 			prevRune = r
 			hasPrev = true
-		} else {
+		default:
 			// 检查前一个是大写且当前是小写（如 "XMLParser" 中的 "L" 和 "P"）
 			if hasPrev && currentWord.Len() > 1 {
 				str := currentWord.String()
 				runes := []rune(str)
-				lastRune := runes[len(runes)-1]
-				if unicode.IsUpper(lastRune) && unicode.IsLower(r) {
-					// 把最后一个大写字母移到新单词
-					words = append(words, string(runes[:len(runes)-1]))
-					currentWord.Reset()
-					currentWord.WriteRune(lastRune)
+				if len(runes) > 1 {
+					lastRune := runes[len(runes)-1]
+					if unicode.IsUpper(lastRune) && unicode.IsLower(r) {
+						// 把最后一个大写字母移到新单词
+						words = append(words, string(runes[:len(runes)-1]))
+						currentWord.Reset()
+						currentWord.WriteRune(lastRune)
+					}
 				}
 			}
 			currentWord.WriteRune(r)

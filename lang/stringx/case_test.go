@@ -141,6 +141,50 @@ func TestTitleCase(t *testing.T) {
 	}
 }
 
+func TestCaseConversionsPreserveUnicodeInitial(t *testing.T) {
+	tests := []struct {
+		name  string
+		apply func(string) string
+		input string
+		want  string
+	}{
+		{name: "camel case", apply: CamelCase, input: "hello_éclair", want: "helloÉclair"},
+		{name: "pascal case", apply: PascalCase, input: "éclair", want: "Éclair"},
+		{name: "title case", apply: TitleCase, input: "hello_éclair", want: "Hello Éclair"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.apply(tt.input); got != tt.want {
+				t.Fatalf("conversion(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCaseConversionsDoNotSplitSingleUnicodeUppercaseRune(t *testing.T) {
+	tests := []struct {
+		name  string
+		apply func(string) string
+		want  string
+	}{
+		{name: "camel case", apply: CamelCase, want: "éclair"},
+		{name: "pascal case", apply: PascalCase, want: "Éclair"},
+		{name: "snake case", apply: SnakeCase, want: "éclair"},
+		{name: "kebab case", apply: KebabCase, want: "éclair"},
+		{name: "screaming snake case", apply: ScreamingSnakeCase, want: "ÉCLAIR"},
+		{name: "title case", apply: TitleCase, want: "Éclair"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.apply("Éclair"); got != tt.want {
+				t.Fatalf("conversion(%q) = %q, want %q", "Éclair", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSplitWords(t *testing.T) {
 	tests := []struct {
 		input    string

@@ -20,11 +20,11 @@ import (
 //
 //	conv.Float32("3.14")    // 3.14
 //	conv.Float32([]byte{...}) // 从二进制解码
-func Float32(any any) float32 {
-	if any == nil {
+func Float32(input any) float32 {
+	if input == nil {
 		return 0
 	}
-	switch value := any.(type) {
+	switch value := input.(type) {
 	case int:
 		return float32(value)
 	case int8:
@@ -55,7 +55,10 @@ func Float32(any any) float32 {
 		if f, ok := value.(iFloat32); ok {
 			return f.Float32()
 		}
-		v, _ := strconv.ParseFloat(String(any), 64)
+		v, err := strconv.ParseFloat(String(input), 64)
+		if err != nil {
+			return 0
+		}
 		return float32(v)
 	}
 }
@@ -74,11 +77,11 @@ func Float32(any any) float32 {
 //
 //	conv.Float64("3.14159")  // 3.14159
 //	conv.Float64(3.14)       // 3.14
-func Float64(any any) float64 {
-	if any == nil {
+func Float64(input any) float64 {
+	if input == nil {
 		return 0
 	}
-	switch value := any.(type) {
+	switch value := input.(type) {
 	case int:
 		return float64(value)
 	case int8:
@@ -109,7 +112,10 @@ func Float64(any any) float64 {
 		if f, ok := value.(iFloat64); ok {
 			return f.Float64()
 		}
-		v, _ := strconv.ParseFloat(String(any), 64)
+		v, err := strconv.ParseFloat(String(input), 64)
+		if err != nil {
+			return 0
+		}
 		return v
 	}
 }

@@ -113,6 +113,7 @@ func FromChannelN[T any](ch <-chan T, n int) []T {
 //
 //	slicex.Drain(ch)  // 丢弃所有元素
 func Drain[T any](ch <-chan T) {
-	for range ch {
+	for item := range ch {
+		_ = item
 	}
 }

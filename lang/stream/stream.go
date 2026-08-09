@@ -1,6 +1,7 @@
 package stream
 
 import (
+	"reflect"
 	"sort"
 )
 
@@ -204,20 +205,15 @@ func (s Stream[T]) Distinct() Stream[T] {
 				return nil
 			}
 
-			// 先检测类型是否可比较（只检查一次），避免每个元素都 defer/recover
-			comparable := isComparable(src[0])
-
-			if !comparable {
-				// 不可比较的类型无法去重，直接返回副本
-				result := make([]T, len(src))
-				copy(result, src)
-				return result
-			}
-
 			seen := make(map[any]bool, len(src))
 			result := make([]T, 0, len(src))
 			for _, v := range src {
 				key := any(v)
+				// 接口流中的每个元素都可能拥有不同的动态类型，必须逐项判断。
+				if !isComparable(key) {
+					result = append(result, v)
+					continue
+				}
 				if !seen[key] {
 					seen[key] = true
 					result = append(result, v)
@@ -228,16 +224,10 @@ func (s Stream[T]) Distinct() Stream[T] {
 	}
 }
 
-// isComparable 检测值是否可以作为 map key（仅调用一次）
-func isComparable(v any) (ok bool) {
-	defer func() {
-		if r := recover(); r != nil {
-			ok = false
-		}
-	}()
-	m := make(map[any]bool)
-	m[v] = true
-	return true
+// isComparable 判断值的动态类型能否安全地作为 map key。
+func isComparable(v any) bool {
+	valueType := reflect.TypeOf(v)
+	return valueType == nil || valueType.Comparable()
 }
 
 // Sorted 排序元素
@@ -416,7 +406,8 @@ func (s Stream[T]) DropWhile(predicate func(T) bool) Stream[T] {
 		source: func() []T {
 			src := s.source()
 			i := 0
-			for ; i < len(src) && predicate(src[i]); i++ {
+			for i < len(src) && predicate(src[i]) {
+				i++
 			}
 			if i >= len(src) {
 				return nil
@@ -695,7 +686,7 @@ func FlatMapTo[T, R any](s Stream[T], mapper func(T) []R) Stream[R] {
 	return Stream[R]{
 		source: func() []R {
 			src := s.source()
-			result := make([]R, 0)
+			result := make([]R, 0, len(src))
 			for _, v := range src {
 				result = append(result, mapper(v)...)
 			}

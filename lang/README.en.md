@@ -68,12 +68,12 @@ values := conv.MapValues(m)
 
 ### stringx - String Utilities
 
-High-performance string operations including zero-copy conversions.
+String conversion and slice helper functions.
 
 ```go
 import "github.com/hexagon-codes/toolkit/lang/stringx"
 
-// Zero-copy conversion (uses unsafe, use with care)
+// Safe copying conversions
 str := stringx.BytesToString([]byte("hello"))
 bytes := stringx.StringToBytes("world")
 
@@ -82,10 +82,7 @@ result := stringx.StringToSlice([]int{1, 2, 3})
 // result = []any{1, 2, 3}
 ```
 
-**Warning**:
-- `BytesToString` and `StringToBytes` use unsafe pointers
-- Do not modify the converted data
-- Use only in performance-critical paths
+Converted values own independent storage. Mutating the source `[]byte` or the returned `[]byte` does not affect the other value.
 
 ### timex - Time Utilities
 
@@ -229,6 +226,53 @@ defer pool.Put(buf)
 - Singleflight: Cache stampede prevention, reducing database pressure, API deduplication
 - Pool: Reducing GC pressure, high-frequency object reuse
 
+### errorx - Error and Concurrent Task Handling
+
+```go
+import "github.com/hexagon-codes/toolkit/lang/errorx"
+
+// The returned channel produces exactly one task completion result
+if err := <-errorx.SafeGo(func() { runTask() }); err != nil {
+    return err
+}
+
+fallback, err := errorx.Err[int](loadErr).UnwrapOrElse(func(err error) int {
+    log.Printf("load failed: %v", err)
+    return 0
+})
+if err != nil {
+    return err
+}
+```
+
+`SafeGo` reports panics and nil-task errors instead of discarding them. `Result.UnwrapOrElse` returns both a value and an error so callers can handle an invalid callback.
+
+### contextx - Context Lifecycle Utilities
+
+```go
+import "github.com/hexagon-codes/toolkit/lang/contextx"
+
+if err := contextx.Run(ctx, func(taskCtx context.Context) error {
+    return runTask(taskCtx)
+}); err != nil {
+    return err
+}
+
+if err := contextx.RunTimeout(ctx, 5*time.Second, func(taskCtx context.Context) error {
+    return runTask(taskCtx)
+}); err != nil {
+    return err
+}
+
+pool, err := contextx.NewPool(ctx, 10)
+if err != nil {
+    return err
+}
+defer pool.Close()
+```
+
+`Run` and `RunTimeout` execute synchronously, with cancellation handled cooperatively through the task context. `NewPool` validates both its context and capacity.
+
 ## Installation
 
 ```bash
@@ -345,23 +389,9 @@ conv.String(User{Name: "Alice"}) // "Alice"
 
 ## Performance Considerations
 
-### unsafe Operations
+### String conversion
 
-`stringx.BytesToString()` and `StringToBytes()` use unsafe pointers:
-
-**Advantages**:
-- Zero-copy, extremely high performance
-- Avoids memory allocation
-
-**Disadvantages**:
-- Modifying data leads to undefined behavior
-- Must ensure correct data lifetime
-
-**Use cases**:
-- ✅ Read-only operations
-- ✅ Performance-critical paths
-- ❌ When data modification is needed
-- ❌ Uncertain data lifetime
+`stringx.BytesToString()` and `StringToBytes()` use standard safe Go copying conversions to provide clear ownership and concurrency semantics. Performance-sensitive paths should benchmark first and keep any specialized optimization local.
 
 ### reflect Usage
 

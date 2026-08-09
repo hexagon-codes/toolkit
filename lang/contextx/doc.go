@@ -9,6 +9,17 @@
 //	ctx := contextx.WithValue(context.Background(), userKey{}, user)
 //	user, ok := contextx.Value[*User](ctx, userKey{})
 //
+// 运行控制与协程池:
+//
+//	err := contextx.Run(ctx, func(taskCtx context.Context) error {
+//	    return runTask(taskCtx)
+//	})
+//	pool, err := contextx.NewPool(ctx, 10)
+//	if err != nil {
+//	    return err
+//	}
+//	defer pool.Close()
+//
 // --- English ---
 //
 // Package contextx provides type-safe context value handling.
@@ -21,4 +32,15 @@
 //	type userKey struct{}
 //	ctx := contextx.WithValue(context.Background(), userKey{}, user)
 //	user, ok := contextx.Value[*User](ctx, userKey{})
+//
+// 运行控制与协程池:
+//
+//	err := contextx.RunTimeout(ctx, 5*time.Second, func(taskCtx context.Context) error {
+//	    return runTask(taskCtx)
+//	})
+//	pool, err := contextx.NewPool(ctx, 10)
+//	if err != nil {
+//	    return err
+//	}
+//	defer pool.Close()
 package contextx

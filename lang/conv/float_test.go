@@ -95,7 +95,7 @@ func TestFloat64(t *testing.T) {
 
 func TestFloat64_Binary(t *testing.T) {
 	// 测试二进制解码
-	var f float64 = 3.141592653589793
+	var f = 3.141592653589793
 	b := make([]byte, 8)
 	binary.LittleEndian.PutUint64(b, math.Float64bits(f))
 

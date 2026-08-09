@@ -2,39 +2,24 @@ package stringx
 
 import (
 	"reflect"
-	"unsafe"
 )
 
-// BytesToString 将 []byte 零拷贝转换为 string
-//
-// ⚠️ 重要警告：
-//   - 不要修改原始 []byte，否则会导致返回的 string 内容变化
-//   - 此函数使用 unsafe 操作，仅用于性能关键路径
-//   - 如果不确定是否安全，请使用标准的 string(b) 转换
+// BytesToString 将 []byte 安全转换为独立的 string。
 func BytesToString(b []byte) string {
-	// 检查 nil 和空切片，避免访问 &b[0] 导致 panic
-	if b == nil || len(b) == 0 {
-		return ""
-	}
-	return unsafe.String(&b[0], len(b))
+	return string(b)
 }
 
-// StringToBytes 将 string 零拷贝转换为 []byte
-//
-// ⚠️ 重要警告：
-//   - 绝对不要修改返回的 []byte，否则会导致 panic 或未定义行为
-//   - Go 中的 string 是不可变的，修改其底层数据违反语言规范
-//   - 此函数使用 unsafe 操作，仅用于只读场景（如传递给只读 API）
-//   - 如果需要可修改的 []byte，请使用标准的 []byte(s) 转换
+// StringToBytes 将 string 安全转换为可独立修改的 []byte。
 func StringToBytes(s string) []byte {
 	if s == "" {
 		return nil
 	}
-	return unsafe.Slice(unsafe.StringData(s), len(s))
+	return []byte(s)
 }
 
-// String2Bytes 是 StringToBytes 的别名，为向后兼容保留
-// Deprecated: 请使用 StringToBytes 替代
+// String2Bytes 是 StringToBytes 的兼容别名。
+//
+// Deprecated: 请使用 StringToBytes。
 func String2Bytes(s string) []byte {
 	return StringToBytes(s)
 }

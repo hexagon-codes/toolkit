@@ -48,6 +48,9 @@ func TestTryWithValue(t *testing.T) {
 	if err == nil {
 		t.Error("TryWithValue should catch panic")
 	}
+	if val != 0 {
+		t.Errorf("TryWithValue panic value = %d, want zero", val)
+	}
 }
 
 func TestTryWithError(t *testing.T) {
@@ -65,6 +68,9 @@ func TestTryWithError(t *testing.T) {
 	})
 	if err == nil || err.Error() != "error" {
 		t.Error("TryWithError should return error")
+	}
+	if val != 0 {
+		t.Errorf("TryWithError error value = %d, want zero", val)
 	}
 
 	// Panic
@@ -313,12 +319,8 @@ func TestSafe(t *testing.T) {
 }
 
 func TestSafeGo(t *testing.T) {
-	done := make(chan error, 1)
-
-	SafeGo(func() {
+	done := SafeGo(func() {
 		panic("test panic")
-	}, func(err error) {
-		done <- err
 	})
 
 	err := <-done
@@ -361,7 +363,8 @@ func TestResult(t *testing.T) {
 	}
 
 	// UnwrapOrElse
-	if errResult.UnwrapOrElse(func(e error) int { return 88 }) != 88 {
+	fallback, fallbackErr := errResult.UnwrapOrElse(func(e error) int { return 88 })
+	if fallbackErr != nil || fallback != 88 {
 		t.Error("UnwrapOrElse should call function on error")
 	}
 

@@ -18,11 +18,10 @@ package slicex
 //	    return n%2 == 0
 //	})
 //	// even: [2, 4], odd: [1, 3, 5]
-func Partition[T any](slice []T, predicate func(T) bool) ([]T, []T) {
+func Partition[T any](slice []T, predicate func(T) bool) (matched, unmatched []T) {
 	if len(slice) == 0 {
 		return nil, nil
 	}
-	var matched, unmatched []T
 	for _, item := range slice {
 		if predicate(item) {
 			matched = append(matched, item)
@@ -59,4 +58,3 @@ func PartitionBy[T any, K comparable](slice []T, fn func(T) K) map[K][]T {
 	}
 	return result
 }
-

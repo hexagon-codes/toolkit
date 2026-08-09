@@ -64,11 +64,7 @@ func TestMultiError_Chain(t *testing.T) {
 	err1 := errors.New("error 1")
 	err2 := errors.New("error 2")
 
-	result := me.Append(err1).Append(err2)
-
-	if result != me {
-		t.Error("Append should return self for chaining")
-	}
+	me.Append(err1, err2)
 
 	if me.Len() != 2 {
 		t.Errorf("expected 2 errors, got %d", me.Len())
@@ -176,7 +172,7 @@ func TestMultiError_Concurrent(t *testing.T) {
 func TestGo(t *testing.T) {
 	var counter atomic.Int32
 
-	me := Go(
+	err := Go(
 		func() error {
 			counter.Add(1)
 			return nil
@@ -195,20 +191,24 @@ func TestGo(t *testing.T) {
 		t.Errorf("expected all 3 functions to run, ran %d", counter.Load())
 	}
 
+	var me *MultiError
+	if !errors.As(err, &me) {
+		t.Fatalf("Go error type = %T, want *MultiError", err)
+	}
 	if me.Len() != 2 {
 		t.Errorf("expected 2 errors, got %d", me.Len())
 	}
 }
 
 func TestGo_AllSuccess(t *testing.T) {
-	me := Go(
+	err := Go(
 		func() error { return nil },
 		func() error { return nil },
 		func() error { return nil },
 	)
 
-	if me.ErrorOrNil() != nil {
-		t.Error("ErrorOrNil should return nil when all succeed")
+	if err != nil {
+		t.Errorf("Go should return nil when all succeed, got %v", err)
 	}
 }
 
@@ -216,7 +216,7 @@ func TestGoWithLimit(t *testing.T) {
 	var maxConcurrent atomic.Int32
 	var current atomic.Int32
 
-	me := GoWithLimit(2,
+	err := GoWithLimit(2,
 		func() error {
 			current.Add(1)
 			if c := current.Load(); c > maxConcurrent.Load() {
@@ -259,19 +259,23 @@ func TestGoWithLimit(t *testing.T) {
 		t.Errorf("max concurrent should be <= 2, got %d", maxConcurrent.Load())
 	}
 
+	var me *MultiError
+	if !errors.As(err, &me) {
+		t.Fatalf("GoWithLimit error type = %T, want *MultiError", err)
+	}
 	if me.Len() != 1 {
 		t.Errorf("expected 1 error, got %d", me.Len())
 	}
 }
 
 func TestGoWithLimit_ZeroLimit(t *testing.T) {
-	me := GoWithLimit(0,
+	err := GoWithLimit(0,
 		func() error { return nil },
 		func() error { return errors.New("error") },
 	)
 
-	if me.Len() != 1 {
-		t.Errorf("expected 1 error, got %d", me.Len())
+	if !errors.Is(err, ErrInvalidLimit) {
+		t.Errorf("GoWithLimit error = %v, want ErrInvalidLimit", err)
 	}
 }
 

@@ -140,7 +140,7 @@ func (s *SwitchBuilder[T, R]) Matched() bool {
 	return s.matched
 }
 
-// SwitchFunc 使用函数判断来匹配（类似 switch true）
+// SwitchFuncBuilder 使用函数判断来匹配（类似 switch true）。
 type SwitchFuncBuilder[R any] struct {
 	result  R
 	matched bool

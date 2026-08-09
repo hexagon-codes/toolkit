@@ -37,13 +37,13 @@ func Min[T Ordered](values ...T) T {
 		return zero
 	}
 
-	min := values[0]
+	minimum := values[0]
 	for _, v := range values[1:] {
-		if v < min {
-			min = v
+		if v < minimum {
+			minimum = v
 		}
 	}
-	return min
+	return minimum
 }
 
 // Max 返回多个数中的最大值（泛型版本）
@@ -64,13 +64,13 @@ func Max[T Ordered](values ...T) T {
 		return zero
 	}
 
-	max := values[0]
+	maximum := values[0]
 	for _, v := range values[1:] {
-		if v > max {
-			max = v
+		if v > maximum {
+			maximum = v
 		}
 	}
-	return max
+	return maximum
 }
 
 // MinMax 同时返回最小值和最大值
@@ -85,22 +85,22 @@ func Max[T Ordered](values ...T) T {
 // 示例:
 //
 //	min, max := mathx.MinMax(3, 1, 4, 1, 5)  // 1, 5
-func MinMax[T Ordered](values ...T) (T, T) {
+func MinMax[T Ordered](values ...T) (minimum, maximum T) {
 	if len(values) == 0 {
 		var zero T
 		return zero, zero
 	}
 
-	min, max := values[0], values[0]
+	minimum, maximum = values[0], values[0]
 	for _, v := range values[1:] {
-		if v < min {
-			min = v
+		if v < minimum {
+			minimum = v
 		}
-		if v > max {
-			max = v
+		if v > maximum {
+			maximum = v
 		}
 	}
-	return min, max
+	return minimum, maximum
 }
 
 // Clamp 将值限制在指定范围内
@@ -121,12 +121,12 @@ func MinMax[T Ordered](values ...T) (T, T) {
 //	clamped := mathx.Clamp(15, 0, 10)  // 10
 //	clamped := mathx.Clamp(-5, 0, 10)  // 0
 //	clamped := mathx.Clamp(5, 0, 10)   // 5
-func Clamp[T Ordered](value, min, max T) T {
-	if value < min {
-		return min
+func Clamp[T Ordered](value, minimum, maximum T) T {
+	if value < minimum {
+		return minimum
 	}
-	if value > max {
-		return max
+	if value > maximum {
+		return maximum
 	}
 	return value
 }
@@ -148,9 +148,9 @@ func Clamp[T Ordered](value, min, max T) T {
 //
 //	clamped := mathx.ClampSafe(5, 10, 0)   // 5（自动交换 min/max）
 //	clamped := mathx.ClampSafe(15, 10, 0)  // 10
-func ClampSafe[T Ordered](value, min, max T) T {
-	if min > max {
-		min, max = max, min
+func ClampSafe[T Ordered](value, minimum, maximum T) T {
+	if minimum > maximum {
+		minimum, maximum = maximum, minimum
 	}
-	return Clamp(value, min, max)
+	return Clamp(value, minimum, maximum)
 }

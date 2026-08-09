@@ -65,7 +65,7 @@ func TestConcurrentMap_LoadAndDelete(t *testing.T) {
 		t.Error("expected key to be deleted")
 	}
 
-	v, ok = m.LoadAndDelete("nonexistent")
+	_, ok = m.LoadAndDelete("nonexistent")
 	if ok {
 		t.Error("expected ok=false for nonexistent key")
 	}
@@ -85,7 +85,7 @@ func TestConcurrentMap_Swap(t *testing.T) {
 		t.Errorf("expected 2, got %v", v)
 	}
 
-	prev, loaded = m.Swap("b", 3)
+	_, loaded = m.Swap("b", 3)
 	if loaded {
 		t.Errorf("expected loaded=false for new key, got loaded=%v", loaded)
 	}

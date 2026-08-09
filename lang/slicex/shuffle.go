@@ -14,7 +14,7 @@ import (
 //	nums := []int{1, 2, 3, 4, 5}
 //	slicex.Shuffle(nums)  // nums 被原地打乱
 func Shuffle[T any](slice []T) {
-	rand.Shuffle(len(slice), func(i, j int) {
+	rand.Shuffle(len(slice), func(i, j int) { // #nosec G404 -- 洗牌随机性不用于密钥、令牌或其他安全用途。
 		slice[i], slice[j] = slice[j], slice[i]
 	})
 }
@@ -64,7 +64,7 @@ func Sample[T any](slice []T, n int) []T {
 	result := make([]T, len(slice))
 	copy(result, slice)
 	for i := 0; i < n; i++ {
-		j := i + rand.IntN(len(result)-i)
+		j := i + rand.IntN(len(result)-i) // #nosec G404 -- 抽样随机性不用于安全选择。
 		result[i], result[j] = result[j], result[i]
 	}
 	return result[:n]
@@ -87,7 +87,7 @@ func SampleOne[T any](slice []T) (T, bool) {
 		var zero T
 		return zero, false
 	}
-	return slice[rand.IntN(len(slice))], true
+	return slice[rand.IntN(len(slice))], true // #nosec G404 -- 抽样随机性不用于安全选择。
 }
 
 // SampleWithReplacement 有放回采样（可重复）
@@ -109,7 +109,7 @@ func SampleWithReplacement[T any](slice []T, n int) []T {
 	}
 	result := make([]T, n)
 	for i := range result {
-		result[i] = slice[rand.IntN(len(slice))]
+		result[i] = slice[rand.IntN(len(slice))] // #nosec G404 -- 抽样随机性不用于安全选择。
 	}
 	return result
 }

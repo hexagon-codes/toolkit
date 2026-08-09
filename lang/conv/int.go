@@ -25,18 +25,18 @@ import (
 //	conv.Int(45.67)       // 45
 //	conv.Int(true)        // 1
 //	conv.Int("invalid")   // 0
-func Int(any any) int {
-	return int(Int64(any))
+func Int(value any) int {
+	return int(Int64(value))
 }
 
 // Int64 将任意类型转换为 int64
 //
 // 转换失败时返回 0
-func Int64(any any) int64 {
-	if any == nil {
+func Int64(input any) int64 {
+	if input == nil {
 		return 0
 	}
-	switch value := any.(type) {
+	switch value := input.(type) {
 	case int:
 		return int64(value)
 	case int8:
@@ -91,14 +91,23 @@ func Int64(any any) int64 {
 		}
 		return 0
 	case []byte:
-		v, _ := strconv.ParseInt(string(value), 10, 64)
+		v, err := strconv.ParseInt(string(value), 10, 64)
+		if err != nil {
+			return 0
+		}
 		return v
 	case string:
-		v, _ := strconv.ParseInt(value, 10, 64)
+		v, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return 0
+		}
 		return v
 	default:
 		// 尝试转为字符串后解析
-		v, _ := strconv.ParseInt(String(any), 10, 64)
+		v, err := strconv.ParseInt(String(input), 10, 64)
+		if err != nil {
+			return 0
+		}
 		return v
 	}
 }
@@ -120,11 +129,11 @@ const (
 //	v, ok := conv.TryInt64("123")  // 123, true
 //	v, ok := conv.TryInt64("abc")  // 0, false
 //	v, ok := conv.TryInt64("0")    // 0, true
-func TryInt64(any any) (int64, bool) {
-	if any == nil {
+func TryInt64(input any) (int64, bool) {
+	if input == nil {
 		return 0, false
 	}
-	switch value := any.(type) {
+	switch value := input.(type) {
 	case int:
 		return int64(value), true
 	case int8:
@@ -183,22 +192,22 @@ func TryInt64(any any) (int64, bool) {
 		v, err := strconv.ParseInt(value, 10, 64)
 		return v, err == nil
 	default:
-		v, err := strconv.ParseInt(String(any), 10, 64)
+		v, err := strconv.ParseInt(String(input), 10, 64)
 		return v, err == nil
 	}
 }
 
 // TryInt 将任意类型转换为 int，返回是否成功
-func TryInt(any any) (int, bool) {
-	v, ok := TryInt64(any)
+func TryInt(value any) (int, bool) {
+	v, ok := TryInt64(value)
 	return int(v), ok
 }
 
 // Int32 将任意类型转换为 int32
 //
 // 转换失败或值超出 int32 范围时返回 0
-func Int32(any any) int32 {
-	v := Int64(any)
+func Int32(value any) int32 {
+	v := Int64(value)
 	// 防止溢出：超出 int32 范围时返回 0
 	if v > math.MaxInt32 || v < math.MinInt32 {
 		return 0
@@ -209,18 +218,18 @@ func Int32(any any) int32 {
 // Uint 将任意类型转换为 uint
 //
 // 转换失败时返回 0
-func Uint(any any) uint {
-	return uint(Uint64(any))
+func Uint(value any) uint {
+	return uint(Uint64(value))
 }
 
 // Uint64 将任意类型转换为 uint64
 //
 // 转换失败或负数时返回 0
-func Uint64(any any) uint64 {
-	if any == nil {
+func Uint64(input any) uint64 {
+	if input == nil {
 		return 0
 	}
-	switch value := any.(type) {
+	switch value := input.(type) {
 	case int:
 		if value < 0 {
 			return 0
@@ -282,13 +291,22 @@ func Uint64(any any) uint64 {
 		}
 		return 0
 	case []byte:
-		v, _ := strconv.ParseUint(string(value), 10, 64)
+		v, err := strconv.ParseUint(string(value), 10, 64)
+		if err != nil {
+			return 0
+		}
 		return v
 	case string:
-		v, _ := strconv.ParseUint(value, 10, 64)
+		v, err := strconv.ParseUint(value, 10, 64)
+		if err != nil {
+			return 0
+		}
 		return v
 	default:
-		v, _ := strconv.ParseUint(String(any), 10, 64)
+		v, err := strconv.ParseUint(String(input), 10, 64)
+		if err != nil {
+			return 0
+		}
 		return v
 	}
 }
@@ -296,8 +314,8 @@ func Uint64(any any) uint64 {
 // Uint32 将任意类型转换为 uint32
 //
 // 转换失败或值超出 uint32 范围时返回 0
-func Uint32(any any) uint32 {
-	v := Uint64(any)
+func Uint32(value any) uint32 {
+	v := Uint64(value)
 	// 防止溢出：超出 uint32 范围时返回 0
 	if v > math.MaxUint32 {
 		return 0
@@ -320,11 +338,11 @@ func Uint32(any any) uint32 {
 //	conv.Bool(0)        // false
 //	conv.Bool("true")   // true
 //	conv.Bool("yes")    // true
-func Bool(any any) bool {
-	if any == nil {
+func Bool(input any) bool {
+	if input == nil {
 		return false
 	}
-	switch value := any.(type) {
+	switch value := input.(type) {
 	case bool:
 		return value
 	case int, int8, int16, int32, int64:
@@ -338,7 +356,7 @@ func Bool(any any) bool {
 	case []byte:
 		return parseBoolExtended(string(value))
 	default:
-		return parseBoolExtended(String(any))
+		return parseBoolExtended(String(input))
 	}
 }
 

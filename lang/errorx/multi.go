@@ -1,17 +1,28 @@
 package errorx
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
 )
 
+// MaxMultiErrorEntries 是单个聚合中最多保留的错误对象数。
+// 超出上限后保留最早的错误和最新错误，并记录省略数量。
+const MaxMultiErrorEntries = 100
+
+// DefaultGoLimit 是 Go 使用的默认并发上限。
+const DefaultGoLimit = 64
+
+var multiErrorAppendMu sync.Mutex
+
 // MultiError 多错误聚合，用于收集多个错误
 //
 // 线程安全，可在并发场景中使用
 type MultiError struct {
-	mu     sync.Mutex
+	mu     sync.RWMutex
 	errors []error
+	total  int
 }
 
 // NewMultiError 创建一个新的 MultiError
@@ -34,22 +45,41 @@ func NewMultiError() *MultiError {
 // 参数:
 //   - errs: 要添加的错误（nil 值会被忽略）
 //
-// 返回:
-//   - *MultiError: 返回自身以支持链式调用
-//
 // 示例:
 //
-//	me.Append(err1).Append(err2)
-func (m *MultiError) Append(errs ...error) *MultiError {
+//	me.Append(err1, err2)
+func (m *MultiError) Append(errs ...error) {
+	if m == nil {
+		return
+	}
+
+	// 循环检测与写入必须串行，避免两个聚合并发互相引用。
+	multiErrorAppendMu.Lock()
+	defer multiErrorAppendMu.Unlock()
+
+	for _, err := range errs {
+		if isNilError(err) {
+			continue
+		}
+		if referencesMultiError(err, m) {
+			m.appendOne(ErrCyclicReference)
+			continue
+		}
+		m.appendOne(err)
+	}
+}
+
+func (m *MultiError) appendOne(err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	for _, err := range errs {
-		if err != nil {
-			m.errors = append(m.errors, err)
-		}
+	m.total++
+	if len(m.errors) < MaxMultiErrorEntries {
+		m.errors = append(m.errors, err)
+		return
 	}
-	return m
+	// 首部保留最早样本，末位持续更新为最新错误。
+	m.errors[MaxMultiErrorEntries-1] = err
 }
 
 // AppendResult 添加操作结果的错误
@@ -58,15 +88,12 @@ func (m *MultiError) Append(errs ...error) *MultiError {
 //   - _: 被忽略的值（用于接收函数返回值）
 //   - err: 要添加的错误
 //
-// 返回:
-//   - *MultiError: 返回自身以支持链式调用
-//
 // 示例:
 //
 //	me.AppendResult(os.Remove("file1.txt"))
 //	me.AppendResult(os.Remove("file2.txt"))
-func (m *MultiError) AppendResult(_ any, err error) *MultiError {
-	return m.Append(err)
+func (m *MultiError) AppendResult(_ any, err error) {
+	m.Append(err)
 }
 
 // Errors 返回所有收集的错误
@@ -74,8 +101,11 @@ func (m *MultiError) AppendResult(_ any, err error) *MultiError {
 // 返回:
 //   - []error: 错误切片的副本
 func (m *MultiError) Errors() []error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
 	if m.errors == nil {
 		return nil
@@ -90,9 +120,22 @@ func (m *MultiError) Errors() []error {
 // 返回:
 //   - int: 错误数量
 func (m *MultiError) Len() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return len(m.errors)
+	if m == nil {
+		return 0
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.total
+}
+
+// Omitted 返回因聚合上限而未保留的错误数量。
+func (m *MultiError) Omitted() int {
+	if m == nil {
+		return 0
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.total - len(m.errors)
 }
 
 // HasErrors 检查是否有错误
@@ -108,27 +151,42 @@ func (m *MultiError) HasErrors() bool {
 // 返回:
 //   - string: 所有错误的字符串表示
 func (m *MultiError) Error() string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	errs, total := m.snapshot()
 
-	if len(m.errors) == 0 {
+	if total == 0 {
 		return ""
 	}
 
-	if len(m.errors) == 1 {
-		return m.errors[0].Error()
+	if total == 1 {
+		return errs[0].Error()
 	}
 
 	var sb strings.Builder
 	sb.WriteString("multiple errors occurred:\n")
-	for i, err := range m.errors {
+	for i, err := range errs {
 		if i > 0 {
 			sb.WriteString("\n")
 		}
 		sb.WriteString("  - ")
 		sb.WriteString(err.Error())
 	}
+	if omitted := total - len(errs); omitted > 0 {
+		fmt.Fprintf(&sb, "\n  - ... %d errors omitted (%d retained, %d total)", omitted, len(errs), total)
+	}
 	return sb.String()
+}
+
+func (m *MultiError) snapshot() (errs []error, total int) {
+	if m == nil {
+		return nil, 0
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	errs = make([]error, len(m.errors))
+	copy(errs, m.errors)
+	total = m.total
+	return errs, total
 }
 
 // ErrorOrNil 如果没有错误则返回 nil，否则返回自身
@@ -163,8 +221,11 @@ func (m *MultiError) Unwrap() []error {
 // 返回:
 //   - error: 第一个错误，如果没有错误返回 nil
 func (m *MultiError) First() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
 	if len(m.errors) == 0 {
 		return nil
@@ -177,8 +238,11 @@ func (m *MultiError) First() error {
 // 返回:
 //   - error: 最后一个错误，如果没有错误返回 nil
 func (m *MultiError) Last() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
 	if len(m.errors) == 0 {
 		return nil
@@ -192,34 +256,20 @@ func (m *MultiError) Last() error {
 //   - fns: 要并行执行的函数列表
 //
 // 返回:
-//   - *MultiError: 包含所有错误的 MultiError
+//   - error: 全部成功时返回 nil，否则返回按输入顺序聚合的错误
 //
 // 示例:
 //
-//	me := errorx.Go(
+//	err := errorx.Go(
 //	    func() error { return doTask1() },
 //	    func() error { return doTask2() },
 //	    func() error { return doTask3() },
 //	)
-//	if err := me.ErrorOrNil(); err != nil {
+//	if err != nil {
 //	    return err
 //	}
-func Go(fns ...func() error) *MultiError {
-	me := NewMultiError()
-	var wg sync.WaitGroup
-	wg.Add(len(fns))
-
-	for _, fn := range fns {
-		go func(f func() error) {
-			defer wg.Done()
-			if err := f(); err != nil {
-				me.Append(err)
-			}
-		}(fn)
-	}
-
-	wg.Wait()
-	return me
+func Go(fns ...func() error) error {
+	return GoWithLimit(DefaultGoLimit, fns...)
 }
 
 // GoWithLimit 并行执行多个函数，限制并发数
@@ -229,39 +279,46 @@ func Go(fns ...func() error) *MultiError {
 //   - fns: 要执行的函数列表
 //
 // 返回:
-//   - *MultiError: 包含所有错误的 MultiError
+//   - error: limit 非法或任一操作失败时返回错误，否则返回 nil
 //
 // 示例:
 //
-//	me := errorx.GoWithLimit(3,
+//	err := errorx.GoWithLimit(3,
 //	    func() error { return process(items[0]) },
 //	    func() error { return process(items[1]) },
 //	    // ... more functions
 //	)
-func GoWithLimit(limit int, fns ...func() error) *MultiError {
+func GoWithLimit(limit int, fns ...func() error) error {
 	if limit <= 0 {
-		limit = 1
+		return fmt.Errorf("%w: got %d", ErrInvalidLimit, limit)
+	}
+	if len(fns) == 0 {
+		return nil
+	}
+	if limit > len(fns) {
+		limit = len(fns)
 	}
 
-	me := NewMultiError()
-	sem := make(chan struct{}, limit)
+	results := make([]error, len(fns))
+	jobs := make(chan int)
 	var wg sync.WaitGroup
-	wg.Add(len(fns))
-
-	for _, fn := range fns {
-		go func(f func() error) {
+	wg.Add(limit)
+	for range limit {
+		go func() {
 			defer wg.Done()
-			// 在 goroutine 内部获取信号量，防止主 goroutine 阻塞导致死锁
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			if err := f(); err != nil {
-				me.Append(err)
+			for index := range jobs {
+				results[index] = runOperation(index, fns[index])
 			}
-		}(fn)
+		}()
 	}
+
+	for index := range fns {
+		jobs <- index
+	}
+	close(jobs)
 
 	wg.Wait()
-	return me
+	return CombineErrors(results...)
 }
 
 // maxWalkDepth 最大遍历深度，防止无限循环
@@ -286,7 +343,7 @@ const maxWalkDepth = 1000
 //	    return true  // 继续遍历
 //	})
 func Walk(err error, fn func(error) bool) {
-	if err == nil {
+	if err == nil || fn == nil {
 		return
 	}
 
@@ -301,7 +358,7 @@ func Walk(err error, fn func(error) bool) {
 	// 这比使用 error 接口作为 key 更可靠，因为：
 	// 1. 不依赖于 error 的值相等性
 	// 2. 不会因为不可比较的类型而 panic
-	visited := make(map[uintptr]struct{})
+	visited := make(map[errorIdentity]struct{})
 
 	for len(stack) > 0 {
 		// 弹出栈顶元素
@@ -319,13 +376,13 @@ func Walk(err error, fn func(error) bool) {
 
 		// 获取错误对象的指针地址用于去重
 		// 使用 interface 的数据指针作为唯一标识
-		ptr := errorPtr(item.err)
-		// ptr == 0 表示值类型 error，不做去重缓存，每次都遍历
-		if ptr != 0 {
-			if _, ok := visited[ptr]; ok {
+		identity, identifiable := identifyError(item.err)
+		// 值类型 error 没有稳定指针，依靠深度上限终止异常循环。
+		if identifiable {
+			if _, ok := visited[identity]; ok {
 				continue
 			}
-			visited[ptr] = struct{}{}
+			visited[identity] = struct{}{}
 		}
 
 		// 调用处理函数
@@ -336,15 +393,15 @@ func Walk(err error, fn func(error) bool) {
 		// 收集子错误并压入栈中（逆序压入以保持遍历顺序）
 		var children []error
 
-		// 处理 MultiError
-		if me, ok := item.err.(*MultiError); ok {
-			children = me.Errors()
-		} else if unwrapper, ok := item.err.(interface{ Unwrap() []error }); ok {
+		switch typedErr := item.err.(type) {
+		case *MultiError:
+			children = typedErr.Errors()
+		case interface{ Unwrap() []error }:
 			// 处理 errors.Join 返回的类型
-			children = unwrapper.Unwrap()
-		} else if unwrapper, ok := item.err.(interface{ Unwrap() error }); ok {
+			children = typedErr.Unwrap()
+		case interface{ Unwrap() error }:
 			// 处理单个包装错误
-			if unwrapped := unwrapper.Unwrap(); unwrapped != nil {
+			if unwrapped := typedErr.Unwrap(); unwrapped != nil {
 				children = []error{unwrapped}
 			}
 		}
@@ -358,19 +415,69 @@ func Walk(err error, fn func(error) bool) {
 	}
 }
 
-// errorPtr 获取 error 接口的数据指针，用于唯一标识
-// 利用 reflect 获取底层值的指针地址
-func errorPtr(err error) uintptr {
+type errorIdentity struct {
+	typeOf  reflect.Type
+	pointer uintptr
+}
+
+// identifyError 获取指针错误的类型和地址，避免不同类型共享地址时误判。
+func identifyError(err error) (errorIdentity, bool) {
 	v := reflect.ValueOf(err)
-	// 对于指针类型，直接获取指针值
-	if v.Kind() == reflect.Ptr || v.Kind() == reflect.Interface {
-		if !v.IsNil() {
-			return v.Pointer()
+	if v.Kind() != reflect.Pointer || v.IsNil() {
+		return errorIdentity{}, false
+	}
+	return errorIdentity{typeOf: v.Type(), pointer: v.Pointer()}, true
+}
+
+func isNilError(err error) bool {
+	if err == nil {
+		return true
+	}
+	v := reflect.ValueOf(err)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return v.IsNil()
+	default:
+		return false
+	}
+}
+
+func referencesMultiError(root error, target *MultiError) bool {
+	stack := []error{root}
+	visited := make(map[errorIdentity]struct{})
+	for inspected := 0; len(stack) > 0; inspected++ {
+		// 对无法建立稳定身份的异常错误图采取保守拒绝策略。
+		if inspected >= maxWalkDepth {
+			return true
+		}
+		last := len(stack) - 1
+		err := stack[last]
+		stack = stack[:last]
+		if isNilError(err) {
+			continue
+		}
+		if aggregate, ok := err.(*MultiError); ok {
+			if aggregate == target {
+				return true
+			}
+		}
+		if identity, identifiable := identifyError(err); identifiable {
+			if _, exists := visited[identity]; exists {
+				continue
+			}
+			visited[identity] = struct{}{}
+		}
+
+		switch typedErr := err.(type) {
+		case *MultiError:
+			stack = append(stack, typedErr.Errors()...)
+		case interface{ Unwrap() []error }:
+			stack = append(stack, typedErr.Unwrap()...)
+		case interface{ Unwrap() error }:
+			stack = append(stack, typedErr.Unwrap())
 		}
 	}
-	// 对于值类型（非指针），返回 0（不缓存），让每个值类型 error 都被遍历
-	// 结合深度限制，可以有效防止无限循环
-	return 0
+	return false
 }
 
 // CollectErrors 从多个操作收集错误
@@ -389,11 +496,11 @@ func errorPtr(err error) uintptr {
 //	    func() error { return notify(data) },
 //	)
 func CollectErrors(ops ...func() error) error {
-	me := NewMultiError()
-	for _, op := range ops {
-		me.Append(op())
+	results := make([]error, len(ops))
+	for index, op := range ops {
+		results[index] = runOperation(index, op)
 	}
-	return me.ErrorOrNil()
+	return CombineErrors(results...)
 }
 
 // CombineErrors 合并多个错误
@@ -411,4 +518,19 @@ func CombineErrors(errs ...error) error {
 	me := NewMultiError()
 	me.Append(errs...)
 	return me.ErrorOrNil()
+}
+
+func runOperation(index int, operation func() error) (err error) {
+	if operation == nil {
+		return &OperationError{Index: index, Err: ErrNilOperation}
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = &OperationError{Index: index, Err: newPanicError(recovered)}
+		}
+	}()
+	if operationErr := operation(); operationErr != nil {
+		return &OperationError{Index: index, Err: operationErr}
+	}
+	return nil
 }

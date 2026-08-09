@@ -131,8 +131,8 @@ func (m *ConcurrentMap[K, V]) LoadAndDelete(key K) (V, bool) {
 //
 // 返回:
 //   - bool: 如果交换成功返回 true
-func (m *ConcurrentMap[K, V]) CompareAndSwap(key K, old, new V) bool {
-	return m.m.CompareAndSwap(key, old, new)
+func (m *ConcurrentMap[K, V]) CompareAndSwap(key K, old, newValue V) bool {
+	return m.m.CompareAndSwap(key, old, newValue)
 }
 
 // CompareAndDelete 比较并删除

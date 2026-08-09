@@ -95,7 +95,7 @@ func Zip4[A, B, C, D any](s1 []A, s2 []B, s3 []C, s4 []D) []Tuple4[A, B, C, D] {
 //	names, ages := tuple.Unzip2(pairs)
 //	// names: []string{"Alice", "Bob"}
 //	// ages: []int{20, 25}
-func Unzip2[A, B any](tuples []Tuple2[A, B]) ([]A, []B) {
+func Unzip2[A, B any](tuples []Tuple2[A, B]) (first []A, second []B) {
 	if len(tuples) == 0 {
 		return nil, nil
 	}
@@ -117,7 +117,7 @@ func Unzip2[A, B any](tuples []Tuple2[A, B]) ([]A, []B) {
 //   - []A: 第一个切片
 //   - []B: 第二个切片
 //   - []C: 第三个切片
-func Unzip3[A, B, C any](tuples []Tuple3[A, B, C]) ([]A, []B, []C) {
+func Unzip3[A, B, C any](tuples []Tuple3[A, B, C]) (first []A, second []B, third []C) {
 	if len(tuples) == 0 {
 		return nil, nil, nil
 	}
@@ -142,7 +142,7 @@ func Unzip3[A, B, C any](tuples []Tuple3[A, B, C]) ([]A, []B, []C) {
 //   - []B: 第二个切片
 //   - []C: 第三个切片
 //   - []D: 第四个切片
-func Unzip4[A, B, C, D any](tuples []Tuple4[A, B, C, D]) ([]A, []B, []C, []D) {
+func Unzip4[A, B, C, D any](tuples []Tuple4[A, B, C, D]) (first []A, second []B, third []C, fourth []D) {
 	if len(tuples) == 0 {
 		return nil, nil, nil, nil
 	}

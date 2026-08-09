@@ -36,12 +36,12 @@ func main() {
 
 	fmt.Println("\n📝 字符串工具 (lang/stringx):")
 
-	// 零拷贝转换（高性能）
+	// 安全复制转换
 	original := "Hello, 世界!"
-	bytes := stringx.String2Bytes(original)
+	bytes := stringx.StringToBytes(original)
 	backToString := stringx.BytesToString(bytes)
 	fmt.Printf("  Original: %s\n", original)
-	fmt.Printf("  To Bytes (zero-copy): %v\n", bytes[:10])
+	fmt.Printf("  To Bytes (safe copy): %v\n", bytes[:10])
 	fmt.Printf("  Back to String: %s\n", backToString)
 
 	// 数组转切片

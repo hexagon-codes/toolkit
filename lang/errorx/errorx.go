@@ -3,19 +3,19 @@ package errorx
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"runtime"
 	"strings"
 )
 
 // Try 执行函数并捕获 panic，返回 error
 func Try(fn func()) (err error) {
+	if fn == nil {
+		return ErrNilOperation
+	}
 	defer func() {
 		if r := recover(); r != nil {
-			if e, ok := r.(error); ok {
-				err = e
-			} else {
-				err = fmt.Errorf("panic: %v", r)
-			}
+			err = recoveredError(r)
 		}
 	}()
 	fn()
@@ -24,13 +24,12 @@ func Try(fn func()) (err error) {
 
 // TryWithValue 执行函数并捕获 panic，返回值和 error
 func TryWithValue[T any](fn func() T) (result T, err error) {
+	if fn == nil {
+		return result, ErrNilOperation
+	}
 	defer func() {
 		if r := recover(); r != nil {
-			if e, ok := r.(error); ok {
-				err = e
-			} else {
-				err = fmt.Errorf("panic: %v", r)
-			}
+			err = recoveredError(r)
 		}
 	}()
 	result = fn()
@@ -39,13 +38,12 @@ func TryWithValue[T any](fn func() T) (result T, err error) {
 
 // TryWithError 执行可能返回 error 的函数，同时捕获 panic
 func TryWithError[T any](fn func() (T, error)) (result T, err error) {
+	if fn == nil {
+		return result, ErrNilOperation
+	}
 	defer func() {
 		if r := recover(); r != nil {
-			if e, ok := r.(error); ok {
-				err = e
-			} else {
-				err = fmt.Errorf("panic: %v", r)
-			}
+			err = recoveredError(r)
 		}
 	}()
 	return fn()
@@ -80,7 +78,7 @@ func Must1[T any](val T, err error) T {
 }
 
 // Must2 处理两个返回值加 error 的情况
-func Must2[T1, T2 any](v1 T1, v2 T2, err error) (T1, T2) {
+func Must2[T1, T2 any](v1 T1, v2 T2, err error) (first T1, second T2) {
 	if err != nil {
 		panic(err)
 	}
@@ -88,7 +86,7 @@ func Must2[T1, T2 any](v1 T1, v2 T2, err error) (T1, T2) {
 }
 
 // Must3 处理三个返回值加 error 的情况
-func Must3[T1, T2, T3 any](v1 T1, v2 T2, v3 T3, err error) (T1, T2, T3) {
+func Must3[T1, T2, T3 any](v1 T1, v2 T2, v3 T3, err error) (first T1, second T2, third T3) {
 	if err != nil {
 		panic(err)
 	}
@@ -153,7 +151,19 @@ func Ignore0(_ error) {}
 
 // IgnoreClose 忽略 Close 方法的 error（用于 defer）
 func IgnoreClose(c interface{ Close() error }) {
-	_ = c.Close()
+	if c == nil {
+		return
+	}
+	v := reflect.ValueOf(c)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		if v.IsNil() {
+			return
+		}
+	}
+	if err := c.Close(); err != nil {
+		return
+	}
 }
 
 // Coalesce 返回第一个非 nil 的 error
@@ -202,7 +212,7 @@ func (e *StackError) Stack() string {
 	frames := runtime.CallersFrames(e.stack)
 	for {
 		frame, more := frames.Next()
-		sb.WriteString(fmt.Sprintf("%s\n\t%s:%d\n", frame.Function, frame.File, frame.Line))
+		fmt.Fprintf(&sb, "%s\n\t%s:%d\n", frame.Function, frame.File, frame.Line)
 		if !more {
 			break
 		}
@@ -212,9 +222,9 @@ func (e *StackError) Stack() string {
 
 // StackTrace 获取 error 的堆栈信息（如果有）
 func StackTrace(err error) string {
-	var se *StackError
-	if errors.As(err, &se) {
-		return se.Stack()
+	var stackErr interface{ Stack() string }
+	if errors.As(err, &stackErr) {
+		return stackErr.Stack()
 	}
 	return ""
 }
@@ -233,48 +243,38 @@ func Recover() error {
 // RecoverWithHandler 从 panic 中恢复，使用自定义处理函数
 func RecoverWithHandler(handler func(error)) {
 	if r := recover(); r != nil {
-		var err error
-		if e, ok := r.(error); ok {
-			err = e
-		} else {
-			err = fmt.Errorf("panic: %v", r)
+		if handler != nil {
+			handler(recoveredError(r))
 		}
-		handler(err)
 	}
 }
 
 // Safe 安全执行函数，返回 error 而不是 panic
 func Safe(fn func() error) (err error) {
+	if fn == nil {
+		return ErrNilOperation
+	}
 	defer func() {
 		if r := recover(); r != nil {
-			if e, ok := r.(error); ok {
-				err = e
-			} else {
-				err = fmt.Errorf("panic: %v", r)
-			}
+			err = recoveredError(r)
 		}
 	}()
 	return fn()
 }
 
-// SafeGo 安全启动 goroutine，捕获 panic
-func SafeGo(fn func(), onPanic func(error)) {
+// SafeGo 安全启动 goroutine，并返回只产生一次完成结果的通道。
+func SafeGo(fn func()) <-chan error {
+	result := make(chan error, 1)
+	if fn == nil {
+		result <- ErrNilOperation
+		close(result)
+		return result
+	}
 	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				var err error
-				if e, ok := r.(error); ok {
-					err = e
-				} else {
-					err = fmt.Errorf("panic: %v", r)
-				}
-				if onPanic != nil {
-					onPanic(err)
-				}
-			}
-		}()
-		fn()
+		defer close(result)
+		result <- Try(fn)
 	}()
+	return result
 }
 
 // Result 表示可能失败的操作结果
@@ -331,12 +331,16 @@ func (r Result[T]) UnwrapOr(defaultVal T) T {
 	return r.value
 }
 
-// UnwrapOrElse 获取值，失败时调用函数获取默认值
-func (r Result[T]) UnwrapOrElse(fn func(error) T) T {
+// UnwrapOrElse 获取值，失败时调用函数获取默认值。
+func (r Result[T]) UnwrapOrElse(fn func(error) T) (T, error) {
 	if r.err != nil {
-		return fn(r.err)
+		if fn == nil {
+			var zero T
+			return zero, errors.Join(ErrNilCallback, r.err)
+		}
+		return fn(r.err), nil
 	}
-	return r.value
+	return r.value, nil
 }
 
 // Must 获取值，失败时 panic
@@ -352,6 +356,9 @@ func Map[T, U any](r Result[T], fn func(T) U) Result[U] {
 	if r.err != nil {
 		return Err[U](r.err)
 	}
+	if fn == nil {
+		return Err[U](ErrNilCallback)
+	}
 	return Ok(fn(r.value))
 }
 
@@ -359,6 +366,9 @@ func Map[T, U any](r Result[T], fn func(T) U) Result[U] {
 func FlatMap[T, U any](r Result[T], fn func(T) Result[U]) Result[U] {
 	if r.err != nil {
 		return Err[U](r.err)
+	}
+	if fn == nil {
+		return Err[U](ErrNilCallback)
 	}
 	return fn(r.value)
 }

@@ -268,7 +268,7 @@ func TestOnceErr_WithError(t *testing.T) {
 		t.Errorf("expected 0, error; got %d, %v", v, err)
 	}
 
-	v, err, ok := o.Value()
+	v, ok, err := o.Value()
 	if !ok {
 		t.Error("expected initialized after Do")
 	}
