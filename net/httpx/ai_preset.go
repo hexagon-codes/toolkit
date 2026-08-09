@@ -1,23 +1,24 @@
 package httpx
 
 import (
+	"fmt"
+	neturl "net/url"
+	"strings"
 	"time"
 )
 
 // ============== AI API 预设客户端 ==============
 
 // OpenAIClient 创建 OpenAI API 客户端
-func OpenAIClient(apiKey string) *Client {
-	return NewClient(
-		WithBaseURL("https://api.openai.com/v1"),
-		WithHeader("Authorization", "Bearer "+apiKey),
-		WithHeader("Content-Type", "application/json"),
-		WithTimeout(120*time.Second),
-	)
+func OpenAIClient(apiKey string) (*Client, error) {
+	return newBearerAIClient("https://api.openai.com/v1", apiKey)
 }
 
 // OpenAIClientWithOrg 创建带组织 ID 的 OpenAI API 客户端
-func OpenAIClientWithOrg(apiKey, orgID string) *Client {
+func OpenAIClientWithOrg(apiKey, orgID string) (*Client, error) {
+	if err := validateRequiredAIConfig("API key", apiKey, "organization ID", orgID); err != nil {
+		return nil, err
+	}
 	return NewClient(
 		WithBaseURL("https://api.openai.com/v1"),
 		WithHeader("Authorization", "Bearer "+apiKey),
@@ -28,9 +29,19 @@ func OpenAIClientWithOrg(apiKey, orgID string) *Client {
 }
 
 // AzureOpenAIClient 创建 Azure OpenAI API 客户端
-func AzureOpenAIClient(endpoint, apiKey, apiVersion string) *Client {
+func AzureOpenAIClient(endpoint, apiKey, apiVersion string) (*Client, error) {
+	if err := validateRequiredAIConfig("endpoint", endpoint, "API key", apiKey, "API version", apiVersion); err != nil {
+		return nil, err
+	}
+	parsedEndpoint, err := neturl.Parse(endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("%w: parse Azure endpoint: %w", ErrInvalidClientConfig, err)
+	}
+	query := parsedEndpoint.Query()
+	query.Set("api-version", apiVersion)
+	parsedEndpoint.RawQuery = query.Encode()
 	return NewClient(
-		WithBaseURL(endpoint),
+		WithBaseURL(parsedEndpoint.String()),
 		WithHeader("api-key", apiKey),
 		WithHeader("Content-Type", "application/json"),
 		WithTimeout(120*time.Second),
@@ -38,7 +49,10 @@ func AzureOpenAIClient(endpoint, apiKey, apiVersion string) *Client {
 }
 
 // ClaudeClient 创建 Anthropic Claude API 客户端
-func ClaudeClient(apiKey string) *Client {
+func ClaudeClient(apiKey string) (*Client, error) {
+	if err := validateRequiredAIConfig("API key", apiKey); err != nil {
+		return nil, err
+	}
 	return NewClient(
 		WithBaseURL("https://api.anthropic.com/v1"),
 		WithHeader("x-api-key", apiKey),
@@ -49,7 +63,10 @@ func ClaudeClient(apiKey string) *Client {
 }
 
 // ClaudeClientWithVersion 创建指定版本的 Claude API 客户端
-func ClaudeClientWithVersion(apiKey, version string) *Client {
+func ClaudeClientWithVersion(apiKey, version string) (*Client, error) {
+	if err := validateRequiredAIConfig("API key", apiKey, "API version", version); err != nil {
+		return nil, err
+	}
 	return NewClient(
 		WithBaseURL("https://api.anthropic.com/v1"),
 		WithHeader("x-api-key", apiKey),
@@ -60,17 +77,29 @@ func ClaudeClientWithVersion(apiKey, version string) *Client {
 }
 
 // GeminiClient 创建 Google Gemini API 客户端
-func GeminiClient(apiKey string) *Client {
+func GeminiClient(apiKey string) (*Client, error) {
+	if err := validateRequiredAIConfig("API key", apiKey); err != nil {
+		return nil, err
+	}
 	return NewClient(
 		WithBaseURL("https://generativelanguage.googleapis.com/v1beta"),
+		WithHeader("x-goog-api-key", apiKey),
 		WithHeader("Content-Type", "application/json"),
 		WithTimeout(120*time.Second),
-		// Gemini 使用 URL 参数传递 API Key
 	)
 }
 
 // VertexAIClient 创建 Google Vertex AI 客户端
-func VertexAIClient(projectID, region, accessToken string) *Client {
+func VertexAIClient(projectID, region, accessToken string) (*Client, error) {
+	if err := validateRequiredAIConfig("project ID", projectID, "region", region, "access token", accessToken); err != nil {
+		return nil, err
+	}
+	if err := validateAIEndpointIdentifier("project ID", projectID); err != nil {
+		return nil, err
+	}
+	if err := validateAIEndpointIdentifier("region", region); err != nil {
+		return nil, err
+	}
 	baseURL := "https://" + region + "-aiplatform.googleapis.com/v1/projects/" + projectID + "/locations/" + region
 	return NewClient(
 		WithBaseURL(baseURL),
@@ -81,99 +110,73 @@ func VertexAIClient(projectID, region, accessToken string) *Client {
 }
 
 // DeepSeekClient 创建 DeepSeek API 客户端
-func DeepSeekClient(apiKey string) *Client {
-	return NewClient(
-		WithBaseURL("https://api.deepseek.com/v1"),
-		WithHeader("Authorization", "Bearer "+apiKey),
-		WithHeader("Content-Type", "application/json"),
-		WithTimeout(120*time.Second),
-	)
+func DeepSeekClient(apiKey string) (*Client, error) {
+	return newBearerAIClient("https://api.deepseek.com/v1", apiKey)
 }
 
 // QwenClient 创建通义千问 API 客户端
-func QwenClient(apiKey string) *Client {
-	return NewClient(
-		WithBaseURL("https://dashscope.aliyuncs.com/api/v1"),
-		WithHeader("Authorization", "Bearer "+apiKey),
-		WithHeader("Content-Type", "application/json"),
-		WithTimeout(120*time.Second),
-	)
+func QwenClient(apiKey string) (*Client, error) {
+	return newBearerAIClient("https://dashscope.aliyuncs.com/api/v1", apiKey)
 }
 
 // ZhipuClient 创建智谱 GLM API 客户端
-func ZhipuClient(apiKey string) *Client {
-	return NewClient(
-		WithBaseURL("https://open.bigmodel.cn/api/paas/v4"),
-		WithHeader("Authorization", "Bearer "+apiKey),
-		WithHeader("Content-Type", "application/json"),
-		WithTimeout(120*time.Second),
-	)
+func ZhipuClient(apiKey string) (*Client, error) {
+	return newBearerAIClient("https://open.bigmodel.cn/api/paas/v4", apiKey)
 }
 
 // BaichuanClient 创建百川 API 客户端
-func BaichuanClient(apiKey string) *Client {
-	return NewClient(
-		WithBaseURL("https://api.baichuan-ai.com/v1"),
-		WithHeader("Authorization", "Bearer "+apiKey),
-		WithHeader("Content-Type", "application/json"),
-		WithTimeout(120*time.Second),
-	)
+func BaichuanClient(apiKey string) (*Client, error) {
+	return newBearerAIClient("https://api.baichuan-ai.com/v1", apiKey)
 }
 
 // MoonshotClient 创建月之暗面 Kimi API 客户端
-func MoonshotClient(apiKey string) *Client {
-	return NewClient(
-		WithBaseURL("https://api.moonshot.cn/v1"),
-		WithHeader("Authorization", "Bearer "+apiKey),
-		WithHeader("Content-Type", "application/json"),
-		WithTimeout(120*time.Second),
-	)
+func MoonshotClient(apiKey string) (*Client, error) {
+	return newBearerAIClient("https://api.moonshot.cn/v1", apiKey)
 }
 
 // SparkClient 创建讯飞星火 API 客户端
-func SparkClient(apiKey string) *Client {
-	return NewClient(
-		WithBaseURL("https://spark-api-open.xf-yun.com/v1"),
-		WithHeader("Authorization", "Bearer "+apiKey),
-		WithHeader("Content-Type", "application/json"),
-		WithTimeout(120*time.Second),
-	)
+func SparkClient(apiKey string) (*Client, error) {
+	return newBearerAIClient("https://spark-api-open.xf-yun.com/v1", apiKey)
 }
 
 // DoubaoClient 创建字节豆包 API 客户端
-func DoubaoClient(apiKey string) *Client {
-	return NewClient(
-		WithBaseURL("https://ark.cn-beijing.volces.com/api/v3"),
-		WithHeader("Authorization", "Bearer "+apiKey),
-		WithHeader("Content-Type", "application/json"),
-		WithTimeout(120*time.Second),
-	)
+func DoubaoClient(apiKey string) (*Client, error) {
+	return newBearerAIClient("https://ark.cn-beijing.volces.com/api/v3", apiKey)
 }
 
 // MistralClient 创建 Mistral API 客户端
-func MistralClient(apiKey string) *Client {
-	return NewClient(
-		WithBaseURL("https://api.mistral.ai/v1"),
-		WithHeader("Authorization", "Bearer "+apiKey),
-		WithHeader("Content-Type", "application/json"),
-		WithTimeout(120*time.Second),
-	)
+func MistralClient(apiKey string) (*Client, error) {
+	return newBearerAIClient("https://api.mistral.ai/v1", apiKey)
 }
 
 // CohereClient 创建 Cohere API 客户端
-func CohereClient(apiKey string) *Client {
-	return NewClient(
-		WithBaseURL("https://api.cohere.ai/v1"),
-		WithHeader("Authorization", "Bearer "+apiKey),
-		WithHeader("Content-Type", "application/json"),
-		WithTimeout(120*time.Second),
-	)
+func CohereClient(apiKey string) (*Client, error) {
+	return newBearerAIClient("https://api.cohere.ai/v1", apiKey)
 }
 
 // ============== 自定义 API 客户端 ==============
 
 // CustomAIClient 创建自定义 AI API 客户端
-func CustomAIClient(baseURL, apiKey string) *Client {
+func CustomAIClient(baseURL, apiKey string) (*Client, error) {
+	return newBearerAIClient(baseURL, apiKey)
+}
+
+// CustomAIClientWithHeaders 创建带自定义请求头的 AI API 客户端
+func CustomAIClientWithHeaders(baseURL string, headers map[string]string) (*Client, error) {
+	if err := validateRequiredAIConfig("base URL", baseURL); err != nil {
+		return nil, err
+	}
+	return NewClient(
+		WithBaseURL(baseURL),
+		WithHeaders(headers),
+		WithTimeout(120*time.Second),
+	)
+}
+
+func newBearerAIClient(baseURL, apiKey string) (*Client, error) {
+	if err := validateRequiredAIConfig("base URL", baseURL, "API key", apiKey); err != nil {
+		return nil, err
+	}
 	return NewClient(
 		WithBaseURL(baseURL),
 		WithHeader("Authorization", "Bearer "+apiKey),
@@ -182,13 +185,30 @@ func CustomAIClient(baseURL, apiKey string) *Client {
 	)
 }
 
-// CustomAIClientWithHeaders 创建带自定义请求头的 AI API 客户端
-func CustomAIClientWithHeaders(baseURL string, headers map[string]string) *Client {
-	return NewClient(
-		WithBaseURL(baseURL),
-		WithHeaders(headers),
-		WithTimeout(120*time.Second),
-	)
+func validateRequiredAIConfig(fields ...string) error {
+	for index := 0; index+1 < len(fields); index += 2 {
+		if strings.TrimSpace(fields[index+1]) == "" {
+			return fmt.Errorf("%w: %s must not be empty", ErrInvalidClientConfig, fields[index])
+		}
+	}
+	return nil
+}
+
+// validateAIEndpointIdentifier 防止配置值改变预设端点的主机或路径结构。
+func validateAIEndpointIdentifier(name, value string) error {
+	if value == "" || strings.TrimSpace(value) != value || value[0] == '-' || value[len(value)-1] == '-' {
+		return fmt.Errorf("%w: %s is not a valid endpoint identifier", ErrInvalidClientConfig, name)
+	}
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if (character >= 'a' && character <= 'z') ||
+			(character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || character == '-' {
+			continue
+		}
+		return fmt.Errorf("%w: %s is not a valid endpoint identifier", ErrInvalidClientConfig, name)
+	}
+	return nil
 }
 
 // ============== 便捷请求方法 ==============
@@ -283,6 +303,9 @@ type AIUsage struct {
 
 // ChatCompletion 发送聊天补全请求
 func (c *Client) ChatCompletion(req *AIRequest) (*AIResponse, error) {
+	if req == nil {
+		return nil, fmt.Errorf("%w: AI request must not be nil", ErrInvalidRequest)
+	}
 	resp, err := c.R().SetJSONBody(req).Post("/chat/completions")
 	if err != nil {
 		return nil, err
@@ -305,8 +328,12 @@ func (c *Client) ChatCompletion(req *AIRequest) (*AIResponse, error) {
 
 // ChatCompletionStream 发送流式聊天补全请求
 func (c *Client) ChatCompletionStream(req *AIRequest) (*StreamResponse, error) {
-	req.Stream = true
-	return c.R().SetJSONBody(req).PostStream("/chat/completions")
+	if req == nil {
+		return nil, fmt.Errorf("%w: AI request must not be nil", ErrInvalidRequest)
+	}
+	streamRequest := *req
+	streamRequest.Stream = true
+	return c.R().SetJSONBody(&streamRequest).PostStream("/chat/completions")
 }
 
 // AIError AI API 错误

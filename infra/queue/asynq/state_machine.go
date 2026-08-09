@@ -10,6 +10,7 @@ import (
 // 任务状态机
 // 管理任务状态转换，确保状态一致性
 // =========================================
+
 // TaskState 任务状态
 type TaskState string
 
@@ -30,8 +31,8 @@ const (
 	StateFailure TaskState = "FAILURE"
 	// StateTimeout 超时
 	StateTimeout TaskState = "TIMEOUT"
-	// StateCancelled 已取消
-	StateCancelled TaskState = "CANCELLED"
+	// StateCanceled 已取消
+	StateCanceled TaskState = "CANCELED"
 	// StateDeadLetter 死信
 	StateDeadLetter TaskState = "DEAD_LETTER"
 )
@@ -133,13 +134,13 @@ func (sm *TaskStateMachine) registerDefaultTransitions() {
 	// 轮询中 -> 重试（保持轮询状态）
 	sm.AddTransition(StatePolling, EventRetry, StatePolling)
 	// 待处理 -> 取消
-	sm.AddTransition(StatePending, EventCancel, StateCancelled)
+	sm.AddTransition(StatePending, EventCancel, StateCanceled)
 	// 已入队 -> 取消
-	sm.AddTransition(StateQueued, EventCancel, StateCancelled)
+	sm.AddTransition(StateQueued, EventCancel, StateCanceled)
 	// 处理中 -> 取消
-	sm.AddTransition(StateProcessing, EventCancel, StateCancelled)
+	sm.AddTransition(StateProcessing, EventCancel, StateCanceled)
 	// 轮询中 -> 取消
-	sm.AddTransition(StatePolling, EventCancel, StateCancelled)
+	sm.AddTransition(StatePolling, EventCancel, StateCanceled)
 	// 处理中 -> 成功（直接返回结果的情况）
 	sm.AddTransition(StateProcessing, EventComplete, StateSuccess)
 	// 处理中 -> 失败
@@ -259,10 +260,11 @@ func GetTaskStateMachine() *TaskStateMachine {
 // =========================================
 // 便捷函数
 // =========================================
+
 // IsTerminalState 检查是否是终态
 func IsTerminalState(state TaskState) bool {
 	switch state {
-	case StateSuccess, StateFailure, StateTimeout, StateCancelled:
+	case StateSuccess, StateFailure, StateTimeout, StateCanceled:
 		return true
 	default:
 		return false
@@ -292,8 +294,8 @@ func NormalizeState(status string) TaskState {
 		return StatePending
 	case "TIMEOUT", "timeout", "timed_out":
 		return StateTimeout
-	case "CANCELLED", "cancelled", "canceled":
-		return StateCancelled
+	case "CANCELED", "canceled":
+		return StateCanceled
 	default:
 		return TaskState(status)
 	}
@@ -302,6 +304,7 @@ func NormalizeState(status string) TaskState {
 // =========================================
 // 任务状态追踪器
 // =========================================
+
 // TaskStateTracker 任务状态追踪器
 type TaskStateTracker struct {
 	mu      sync.RWMutex

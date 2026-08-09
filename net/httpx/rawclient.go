@@ -1,16 +1,19 @@
 package httpx
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
+	"reflect"
 	"time"
 )
 
-// RawClient 返回原生的 *http.Client，带业务常用的 Transport 预设。
+// NewRawClient 校验配置并返回带常用 Transport 预设的原生 *http.Client。
 //
 // 与 NewClient() 的关系：
 //   - NewClient() 是业务级封装（Response 缓存成 []byte、.R().Post() 链式 API），
 //     适合"POST 一个 JSON 拿一个 JSON"这种同步场景
-//   - RawClient() 返回原生 *http.Client，**保留 .Do(req) 调用契约**，适合：
+//   - NewRawClient() 返回原生 *http.Client，保留 .Do(req) 调用契约，适合：
 //   - 流式 SSE / WebSocket upgrade（不能预读 body）
 //   - 需要自己注入 Transport 做 mock（如 test 中的 http.RoundTripper）
 //   - 长耗时请求（thinking 模型 / 视频生成），超时由调用方 ctx 控制而非 Client.Timeout
@@ -23,13 +26,14 @@ import (
 // 典型用法：
 //
 //	// LLM 流式客户端（thinking 模型可能跑数分钟）
-//	c := httpx.RawClient(httpx.WithResponseHeaderTimeout(120 * time.Second))
+//	c, err := httpx.NewRawClient(httpx.WithResponseHeaderTimeout(120 * time.Second))
+//	if err != nil { return err }
 //	req, _ := http.NewRequestWithContext(ctx, "POST", url, body)
-//	resp, err := c.Do(req)  // 契约不变
+//	resp, err := c.Do(req)
 //
 //	// 测试 mock 注入
-//	c := httpx.RawClient(httpx.WithRawTransport(mockTransport))
-func RawClient(opts ...RawOption) *http.Client {
+//	c := httpx.MustNewRawClient(httpx.WithRawTransport(mockTransport))
+func NewRawClient(opts ...RawOption) (*http.Client, error) {
 	cfg := &rawConfig{
 		responseHeaderTimeout: 120 * time.Second,
 		maxIdleConns:          100,
@@ -38,8 +42,19 @@ func RawClient(opts ...RawOption) *http.Client {
 		tlsHandshakeTimeout:   10 * time.Second,
 		expectContinueTimeout: 1 * time.Second,
 	}
-	for _, opt := range opts {
-		opt(cfg)
+	for index, opt := range opts {
+		if opt == nil {
+			return nil, fmt.Errorf("%w: option %d must not be nil", ErrInvalidRawClientConfig, index)
+		}
+		if err := opt(cfg); err != nil {
+			return nil, fmt.Errorf("%w: option %d: %w", ErrInvalidRawClientConfig, index, err)
+		}
+	}
+	if cfg.maxIdleConns > 0 && cfg.maxIdleConnsPerHost > cfg.maxIdleConns {
+		return nil, fmt.Errorf(
+			"%w: maximum idle connections per host must not exceed the global maximum",
+			ErrInvalidRawClientConfig,
+		)
 	}
 	transport := cfg.customTransport
 	if transport == nil {
@@ -53,16 +68,27 @@ func RawClient(opts ...RawOption) *http.Client {
 			IdleConnTimeout:       cfg.idleConnTimeout,
 			TLSHandshakeTimeout:   cfg.tlsHandshakeTimeout,
 			ExpectContinueTimeout: cfg.expectContinueTimeout,
+			ForceAttemptHTTP2:     true,
 		}
 	}
 	return &http.Client{
 		Transport: transport,
 		Timeout:   cfg.timeout, // 默认 0 = 不限，由 ctx 控制
-	}
+	}, nil
 }
 
-// RawOption 配置 RawClient 的选项。
-type RawOption func(*rawConfig)
+// MustNewRawClient 创建原生客户端，配置无效时触发 panic。
+// 仅应用于编译期已知且经过测试的静态配置。
+func MustNewRawClient(opts ...RawOption) *http.Client {
+	client, err := NewRawClient(opts...)
+	if err != nil {
+		panic(err)
+	}
+	return client
+}
+
+// RawOption 配置原生 HTTP 客户端。
+type RawOption func(*rawConfig) error
 
 type rawConfig struct {
 	timeout               time.Duration
@@ -78,33 +104,82 @@ type rawConfig struct {
 // WithRawTimeout 设置整体请求超时（默认 0 = 不限，推荐由 ctx 控制）。
 // 注意：对流式请求应留 0，否则 Client.Timeout 会强制切断长流。
 func WithRawTimeout(d time.Duration) RawOption {
-	return func(c *rawConfig) { c.timeout = d }
+	return func(c *rawConfig) error {
+		if d < 0 {
+			return errors.New("timeout must not be negative")
+		}
+		c.timeout = d
+		return nil
+	}
 }
 
 // WithResponseHeaderTimeout 响应头超时 —— 从建连成功到收到首个响应头的最长时间。
 // 对流式请求关键：防止服务端建连后不发数据的挂死。默认 120s。
 func WithResponseHeaderTimeout(d time.Duration) RawOption {
-	return func(c *rawConfig) { c.responseHeaderTimeout = d }
+	return func(c *rawConfig) error {
+		if d < 0 {
+			return errors.New("response header timeout must not be negative")
+		}
+		c.responseHeaderTimeout = d
+		return nil
+	}
 }
 
 // WithMaxIdleConns 连接池总上限，默认 100。
 func WithMaxIdleConns(n int) RawOption {
-	return func(c *rawConfig) { c.maxIdleConns = n }
+	return func(c *rawConfig) error {
+		if n < 0 {
+			return errors.New("maximum idle connections must not be negative")
+		}
+		c.maxIdleConns = n
+		return nil
+	}
 }
 
 // WithMaxIdleConnsPerHost 每主机连接池上限，默认 10。
 // LLM/图像场景建议 20+ 避免高并发短暂抖动。
 func WithMaxIdleConnsPerHost(n int) RawOption {
-	return func(c *rawConfig) { c.maxIdleConnsPerHost = n }
+	return func(c *rawConfig) error {
+		if n < 0 {
+			return errors.New("maximum idle connections per host must not be negative")
+		}
+		c.maxIdleConnsPerHost = n
+		return nil
+	}
 }
 
 // WithIdleConnTimeout 空闲连接存活时间，默认 90s。
 func WithIdleConnTimeout(d time.Duration) RawOption {
-	return func(c *rawConfig) { c.idleConnTimeout = d }
+	return func(c *rawConfig) error {
+		if d < 0 {
+			return errors.New("idle connection timeout must not be negative")
+		}
+		c.idleConnTimeout = d
+		return nil
+	}
 }
 
 // WithRawTransport 注入自定义 Transport（测试 mock / 代理场景）。
 // 注入后其它 transport 配置项（ResponseHeaderTimeout 等）会被忽略。
 func WithRawTransport(t http.RoundTripper) RawOption {
-	return func(c *rawConfig) { c.customTransport = t }
+	return func(c *rawConfig) error {
+		if isNilRoundTripper(t) {
+			return errors.New("transport must not be nil")
+		}
+		c.customTransport = t
+		return nil
+	}
+}
+
+func isNilRoundTripper(transport http.RoundTripper) bool {
+	if transport == nil {
+		return true
+	}
+	value := reflect.ValueOf(transport)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }

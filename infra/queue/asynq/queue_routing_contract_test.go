@@ -19,8 +19,7 @@ func TestManagerEnqueueRoutesQueuesWithinOwnNamespace(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = manager.Stop() })
 
-	// Manager options are the routing authority. An embedded task option from
-	// another namespace must not bypass the manager's implicit default queue.
+	// Manager 选项是路由权威；来自其他命名空间的任务内嵌选项不得绕过管理器的默认队列。
 	embeddedForeignQueue := queue.NewTask(
 		"contract:implicit-default",
 		nil,

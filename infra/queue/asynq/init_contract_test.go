@@ -127,7 +127,19 @@ func TestRunMigrationRefreshesShortLeaseUntilWorkCompletes(t *testing.T) {
 		manager,
 		func(ctx context.Context, _ bool) (int, error) {
 			redisServer.FastForward(2 * leaseTTL / 3)
-			time.Sleep(leaseTTL / 2)
+
+			// 等到刷新协程确实续租后再推进 Redis 时钟，避免用固定睡眠猜测调度时机。
+			refreshDeadline := time.Now().Add(time.Second)
+			for redisServer.TTL(MigrationLockKey) <= leaseTTL/2 {
+				if !redisServer.Exists(MigrationLockKey) {
+					return 0, errors.New("migration lease expired before refresh")
+				}
+				if time.Now().After(refreshDeadline) {
+					return 0, errors.New("migration lease was not refreshed before deadline")
+				}
+				time.Sleep(time.Millisecond)
+			}
+
 			redisServer.FastForward(2 * leaseTTL / 3)
 			if !redisServer.Exists(MigrationLockKey) {
 				return 0, errors.New("migration lease expired during long-running work")

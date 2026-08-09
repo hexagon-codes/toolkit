@@ -206,7 +206,7 @@ func TestIsTerminalState(t *testing.T) {
 		{StateSuccess, true},
 		{StateFailure, true},
 		{StateTimeout, true},
-		{StateCancelled, true},
+		{StateCanceled, true},
 		{StatePending, false},
 		{StateQueued, false},
 		{StateProcessing, false},
@@ -236,7 +236,7 @@ func TestIsActiveState(t *testing.T) {
 		{StateSuccess, false},
 		{StateFailure, false},
 		{StateTimeout, false},
-		{StateCancelled, false},
+		{StateCanceled, false},
 		{TaskState("unknown"), false},
 	}
 
@@ -280,10 +280,9 @@ func TestNormalizeState(t *testing.T) {
 		{"TIMEOUT", StateTimeout},
 		{"timeout", StateTimeout},
 		{"timed_out", StateTimeout},
-		// Cancelled variants
-		{"CANCELLED", StateCancelled},
-		{"cancelled", StateCancelled},
-		{"canceled", StateCancelled},
+		// 已取消状态的变体
+		{"CANCELED", StateCanceled},
+		{"canceled", StateCanceled},
 		// Unknown returns as-is
 		{"unknown_state", TaskState("unknown_state")},
 	}

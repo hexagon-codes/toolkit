@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -23,9 +24,10 @@ func (m *mockRT) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 func TestRawClient_DefaultsAreSane(t *testing.T) {
-	c := RawClient()
+	c := MustNewRawClient()
 	if c == nil {
 		t.Fatal("RawClient returned nil")
+		return
 	}
 	if c.Timeout != 0 {
 		t.Errorf("default Timeout should be 0 (ctx-controlled), got %v", c.Timeout)
@@ -51,7 +53,7 @@ func TestRawClient_DefaultsAreSane(t *testing.T) {
 }
 
 func TestRawClient_WithResponseHeaderTimeout(t *testing.T) {
-	c := RawClient(WithResponseHeaderTimeout(5 * time.Second))
+	c := MustNewRawClient(WithResponseHeaderTimeout(5 * time.Second))
 	tr := c.Transport.(*http.Transport)
 	if tr.ResponseHeaderTimeout != 5*time.Second {
 		t.Errorf("want 5s, got %v", tr.ResponseHeaderTimeout)
@@ -59,7 +61,7 @@ func TestRawClient_WithResponseHeaderTimeout(t *testing.T) {
 }
 
 func TestRawClient_WithRawTimeout(t *testing.T) {
-	c := RawClient(WithRawTimeout(10 * time.Second))
+	c := MustNewRawClient(WithRawTimeout(10 * time.Second))
 	if c.Timeout != 10*time.Second {
 		t.Errorf("want 10s, got %v", c.Timeout)
 	}
@@ -67,7 +69,7 @@ func TestRawClient_WithRawTimeout(t *testing.T) {
 
 func TestRawClient_WithRawTransport_OverridesEverything(t *testing.T) {
 	m := &mockRT{resp: &http.Response{StatusCode: 200, Body: http.NoBody}}
-	c := RawClient(
+	c := MustNewRawClient(
 		WithRawTransport(m),
 		// 即使指定了 ResponseHeaderTimeout，也应被 mock transport 覆盖
 		WithResponseHeaderTimeout(1*time.Second),
@@ -76,7 +78,11 @@ func TestRawClient_WithRawTransport_OverridesEverything(t *testing.T) {
 		t.Error("custom Transport should override defaults")
 	}
 	// 验证 mock 被调用
-	resp, err := c.Get("http://example.com")
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://example.com", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := c.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,9 +95,9 @@ func TestRawClient_WithRawTransport_OverridesEverything(t *testing.T) {
 // TestRawClient_ContractIsNativeHttpClient 验证 RawClient 返回的是标准 *http.Client，
 // 保持与所有 .Do(req) 调用点、测试 mock 注入等生态兼容
 func TestRawClient_ContractIsNativeHttpClient(t *testing.T) {
-	c := RawClient()
+	c := MustNewRawClient()
 	// 类型断言本身就是契约：必须是 *http.Client
-	var _ *http.Client = c
+	var _ = c
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
@@ -99,7 +105,7 @@ func TestRawClient_ContractIsNativeHttpClient(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	req, err := http.NewRequest("GET", ts.URL, nil)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, ts.URL, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +120,7 @@ func TestRawClient_ContractIsNativeHttpClient(t *testing.T) {
 }
 
 func TestRawClient_WithMaxIdleConns(t *testing.T) {
-	c := RawClient(WithMaxIdleConns(50), WithMaxIdleConnsPerHost(25), WithIdleConnTimeout(30*time.Second))
+	c := MustNewRawClient(WithMaxIdleConns(50), WithMaxIdleConnsPerHost(25), WithIdleConnTimeout(30*time.Second))
 	tr := c.Transport.(*http.Transport)
 	if tr.MaxIdleConns != 50 {
 		t.Errorf("MaxIdleConns want 50, got %d", tr.MaxIdleConns)

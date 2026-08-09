@@ -14,6 +14,7 @@ import (
 // 健康检查
 // 提供 Kubernetes liveness/readiness 探针支持
 // =========================================
+
 // HealthStatus 健康状态
 type HealthStatus struct {
 	Healthy     bool              `json:"healthy"`
@@ -51,7 +52,7 @@ func (h *HealthChecker) Check(ctx context.Context) *HealthStatus {
 		status.Healthy = false
 		status.Ready = false
 		status.Details["manager"] = "not started"
-		h.lastStatus.Store(status)
+		h.lastStatus.Store(cloneHealthStatus(status))
 		return status
 	}
 	status.Details["manager"] = "running"
@@ -69,8 +70,20 @@ func (h *HealthChecker) Check(ctx context.Context) *HealthStatus {
 		status.Ready = false
 		status.Details["queues"] = err.Error()
 	}
-	h.lastStatus.Store(status)
+	h.lastStatus.Store(cloneHealthStatus(status))
 	return status
+}
+
+func cloneHealthStatus(status *HealthStatus) *HealthStatus {
+	if status == nil {
+		return nil
+	}
+	clone := *status
+	clone.Details = make(map[string]string, len(status.Details))
+	for key, value := range status.Details {
+		clone.Details[key] = value
+	}
+	return &clone
 }
 
 // checkRedis 检查 Redis 连接
@@ -83,12 +96,21 @@ func (h *HealthChecker) checkRedis(ctx context.Context) error {
 
 // checkQueues 检查队列状态
 func (h *HealthChecker) checkQueues(ctx context.Context, status *HealthStatus) error {
+	if ctx == nil {
+		return fmt.Errorf("%w: queue health check requires a non-nil context", ErrInvalidContext)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if h.manager == nil {
 		return ErrManagerNotInitialized
 	}
 	queues := h.manager.QueueNames()
 	return h.manager.withInspector(func(inspector *asynq.Inspector) error {
 		for _, q := range queues {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			info, err := configuredQueueInfo(inspector, q)
 			if err != nil {
 				return fmt.Errorf("inspect queue %q: %w", q, err)
@@ -128,7 +150,7 @@ func (h *HealthChecker) IsReady() bool {
 func (h *HealthChecker) GetLastStatus() *HealthStatus {
 	if v := h.lastStatus.Load(); v != nil {
 		if status, ok := v.(*HealthStatus); ok {
-			return status
+			return cloneHealthStatus(status)
 		}
 	}
 	return nil
@@ -137,6 +159,7 @@ func (h *HealthChecker) GetLastStatus() *HealthStatus {
 // =========================================
 // 优雅关闭
 // =========================================
+
 // GracefulShutdown 优雅关闭配置
 type GracefulShutdown struct {
 	manager         *Manager
@@ -168,8 +191,9 @@ func (g *GracefulShutdown) Shutdown(ctx context.Context) error {
 	}
 	g.manager.logger.Log("[Asynq] graceful shutdown initiated...")
 	// 执行注册的回调
+	var callbackErr error
 	for _, fn := range g.onShutdown {
-		fn()
+		callbackErr = errors.Join(callbackErr, invokeShutdownCallback(fn))
 	}
 	// 创建超时上下文
 	shutdownCtx, cancel := context.WithTimeout(ctx, g.shutdownTimeout)
@@ -181,16 +205,27 @@ func (g *GracefulShutdown) Shutdown(ctx context.Context) error {
 	select {
 	case err := <-done:
 		g.manager.logger.Log("[Asynq] all tasks completed")
-		return err
+		return errors.Join(callbackErr, err)
 	case <-shutdownCtx.Done():
 		g.manager.logger.Error("[Asynq] shutdown timeout, forcing stop")
-		return shutdownCtx.Err()
+		return errors.Join(callbackErr, shutdownCtx.Err())
 	}
+}
+
+func invokeShutdownCallback(fn func()) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = callbackPanicError("shutdown callback", recovered)
+		}
+	}()
+	fn()
+	return nil
 }
 
 // =========================================
 // 队列监控
 // =========================================
+
 // QueueStats 队列统计
 type QueueStats struct {
 	Name      string `json:"name"`
@@ -307,6 +342,7 @@ func DeleteDeadLetterTask(queue, taskID string) error {
 // =========================================
 // 便捷函数
 // =========================================
+
 // GetHealthChecker 获取健康检查器
 func GetHealthChecker() *HealthChecker {
 	m := GetManager()

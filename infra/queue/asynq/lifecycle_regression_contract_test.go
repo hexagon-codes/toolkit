@@ -118,6 +118,86 @@ func TestBackpressureStartStopAreIdempotentAndRestartSafe(t *testing.T) {
 	receiveContractSignal(t, second.stopped, "second ticker stop")
 }
 
+func TestBackpressureCallbackCanStopController(t *testing.T) {
+	redisServer := miniredis.RunT(t)
+	manager, err := NewManager(context.Background(), managerTestConfig(redisServer.Addr()))
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	if _, err := manager.EnqueueTask(context.Background(), "contract:callback-stop", nil); err != nil {
+		t.Fatalf("EnqueueTask() error = %v", err)
+	}
+
+	ticker := newManualBackpressureTicker()
+	callbackReturned := make(chan struct{})
+	controller := newContractBackpressureController(manager, ticker)
+	controller.config.MaxQueueSize = 1
+	controller.config.WarningThreshold = 0.5
+	controller.config.CriticalThreshold = 0.9
+	controller.config.OnCritical = func(string, int, int) {
+		controller.Stop()
+		close(callbackReturned)
+	}
+	if err := controller.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	ticker.Tick()
+
+	select {
+	case <-callbackReturned:
+		if err := manager.Stop(); err != nil {
+			t.Fatalf("Manager.Stop() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("backpressure callback deadlocked while stopping its controller")
+	}
+}
+
+func TestBackpressureStopDoesNotWaitForBlockingCallback(t *testing.T) {
+	redisServer := miniredis.RunT(t)
+	manager, err := NewManager(context.Background(), managerTestConfig(redisServer.Addr()))
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	if _, err := manager.EnqueueTask(context.Background(), "contract:blocking-callback", nil); err != nil {
+		t.Fatalf("EnqueueTask() error = %v", err)
+	}
+
+	ticker := newManualBackpressureTicker()
+	callbackStarted := make(chan struct{})
+	releaseCallback := make(chan struct{})
+	controller := newContractBackpressureController(manager, ticker)
+	controller.config.MaxQueueSize = 1
+	controller.config.WarningThreshold = 0.5
+	controller.config.CriticalThreshold = 0.9
+	controller.config.OnCritical = func(string, int, int) {
+		close(callbackStarted)
+		<-releaseCallback
+	}
+	if err := controller.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	ticker.Tick()
+	receiveContractSignal(t, callbackStarted, "blocking callback start")
+
+	stopDone := make(chan struct{})
+	go func() {
+		controller.Stop()
+		close(stopDone)
+	}()
+	select {
+	case <-stopDone:
+	case <-time.After(time.Second):
+		close(releaseCallback)
+		<-stopDone
+		t.Fatal("BackpressureController.Stop() waited for user callback")
+	}
+	close(releaseCallback)
+	if err := manager.Stop(); err != nil {
+		t.Fatalf("Manager.Stop() error = %v", err)
+	}
+}
+
 func TestInitPollingCleanupWaitsForBackpressureMonitor(t *testing.T) {
 	ResetManagerForTesting()
 	t.Cleanup(ResetManagerForTesting)

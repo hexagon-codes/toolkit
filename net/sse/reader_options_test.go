@@ -29,7 +29,7 @@ func readAllEvents(t *testing.T, r *Reader) ([]*Event, error) {
 func TestNewReaderWithOptions_NoOptions(t *testing.T) {
 	input := "event: message\ndata: hello\n\ndata:world\n\n"
 
-	r := NewReaderWithOptions(strings.NewReader(input))
+	r := MustNewReaderWithOptions(strings.NewReader(input))
 	events, err := readAllEvents(t, r)
 	if err != nil {
 		t.Fatalf("意外错误: %v", err)
@@ -95,7 +95,7 @@ func TestWithStrictDataPrefix(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := NewReaderWithOptions(strings.NewReader(tt.input), WithStrictDataPrefix())
+			r := MustNewReaderWithOptions(strings.NewReader(tt.input), WithStrictDataPrefix())
 			events, err := readAllEvents(t, r)
 			if err != nil {
 				t.Fatalf("意外错误: %v", err)
@@ -123,7 +123,7 @@ func TestWithStrictDataPrefix(t *testing.T) {
 func TestWithStrictDataPrefix_OtherFieldsUnaffected(t *testing.T) {
 	input := ": comment line\nid: 42\nevent: update\nretry: 1500\ndata: payload\n\n"
 
-	r := NewReaderWithOptions(strings.NewReader(input), WithStrictDataPrefix())
+	r := MustNewReaderWithOptions(strings.NewReader(input), WithStrictDataPrefix())
 	ev, err := r.Read()
 	if err != nil {
 		t.Fatalf("意外错误: %v", err)
@@ -146,18 +146,18 @@ func TestWithStrictDataPrefix_OtherFieldsUnaffected(t *testing.T) {
 // 钉死两种模式的行为契约。
 func TestStrictVsLooseDivergence(t *testing.T) {
 	tests := []struct {
-		name      string
-		input     string
-		looseData string // 宽松模式期望首事件 Data
-		looseSome bool   // 宽松模式是否应产生非空事件
-		strictNone bool  // 严格模式是否应无事件
+		name       string
+		input      string
+		looseData  string // 宽松模式期望首事件 Data
+		looseSome  bool   // 宽松模式是否应产生非空事件
+		strictNone bool   // 严格模式是否应无事件
 		strictData string // strictNone=false 时严格模式期望 Data
 	}{
 		{
-			name:      "无空格data：宽松识别/严格忽略",
-			input:     "data:{\"ok\":true}\n\n",
-			looseData: `{"ok":true}`,
-			looseSome: true,
+			name:       "无空格data：宽松识别/严格忽略",
+			input:      "data:{\"ok\":true}\n\n",
+			looseData:  `{"ok":true}`,
+			looseSome:  true,
 			strictNone: true,
 		},
 		{
@@ -173,7 +173,7 @@ func TestStrictVsLooseDivergence(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// 宽松
-			loose := NewReader(strings.NewReader(tt.input))
+			loose := MustNewReader(strings.NewReader(tt.input))
 			le, err := readAllEvents(t, loose)
 			if err != nil {
 				t.Fatalf("宽松模式意外错误: %v", err)
@@ -185,7 +185,7 @@ func TestStrictVsLooseDivergence(t *testing.T) {
 			}
 
 			// 严格
-			strict := NewReaderWithOptions(strings.NewReader(tt.input), WithStrictDataPrefix())
+			strict := MustNewReaderWithOptions(strings.NewReader(tt.input), WithStrictDataPrefix())
 			se, err := readAllEvents(t, strict)
 			if err != nil {
 				t.Fatalf("严格模式意外错误: %v", err)
@@ -261,7 +261,7 @@ func TestWithMaxTotalBytes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := NewReaderWithOptions(strings.NewReader(tt.input), WithMaxTotalBytes(tt.max))
+			r := MustNewReaderWithOptions(strings.NewReader(tt.input), WithMaxTotalBytes(tt.max))
 			events, err := readAllEvents(t, r)
 
 			if tt.wantErr == nil {
@@ -280,16 +280,15 @@ func TestWithMaxTotalBytes(t *testing.T) {
 	}
 }
 
-// TestWithMaxTotalBytes_Negative 验证负数上限被归一为 0（不限制）。
+// TestWithMaxTotalBytes_Negative 验证负数上限不会静默退化为无限制。
 func TestWithMaxTotalBytes_Negative(t *testing.T) {
 	input := strings.Repeat("data: x\n\n", 50)
-	r := NewReaderWithOptions(strings.NewReader(input), WithMaxTotalBytes(-1))
-	events, err := readAllEvents(t, r)
-	if err != nil {
-		t.Fatalf("负数上限应等价于不限制，意外错误: %v", err)
+	reader, err := NewReaderWithOptions(strings.NewReader(input), WithMaxTotalBytes(-1))
+	if reader != nil {
+		t.Fatalf("NewReaderWithOptions() reader = %v, want nil", reader)
 	}
-	if len(events) != 50 {
-		t.Fatalf("期望 50 个事件，实际 %d", len(events))
+	if !errors.Is(err, ErrInvalidReaderConfig) {
+		t.Fatalf("NewReaderWithOptions() error = %v, want ErrInvalidReaderConfig", err)
 	}
 }
 
@@ -300,7 +299,7 @@ func TestWithMaxTotalBytes_Cumulative(t *testing.T) {
 	input := strings.Repeat(oneEvent, 5)
 
 	// 上限设为 2.x 个事件的字节，确保第 3 个事件读取时累计超限。
-	r := NewReaderWithOptions(strings.NewReader(input), WithMaxTotalBytes(int64(len(oneEvent))*2+1))
+	r := MustNewReaderWithOptions(strings.NewReader(input), WithMaxTotalBytes(int64(len(oneEvent))*2+1))
 
 	// 前两次 Read 应成功
 	for i := 0; i < 2; i++ {
@@ -319,7 +318,7 @@ func TestReaderOptions_Combined(t *testing.T) {
 	// 含一个规范 data 行、一个无空格 data 行（严格模式应忽略）。
 	input := "data: ok\ndata:ignored\n\n"
 
-	r := NewReaderWithOptions(
+	r := MustNewReaderWithOptions(
 		strings.NewReader(input),
 		WithStrictDataPrefix(),
 		WithMaxTotalBytes(1024),
@@ -333,17 +332,17 @@ func TestReaderOptions_Combined(t *testing.T) {
 	}
 }
 
-// TestWithMaxTotalBytes_EOFNoTrailingNewline 验证无结尾换行的最后一行
-// 也被计入字节统计，且在上限内可正常返回。
-func TestWithMaxTotalBytes_EOFNoTrailingNewline(t *testing.T) {
-	input := "data: tail" // 无结尾空行，EOF 时返回该事件
-	r := NewReaderWithOptions(strings.NewReader(input), WithMaxTotalBytes(1024))
-	ev, err := r.Read()
-	if err != nil {
-		t.Fatalf("意外错误: %v", err)
+// TestWithMaxTotalBytes_CountsDiscardedIncompleteEOF 验证被 EOF 丢弃的不完整帧
+// 仍会计入累计字节数。
+func TestWithMaxTotalBytes_CountsDiscardedIncompleteEOF(t *testing.T) {
+	input := "data: tail"
+	r := MustNewReaderWithOptions(strings.NewReader(input), WithMaxTotalBytes(1024))
+	event, err := r.Read()
+	if event != nil || !errors.Is(err, io.EOF) {
+		t.Fatalf("Read() = (%#v, %v), want (nil, io.EOF)", event, err)
 	}
-	if ev.Data != "tail" {
-		t.Errorf("期望 Data=tail，实际 %q", ev.Data)
+	if r.totalBytes != int64(len(input)) {
+		t.Fatalf("totalBytes = %d, want %d", r.totalBytes, len(input))
 	}
 }
 
@@ -351,7 +350,7 @@ func TestWithMaxTotalBytes_EOFNoTrailingNewline(t *testing.T) {
 // 已读取的部分字节超限也会返回 ErrMaxBytesExceeded。
 func TestWithMaxTotalBytes_ExceedOnPartialLine(t *testing.T) {
 	input := "data: a very long single line without trailing newline"
-	r := NewReaderWithOptions(strings.NewReader(input), WithMaxTotalBytes(5))
+	r := MustNewReaderWithOptions(strings.NewReader(input), WithMaxTotalBytes(5))
 	if _, err := r.Read(); !errors.Is(err, ErrMaxBytesExceeded) {
 		t.Fatalf("期望 ErrMaxBytesExceeded，实际 %v", err)
 	}

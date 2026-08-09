@@ -1,51 +1,38 @@
-// Package sse 提供 Server-Sent Events (SSE) 处理功能
+// Package sse 提供 Server-Sent Events（SSE）的解析、客户端连接和服务端写入能力。
 //
-// SSE 是一种服务器推送技术，广泛用于 AI API 的流式响应。
-// 本包提供了 SSE 事件解析、客户端连接和服务器端写入等功能。
+// Reader 遵循 WHATWG 事件流格式，支持 CRLF、LF、CR、多行 data、控制字段及安全字节上限。
+// Client 负责校验 HTTP 响应并管理响应体生命周期；Writer 负责生成合法的事件流帧。
 //
-// 基本用法:
+// 基本用法：
 //
 //	// 解析 SSE 事件
-//	reader := sse.NewReader(resp.Body)
+//	reader, err := sse.NewReader(resp.Body)
+//	if err != nil {
+//		return err
+//	}
+//	defer reader.Close()
 //	for {
-//	    event, err := reader.Read()
-//	    if err == io.EOF {
-//	        break
-//	    }
-//	    fmt.Println(event.Data)
+//		event, err := reader.Read()
+//		if errors.Is(err, io.EOF) {
+//			break
+//		}
+//		if err != nil {
+//			return err
+//		}
+//		fmt.Println(event.Data)
 //	}
 //
 //	// 连接 SSE 端点
-//	client := sse.NewClient("https://api.example.com/stream")
-//	stream, err := client.Connect(ctx)
-//	for event := range stream.Events() {
-//	    fmt.Println(event.Data)
+//	client, err := sse.NewClient("https://api.example.com/stream")
+//	if err != nil {
+//		return err
 //	}
-//
-// --- English ---
-//
-// Package sse provides Server-Sent Events (SSE) handling capabilities.
-//
-// SSE is a server-push technology widely used for streaming responses
-// from AI APIs. This package provides SSE event parsing, client
-// connection, and server-side writing functionality.
-//
-// Basic usage:
-//
-//	// Parse SSE events
-//	reader := sse.NewReader(resp.Body)
-//	for {
-//	    event, err := reader.Read()
-//	    if err == io.EOF {
-//	        break
-//	    }
-//	    fmt.Println(event.Data)
-//	}
-//
-//	// Connect to an SSE endpoint
-//	client := sse.NewClient("https://api.example.com/stream")
 //	stream, err := client.Connect(ctx)
+//	if err != nil {
+//		return err
+//	}
+//	defer stream.Close()
 //	for event := range stream.Events() {
-//	    fmt.Println(event.Data)
+//		fmt.Println(event.Data)
 //	}
 package sse

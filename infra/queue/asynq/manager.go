@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -72,7 +73,10 @@ func DefaultConfig(redisConfig redisconn.Config) Config {
 
 func (c Config) normalize() (Config, error) {
 	c.Redis = c.Redis.Normalize()
-	if c.Concurrency <= 0 {
+	if c.Concurrency < 0 {
+		return Config{}, fmt.Errorf("%w: concurrency must not be negative", ErrInvalidConfig)
+	}
+	if c.Concurrency == 0 {
 		c.Concurrency = 10
 	}
 	if len(c.Queues) == 0 {
@@ -83,6 +87,9 @@ func (c Config) normalize() (Config, error) {
 		if err != nil {
 			return Config{}, err
 		}
+	}
+	if c.LogLevel < 0 || c.LogLevel > asynq.FatalLevel {
+		return Config{}, fmt.Errorf("%w: unsupported log level %d", ErrInvalidConfig, c.LogLevel)
 	}
 	if c.LogLevel == 0 {
 		c.LogLevel = asynq.InfoLevel
@@ -208,13 +215,30 @@ func (m *Manager) SetLogger(logger Logger) {
 	m.logger = logger
 }
 
-// RegisterHandler registers a task handler.
-func (m *Manager) RegisterHandler(taskType string, handler asynq.HandlerFunc) {
+// RegisterHandler 注册任务处理器。
+func (m *Manager) RegisterHandler(taskType string, handler asynq.HandlerFunc) error {
+	if strings.TrimSpace(taskType) == "" || handler == nil {
+		return fmt.Errorf("%w: task type and handler are required", ErrInvalidHandler)
+	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	if m.closed {
+		m.mu.Unlock()
+		return ErrManagerStopped
+	}
+	if m.started {
+		m.mu.Unlock()
+		return ErrManagerStarted
+	}
+	if _, exists := m.handlers[taskType]; exists {
+		m.mu.Unlock()
+		return fmt.Errorf("%w: %q", ErrHandlerAlreadyRegistered, taskType)
+	}
 	m.handlers[taskType] = handler
 	m.mux.HandleFunc(taskType, handler)
-	m.logger.Log(fmt.Sprintf("[Asynq] registered handler: %s", taskType))
+	logger := m.logger
+	m.mu.Unlock()
+	logger.Log(fmt.Sprintf("[Asynq] registered handler: %s", taskType))
+	return nil
 }
 
 // RegisterSchedule registers a recurring task to be installed by Start. Queue

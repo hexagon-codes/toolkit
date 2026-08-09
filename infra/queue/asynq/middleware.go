@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 // 中间件层
 // 提供日志、监控、恢复等横切关注点
 // =========================================
+
 // MiddlewareFunc 中间件函数类型
 type MiddlewareFunc func(asynq.Handler) asynq.Handler
 
@@ -165,6 +168,7 @@ func ChainMiddleware(middlewares ...MiddlewareFunc) MiddlewareFunc {
 // =========================================
 // 预配置的中间件组合
 // =========================================
+
 // DefaultMiddlewareChain 默认中间件链
 // 包含：恢复 → 日志 → 重试信息
 func DefaultMiddlewareChain(logger Logger) MiddlewareFunc {
@@ -252,11 +256,15 @@ func NewMetrics() *Metrics {
 		maxSamples: 1000, // 保留最近 1000 个样本
 	}
 }
+
+// IncrTaskProcessed 增加指定任务类型的已处理计数。
 func (m *Metrics) IncrTaskProcessed(taskType string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.processed[taskType]++
 }
+
+// IncrTaskSucceeded 增加指定任务类型的成功计数。
 func (m *Metrics) IncrTaskSucceeded(taskType string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -264,6 +272,8 @@ func (m *Metrics) IncrTaskSucceeded(taskType string) {
 	// 同步更新 Prometheus 指标
 	RecordTaskProcessed(taskType, "success")
 }
+
+// IncrTaskFailed 增加指定任务类型的失败计数。
 func (m *Metrics) IncrTaskFailed(taskType string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -271,6 +281,8 @@ func (m *Metrics) IncrTaskFailed(taskType string) {
 	// 同步更新 Prometheus 指标
 	RecordTaskProcessed(taskType, "failed")
 }
+
+// RecordTaskDuration 记录指定任务类型的执行耗时。
 func (m *Metrics) RecordTaskDuration(taskType string, d time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -308,31 +320,102 @@ func (m *Metrics) GetSnapshot() map[string]interface{} {
 // =========================================
 // 应用中间件到管理器
 // =========================================
-// WithMiddleware 为管理器设置中间件
-func (m *Manager) WithMiddleware(middleware MiddlewareFunc) {
+
+// WithMiddleware 为管理器设置中间件。
+func (m *Manager) WithMiddleware(middleware MiddlewareFunc) error {
+	if middleware == nil {
+		return ErrInvalidMiddleware
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		return ErrManagerStopped
+	}
+	if m.started {
+		return ErrManagerStarted
+	}
 	m.middleware = middleware
+	return nil
 }
 
-// RegisterHandlerWithMiddleware 注册带中间件的处理器
-func (m *Manager) RegisterHandlerWithMiddleware(taskType string, handler asynq.HandlerFunc) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.handlers[taskType] = handler
-	// 如果有中间件，包装处理器
-	if m.middleware != nil {
-		wrapped := m.middleware(asynq.HandlerFunc(handler))
-		m.mux.Handle(taskType, wrapped)
-	} else {
-		m.mux.HandleFunc(taskType, handler)
+// RegisterHandlerWithMiddleware 注册带中间件的处理器。
+func (m *Manager) RegisterHandlerWithMiddleware(taskType string, handler asynq.HandlerFunc) error {
+	if strings.TrimSpace(taskType) == "" || handler == nil {
+		return fmt.Errorf("%w: task type and handler are required", ErrInvalidHandler)
 	}
-	m.logger.Log(fmt.Sprintf("[Asynq] registered handler: %s", taskType))
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return ErrManagerStopped
+	}
+	if m.started {
+		m.mu.Unlock()
+		return ErrManagerStarted
+	}
+	if _, exists := m.handlers[taskType]; exists {
+		m.mu.Unlock()
+		return fmt.Errorf("%w: %q", ErrHandlerAlreadyRegistered, taskType)
+	}
+	middleware := m.middleware
+	m.mu.Unlock()
+
+	var wrapped asynq.Handler = handler
+	if middleware != nil {
+		var callbackErr error
+		func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					callbackErr = callbackPanicError("middleware callback", recovered)
+				}
+			}()
+			wrapped = middleware(handler)
+		}()
+		if callbackErr != nil {
+			return callbackErr
+		}
+		if isNilHandler(wrapped) {
+			return fmt.Errorf("%w: middleware returned a nil handler", ErrInvalidMiddleware)
+		}
+	}
+
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return ErrManagerStopped
+	}
+	if m.started {
+		m.mu.Unlock()
+		return ErrManagerStarted
+	}
+	if _, exists := m.handlers[taskType]; exists {
+		m.mu.Unlock()
+		return fmt.Errorf("%w: %q", ErrHandlerAlreadyRegistered, taskType)
+	}
+	m.handlers[taskType] = handler
+	m.mux.Handle(taskType, wrapped)
+	logger := m.logger
+	m.mu.Unlock()
+	logger.Log(fmt.Sprintf("[Asynq] registered handler: %s", taskType))
+	return nil
+}
+
+func isNilHandler(handler asynq.Handler) bool {
+	if handler == nil {
+		return true
+	}
+	value := reflect.ValueOf(handler)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 // =========================================
 // 便捷函数
 // =========================================
+
 // SetupProductionMode 配置生产模式
 // 自动添加：恢复、监控、日志、超时中间件
 func SetupProductionMode(defaultTimeout time.Duration) (*Metrics, error) {
@@ -342,7 +425,9 @@ func SetupProductionMode(defaultTimeout time.Duration) (*Metrics, error) {
 	}
 	metrics := NewMetrics()
 	middleware := ProductionMiddlewareChain(m.logger, metrics, defaultTimeout)
-	m.WithMiddleware(middleware)
+	if err := m.WithMiddleware(middleware); err != nil {
+		return nil, err
+	}
 	GetLogger().Log("[Asynq] production mode enabled with full middleware chain")
 	return metrics, nil
 }

@@ -18,7 +18,7 @@ func TestTaskState_String(t *testing.T) {
 		{StateSuccess, "SUCCESS"},
 		{StateFailure, "FAILURE"},
 		{StateTimeout, "TIMEOUT"},
-		{StateCancelled, "CANCELLED"},
+		{StateCanceled, "CANCELED"},
 		{StateDeadLetter, "DEAD_LETTER"},
 	}
 
@@ -73,7 +73,7 @@ func TestTaskStateMachine_AddTransition(t *testing.T) {
 	sm := NewTaskStateMachine()
 
 	// 添加自定义转换
-	sm.AddTransition(StateCreated, EventCancel, StateCancelled)
+	sm.AddTransition(StateCreated, EventCancel, StateCanceled)
 
 	// 验证转换已注册
 	canTransition := sm.CanTransition(StateCreated, EventCancel)
@@ -151,7 +151,7 @@ func TestTaskStateMachine_Transition_WithCondition(t *testing.T) {
 	sm.transitions[transitionKey{FromState: StateCreated, Event: EventCancel}] = StateTransition{
 		FromState: StateCreated,
 		Event:     EventCancel,
-		ToState:   StateCancelled,
+		ToState:   StateCanceled,
 		Condition: func(ctx *TransitionContext) bool {
 			return conditionMet
 		},
@@ -170,8 +170,8 @@ func TestTaskStateMachine_Transition_WithCondition(t *testing.T) {
 		t.Fatalf("transition failed: %v", err)
 	}
 
-	if newState != StateCancelled {
-		t.Errorf("expected new state CANCELLED, got %s", newState)
+	if newState != StateCanceled {
+		t.Errorf("expected new state CANCELED, got %s", newState)
 	}
 }
 
@@ -181,7 +181,7 @@ func TestTaskStateMachine_Transition_WithCallback(t *testing.T) {
 	callbackCalled := false
 
 	// 使用 AddTransitionWithCallback
-	sm.AddTransitionWithCallback(StateCreated, EventCancel, StateCancelled, func(ctx *TransitionContext) {
+	sm.AddTransitionWithCallback(StateCreated, EventCancel, StateCanceled, func(ctx *TransitionContext) {
 		callbackCalled = true
 	})
 
@@ -247,6 +247,12 @@ func TestTransitionContext(t *testing.T) {
 
 	if ctx.TaskID != "test-task" {
 		t.Errorf("expected TaskID 'test-task', got '%s'", ctx.TaskID)
+	}
+	if ctx.FromState != StateCreated || ctx.ToState != StatePending || ctx.Event != EventSubmit {
+		t.Errorf("unexpected transition: %+v", ctx)
+	}
+	if ctx.Timestamp.IsZero() {
+		t.Error("expected transition timestamp")
 	}
 
 	if ctx.Data["user_id"] != 123 {

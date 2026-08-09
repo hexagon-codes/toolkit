@@ -1,508 +1,363 @@
 package asynq
 
 import (
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/hexagon-codes/toolkit/util/circuit"
 )
 
-func TestCircuitState_String(t *testing.T) {
-	tests := []struct {
-		state    CircuitState
-		expected string
-	}{
-		{StateClosed, "CLOSED"},
-		{StateOpen, "OPEN"},
-		{StateHalfOpen, "HALF_OPEN"},
-		{CircuitState(999), "UNKNOWN"},
+func testCircuitConfig() CircuitBreakerConfig {
+	return CircuitBreakerConfig{
+		FailureThreshold:    1,
+		SuccessThreshold:    2,
+		Timeout:             5 * time.Millisecond,
+		HalfOpenMaxRequests: 2,
 	}
+}
 
-	for _, tt := range tests {
-		if got := tt.state.String(); got != tt.expected {
-			t.Errorf("state %d: expected %s, got %s", tt.state, tt.expected, got)
-		}
+func newTestCircuitBreaker(t *testing.T, name string, config CircuitBreakerConfig) *CircuitBreaker {
+	t.Helper()
+	breaker, err := NewCircuitBreaker(name, config)
+	if err != nil {
+		t.Fatalf("NewCircuitBreaker() error = %v", err)
 	}
+	t.Cleanup(breaker.Close)
+	return breaker
+}
+
+func newTestChannelManager(t *testing.T, config CircuitBreakerConfig) *ChannelCircuitBreakerManager {
+	t.Helper()
+	manager, err := NewChannelCircuitBreakerManager(config)
+	if err != nil {
+		t.Fatalf("NewChannelCircuitBreakerManager() error = %v", err)
+	}
+	t.Cleanup(manager.Close)
+	return manager
+}
+
+func newTestPlatformManager(t *testing.T, config CircuitBreakerConfig) *PlatformCircuitBreakerManager {
+	t.Helper()
+	manager, err := NewPlatformCircuitBreakerManager(config)
+	if err != nil {
+		t.Fatalf("NewPlatformCircuitBreakerManager() error = %v", err)
+	}
+	t.Cleanup(manager.Close)
+	return manager
 }
 
 func TestDefaultCircuitBreakerConfig(t *testing.T) {
 	config := DefaultCircuitBreakerConfig()
-
-	if config.FailureThreshold != 5 {
-		t.Errorf("expected FailureThreshold=5, got %d", config.FailureThreshold)
+	if config.FailureThreshold != 5 || config.SuccessThreshold != 2 {
+		t.Fatalf("unexpected thresholds: %+v", config)
 	}
-	if config.SuccessThreshold != 2 {
-		t.Errorf("expected SuccessThreshold=2, got %d", config.SuccessThreshold)
-	}
-	if config.Timeout != 30*time.Second {
-		t.Errorf("expected Timeout=30s, got %v", config.Timeout)
-	}
-	if config.HalfOpenMaxRequests != 3 {
-		t.Errorf("expected HalfOpenMaxRequests=3, got %d", config.HalfOpenMaxRequests)
+	if config.Timeout != 30*time.Second || config.HalfOpenMaxRequests != 3 {
+		t.Fatalf("unexpected timing config: %+v", config)
 	}
 }
 
-func TestCircuitBreaker_InitialState(t *testing.T) {
-	cb := NewCircuitBreaker("test", DefaultCircuitBreakerConfig())
-
-	if cb.State() != StateClosed {
-		t.Errorf("expected initial state CLOSED, got %s", cb.State())
+func TestCircuitBreakerRejectsInvalidConfig(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*CircuitBreakerConfig)
+	}{
+		{name: "failure threshold", mutate: func(config *CircuitBreakerConfig) { config.FailureThreshold = 0 }},
+		{name: "success threshold", mutate: func(config *CircuitBreakerConfig) { config.SuccessThreshold = 0 }},
+		{name: "timeout", mutate: func(config *CircuitBreakerConfig) { config.Timeout = 0 }},
+		{name: "half-open limit", mutate: func(config *CircuitBreakerConfig) { config.HalfOpenMaxRequests = 0 }},
 	}
-
-	if cb.IsOpen() {
-		t.Error("expected IsOpen=false initially")
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := DefaultCircuitBreakerConfig()
+			test.mutate(&config)
+			if _, err := NewCircuitBreaker("invalid", config); err == nil {
+				t.Fatal("NewCircuitBreaker() error = nil")
+			}
+		})
 	}
-}
-
-func TestCircuitBreaker_Allow_Closed(t *testing.T) {
-	cb := NewCircuitBreaker("test", DefaultCircuitBreakerConfig())
-
-	err := cb.Allow()
-	if err != nil {
-		t.Errorf("expected no error in CLOSED state, got: %v", err)
-	}
-}
-
-func TestCircuitBreaker_TransitionToOpen(t *testing.T) {
-	config := CircuitBreakerConfig{
-		FailureThreshold:    3,
-		SuccessThreshold:    2,
-		Timeout:             time.Second,
-		HalfOpenMaxRequests: 2,
-	}
-	cb := NewCircuitBreaker("test", config)
-
-	// 记录 3 次失败，触发熔断
-	for i := 0; i < 3; i++ {
-		cb.RecordFailure()
-	}
-
-	if cb.State() != StateOpen {
-		t.Errorf("expected state OPEN after %d failures, got %s", config.FailureThreshold, cb.State())
-	}
-
-	if !cb.IsOpen() {
-		t.Error("expected IsOpen=true after failures")
-	}
-
-	// 在 OPEN 状态下，Allow 应该返回错误
-	err := cb.Allow()
-	if err != ErrCircuitOpen {
-		t.Errorf("expected ErrCircuitOpen, got: %v", err)
+	if _, err := NewCircuitBreaker("", DefaultCircuitBreakerConfig()); err == nil {
+		t.Fatal("NewCircuitBreaker() accepted an empty name")
 	}
 }
 
-func TestCircuitBreaker_TransitionToHalfOpen(t *testing.T) {
-	config := CircuitBreakerConfig{
-		FailureThreshold:    2,
-		SuccessThreshold:    2,
-		Timeout:             100 * time.Millisecond,
-		HalfOpenMaxRequests: 3,
-	}
-	cb := NewCircuitBreaker("test", config)
+func TestCircuitBreakerAllowsSequentialRecoveryAboveHalfOpenConcurrency(t *testing.T) {
+	config := testCircuitConfig()
+	config.HalfOpenMaxRequests = 1
+	config.SuccessThreshold = 2
+	breaker := newTestCircuitBreaker(t, "sequential-recovery", config)
 
-	// 触发熔断
-	cb.RecordFailure()
-	cb.RecordFailure()
-
-	if cb.State() != StateOpen {
-		t.Fatal("expected state OPEN")
-	}
-
-	// 等待超时
-	time.Sleep(150 * time.Millisecond)
-
-	// 下次 Allow 应该转为 HALF_OPEN
-	err := cb.Allow()
-	if err != nil {
-		t.Errorf("expected no error when transitioning to HALF_OPEN, got: %v", err)
-	}
-
-	if cb.State() != StateHalfOpen {
-		t.Errorf("expected state HALF_OPEN, got %s", cb.State())
-	}
-}
-
-func TestCircuitBreaker_HalfOpen_LimitRequests(t *testing.T) {
-	config := CircuitBreakerConfig{
-		FailureThreshold:    2,
-		SuccessThreshold:    2,
-		Timeout:             100 * time.Millisecond,
-		HalfOpenMaxRequests: 2,
-	}
-	cb := NewCircuitBreaker("test", config)
-
-	// 触发熔断并进入半开状态
-	cb.RecordFailure()
-	cb.RecordFailure()
-	time.Sleep(150 * time.Millisecond)
-	cb.Allow() // 进入 HALF_OPEN
-
-	// 第一次允许
-	err := cb.Allow()
-	if err != nil {
-		t.Errorf("expected no error for first request, got: %v", err)
-	}
-
-	// 第二次允许
-	err = cb.Allow()
-	if err != nil {
-		t.Errorf("expected no error for second request, got: %v", err)
-	}
-
-	// 第三次应该被拒绝（超过限制）
-	err = cb.Allow()
-	if err != ErrCircuitHalfOpen {
-		t.Errorf("expected ErrCircuitHalfOpen, got: %v", err)
-	}
-}
-
-func TestCircuitBreaker_HalfOpen_SuccessRecovery(t *testing.T) {
-	config := CircuitBreakerConfig{
-		FailureThreshold:    2,
-		SuccessThreshold:    2,
-		Timeout:             100 * time.Millisecond,
-		HalfOpenMaxRequests: 3,
-	}
-	cb := NewCircuitBreaker("test", config)
-
-	// 触发熔断并进入半开状态
-	cb.RecordFailure()
-	cb.RecordFailure()
-	time.Sleep(150 * time.Millisecond)
-	cb.Allow() // 进入 HALF_OPEN
-
-	// 记录 2 次成功，应该恢复到 CLOSED
-	cb.RecordSuccess()
-	if cb.State() == StateClosed {
-		t.Error("should not transition to CLOSED after only 1 success")
-	}
-
-	cb.RecordSuccess()
-	if cb.State() != StateClosed {
-		t.Errorf("expected state CLOSED after %d successes, got %s", config.SuccessThreshold, cb.State())
-	}
-}
-
-func TestCircuitBreaker_HalfOpen_FailureReopen(t *testing.T) {
-	config := CircuitBreakerConfig{
-		FailureThreshold:    2,
-		SuccessThreshold:    2,
-		Timeout:             100 * time.Millisecond,
-		HalfOpenMaxRequests: 3,
-	}
-	cb := NewCircuitBreaker("test", config)
-
-	// 触发熔断并进入半开状态
-	cb.RecordFailure()
-	cb.RecordFailure()
-	time.Sleep(150 * time.Millisecond)
-	cb.Allow() // 进入 HALF_OPEN
-
-	// 记录失败，应该立即回到 OPEN
-	cb.RecordFailure()
-	if cb.State() != StateOpen {
-		t.Errorf("expected state OPEN after failure in HALF_OPEN, got %s", cb.State())
-	}
-}
-
-func TestCircuitBreaker_Reset(t *testing.T) {
-	cb := NewCircuitBreaker("test", DefaultCircuitBreakerConfig())
-
-	// 触发熔断
-	for i := 0; i < 5; i++ {
-		cb.RecordFailure()
-	}
-
-	if cb.State() != StateOpen {
-		t.Fatal("expected state OPEN")
-	}
-
-	// 重置
-	cb.Reset()
-
-	if cb.State() != StateClosed {
-		t.Errorf("expected state CLOSED after reset, got %s", cb.State())
-	}
-
-	stats := cb.Stats()
-	if stats.FailureCount != 0 {
-		t.Errorf("expected FailureCount=0 after reset, got %d", stats.FailureCount)
-	}
-}
-
-func TestCircuitBreaker_Stats(t *testing.T) {
-	cb := NewCircuitBreaker("test-breaker", DefaultCircuitBreakerConfig())
-
-	cb.RecordFailure()
-	cb.RecordFailure()
-
-	stats := cb.Stats()
-
-	if stats.Name != "test-breaker" {
-		t.Errorf("expected name 'test-breaker', got '%s'", stats.Name)
-	}
-	if stats.State != "CLOSED" {
-		t.Errorf("expected state 'CLOSED', got '%s'", stats.State)
-	}
-	if stats.FailureCount != 2 {
-		t.Errorf("expected FailureCount=2, got %d", stats.FailureCount)
-	}
-	if stats.ConsecutiveErrors != 2 {
-		t.Errorf("expected ConsecutiveErrors=2, got %d", stats.ConsecutiveErrors)
-	}
-}
-
-func TestCircuitBreaker_OnStateChange(t *testing.T) {
-	var changeCount atomic.Int32
-	var mu sync.Mutex
-	var lastFrom, lastTo CircuitState
-
-	config := CircuitBreakerConfig{
-		FailureThreshold:    2,
-		SuccessThreshold:    2,
-		Timeout:             100 * time.Millisecond,
-		HalfOpenMaxRequests: 2,
-		OnStateChange: func(name string, from, to CircuitState) {
-			changeCount.Add(1)
-			mu.Lock()
-			lastFrom = from
-			lastTo = to
-			mu.Unlock()
-		},
-	}
-
-	cb := NewCircuitBreaker("test", config)
-
-	// 触发熔断
-	cb.RecordFailure()
-	cb.RecordFailure()
-
-	// 等待回调执行
-	time.Sleep(50 * time.Millisecond)
-
-	if changeCount.Load() != 1 {
-		t.Errorf("expected 1 state change, got %d", changeCount.Load())
-	}
-	mu.Lock()
-	from, to := lastFrom, lastTo
-	mu.Unlock()
-	if from != StateClosed || to != StateOpen {
-		t.Errorf("expected CLOSED -> OPEN, got %s -> %s", from, to)
-	}
-}
-
-func TestChannelBreakerManager_GetBreaker(t *testing.T) {
-	manager := GetChannelBreakerManager()
-
-	breaker1 := manager.GetBreaker(123)
-	breaker2 := manager.GetBreaker(123)
-
-	// 应该返回同一个实例
-	if breaker1 != breaker2 {
-		t.Error("expected same breaker instance for same channel ID")
-	}
-
-	breaker3 := manager.GetBreaker(456)
-	if breaker1 == breaker3 {
-		t.Error("expected different breaker instances for different channel IDs")
-	}
-}
-
-func TestChannelBreakerManager_Allow(t *testing.T) {
-	manager := GetChannelBreakerManager()
-	manager.SetConfig(CircuitBreakerConfig{
-		FailureThreshold:    2,
-		SuccessThreshold:    2,
-		Timeout:             time.Second,
-		HalfOpenMaxRequests: 2,
+	_, _ = breaker.Execute(func() (any, error) {
+		return nil, errors.New("upstream failed")
 	})
+	time.Sleep(10 * time.Millisecond)
 
-	channelID := 999
-
-	// 初始应该允许
-	err := manager.Allow(channelID)
+	first, err := breaker.Acquire()
 	if err != nil {
-		t.Errorf("expected no error initially, got: %v", err)
+		t.Fatalf("first half-open Acquire() error = %v", err)
+	}
+	if completeErr := first.Complete(nil); completeErr != nil {
+		t.Fatalf("first Complete() error = %v", completeErr)
+	}
+	if breaker.State() != StateHalfOpen {
+		t.Fatalf("State() after first success = %s, want half-open", breaker.State())
 	}
 
-	// 触发熔断
-	manager.RecordFailure(channelID)
-	manager.RecordFailure(channelID)
-
-	// 应该被拒绝
-	err = manager.Allow(channelID)
-	if err != ErrCircuitOpen {
-		t.Errorf("expected ErrCircuitOpen, got: %v", err)
+	second, err := breaker.Acquire()
+	if err != nil {
+		t.Fatalf("second half-open Acquire() error = %v", err)
 	}
-
-	// 检查熔断状态
-	if !manager.IsOpen(channelID) {
-		t.Error("expected IsOpen=true")
+	if err := second.Complete(nil); err != nil {
+		t.Fatalf("second Complete() error = %v", err)
+	}
+	if breaker.State() != StateClosed {
+		t.Fatalf("State() after sequential recovery = %s, want closed", breaker.State())
 	}
 }
 
-func TestChannelBreakerManager_Reset(t *testing.T) {
-	manager := GetChannelBreakerManager()
-	manager.SetConfig(CircuitBreakerConfig{
-		FailureThreshold:    2,
-		SuccessThreshold:    2,
-		Timeout:             time.Second,
-		HalfOpenMaxRequests: 2,
+func TestCircuitBreakerLifecycle(t *testing.T) {
+	breaker := newTestCircuitBreaker(t, "lifecycle", testCircuitConfig())
+	if breaker.State() != StateClosed {
+		t.Fatalf("initial State() = %s", breaker.State())
+	}
+	_, err := breaker.Execute(func() (any, error) {
+		return nil, errors.New("upstream failed")
 	})
-
-	channelID := 888
-
-	// 触发熔断
-	manager.RecordFailure(channelID)
-	manager.RecordFailure(channelID)
-
-	if !manager.IsOpen(channelID) {
-		t.Fatal("expected breaker to be open")
+	if err == nil || breaker.State() != StateOpen {
+		t.Fatalf("failure result = (%v, %s)", err, breaker.State())
+	}
+	if _, acquireErr := breaker.Acquire(); !errors.Is(acquireErr, ErrCircuitOpen) {
+		t.Fatalf("Acquire() error = %v, want ErrCircuitOpen", acquireErr)
 	}
 
-	// 重置
-	manager.Reset(channelID)
-
-	if manager.IsOpen(channelID) {
-		t.Error("expected breaker to be closed after reset")
+	time.Sleep(10 * time.Millisecond)
+	first, err := breaker.Acquire()
+	if err != nil {
+		t.Fatalf("first half-open Acquire() error = %v", err)
+	}
+	second, err := breaker.Acquire()
+	if err != nil {
+		t.Fatalf("second half-open Acquire() error = %v", err)
+	}
+	if _, err := breaker.Acquire(); !errors.Is(err, ErrCircuitHalfOpen) {
+		t.Fatalf("third half-open Acquire() error = %v", err)
+	}
+	if err := first.Complete(nil); err != nil {
+		t.Fatalf("first Complete() error = %v", err)
+	}
+	if err := second.Complete(nil); err != nil {
+		t.Fatalf("second Complete() error = %v", err)
+	}
+	if breaker.State() != StateClosed {
+		t.Fatalf("recovered State() = %s", breaker.State())
 	}
 }
 
-func TestChannelBreakerManager_GetAllStats(t *testing.T) {
-	manager := GetChannelBreakerManager()
+func TestCircuitBreakerIgnoresStaleHalfOpenCompletion(t *testing.T) {
+	breaker := newTestCircuitBreaker(t, "stale", testCircuitConfig())
+	_, _ = breaker.Execute(func() (any, error) { return nil, errors.New("failed") })
+	time.Sleep(10 * time.Millisecond)
+	first, err := breaker.Acquire()
+	if err != nil {
+		t.Fatalf("first Acquire() error = %v", err)
+	}
+	second, err := breaker.Acquire()
+	if err != nil {
+		t.Fatalf("second Acquire() error = %v", err)
+	}
+	if err := first.Complete(errors.New("failed again")); err != nil {
+		t.Fatalf("first Complete() error = %v", err)
+	}
+	if err := second.Complete(nil); err != nil {
+		t.Fatalf("stale Complete() error = %v", err)
+	}
+	if breaker.State() != StateOpen {
+		t.Fatalf("State() = %s, want open", breaker.State())
+	}
+}
 
-	// 创建几个熔断器
-	manager.GetBreaker(1001)
-	manager.GetBreaker(1002)
-	manager.GetBreaker(1003)
+func TestCircuitBreakerCallbackIsSynchronousAndPanicSafe(t *testing.T) {
+	var calls atomic.Int32
+	config := testCircuitConfig()
+	config.OnStateChange = func(_ string, from, to CircuitState) {
+		if from != StateClosed || to != StateOpen {
+			t.Fatalf("state change = %s -> %s", from, to)
+		}
+		calls.Add(1)
+		panic("callback panic")
+	}
+	breaker := newTestCircuitBreaker(t, "callback", config)
+	_, _ = breaker.Execute(func() (any, error) { return nil, errors.New("failed") })
+	if calls.Load() != 1 {
+		t.Fatalf("callback calls = %d", calls.Load())
+	}
+}
 
+func TestCircuitBreakerStatsAndReset(t *testing.T) {
+	config := testCircuitConfig()
+	config.FailureThreshold = 3
+	breaker := newTestCircuitBreaker(t, "stats", config)
+	_, _ = breaker.Execute(func() (any, error) { return nil, errors.New("failed") })
+	stats := breaker.Stats()
+	if stats.Name != "stats" || stats.State != "closed" || stats.FailureCount != 1 {
+		t.Fatalf("Stats() = %+v", stats)
+	}
+	if stats.LastFailureTime.IsZero() || stats.LastUsedTime.IsZero() {
+		t.Fatalf("Stats() timestamps = %+v", stats)
+	}
+	if err := breaker.Reset(); err != nil {
+		t.Fatalf("Reset() error = %v", err)
+	}
+	if reset := breaker.Stats(); reset.FailureCount != 0 || reset.State != "closed" {
+		t.Fatalf("reset Stats() = %+v", reset)
+	}
+}
+
+func TestChannelCircuitBreakerManagerIsIsolatedAndDeterministic(t *testing.T) {
+	manager := newTestChannelManager(t, testCircuitConfig())
+	first, err := manager.GetBreaker(2)
+	if err != nil {
+		t.Fatalf("GetBreaker(2) error = %v", err)
+	}
+	same, err := manager.GetBreaker(2)
+	if err != nil || same != first {
+		t.Fatalf("second GetBreaker(2) = (%p, %v)", same, err)
+	}
+	_, _ = manager.Execute(2, func() (any, error) { return nil, errors.New("failed") })
+	_, _ = manager.GetBreaker(1)
+	if open := manager.GetOpenBreakers(); len(open) != 1 || open[0] != 2 {
+		t.Fatalf("GetOpenBreakers() = %v", open)
+	}
 	stats := manager.GetAllStats()
-	if len(stats) < 3 {
-		t.Errorf("expected at least 3 stats, got %d", len(stats))
+	if len(stats) != 2 || stats[0].Name != "channel_1" || stats[1].Name != "channel_2" {
+		t.Fatalf("GetAllStats() = %+v", stats)
+	}
+	if resetErr := manager.ResetAll(); resetErr != nil {
+		t.Fatalf("ResetAll() error = %v", resetErr)
+	}
+	open, err := manager.IsOpen(2)
+	if err != nil || open {
+		t.Fatalf("IsOpen(2) = (%v, %v)", open, err)
 	}
 }
 
-func TestChannelBreakerManager_GetOpenBreakers(t *testing.T) {
-	manager := GetChannelBreakerManager()
-	manager.SetConfig(CircuitBreakerConfig{
-		FailureThreshold:    2,
-		SuccessThreshold:    2,
-		Timeout:             time.Second,
-		HalfOpenMaxRequests: 2,
-	})
-
-	// 触发一个熔断
-	manager.RecordFailure(2001)
-	manager.RecordFailure(2001)
-
-	openBreakers := manager.GetOpenBreakers()
-	found := false
-	for _, id := range openBreakers {
-		if id == 2001 {
-			found = true
-			break
+func TestChannelCircuitBreakerManagerConcurrentGet(t *testing.T) {
+	manager := newTestChannelManager(t, testCircuitConfig())
+	const workers = 64
+	results := make(chan *CircuitBreaker, workers)
+	errorsChannel := make(chan error, workers)
+	var waitGroup sync.WaitGroup
+	for range workers {
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			breaker, err := manager.GetBreaker(7)
+			results <- breaker
+			errorsChannel <- err
+		}()
+	}
+	waitGroup.Wait()
+	close(results)
+	close(errorsChannel)
+	for err := range errorsChannel {
+		if err != nil {
+			t.Fatalf("GetBreaker() error = %v", err)
 		}
 	}
-
-	if !found {
-		t.Error("expected channel 2001 to be in open breakers list")
+	var expected *CircuitBreaker
+	for breaker := range results {
+		if expected == nil {
+			expected = breaker
+		}
+		if breaker != expected {
+			t.Fatal("GetBreaker() created duplicate instances")
+		}
 	}
 }
 
-func TestChannelBreakerManager_ResetAll(t *testing.T) {
-	manager := GetChannelBreakerManager()
-	manager.SetConfig(CircuitBreakerConfig{
-		FailureThreshold:    2,
-		SuccessThreshold:    2,
-		Timeout:             time.Second,
-		HalfOpenMaxRequests: 2,
-	})
-
-	// 触发多个熔断
-	manager.RecordFailure(3001)
-	manager.RecordFailure(3001)
-	manager.RecordFailure(3002)
-	manager.RecordFailure(3002)
-
-	// 重置所有
-	manager.ResetAll()
-
-	if manager.IsOpen(3001) || manager.IsOpen(3002) {
-		t.Error("expected all breakers to be closed after ResetAll")
-	}
-}
-
-func TestPlatformBreakerManager_GetBreaker(t *testing.T) {
-	manager := GetPlatformBreakerManager()
-
-	breaker1 := manager.GetBreaker("openai")
-	breaker2 := manager.GetBreaker("openai")
-
-	// 应该返回同一个实例
-	if breaker1 != breaker2 {
-		t.Error("expected same breaker instance for same platform")
-	}
-
-	breaker3 := manager.GetBreaker("anthropic")
-	if breaker1 == breaker3 {
-		t.Error("expected different breaker instances for different platforms")
-	}
-}
-
-func TestPlatformBreakerManager_Basic(t *testing.T) {
-	manager := GetPlatformBreakerManager()
-
-	platform := "test-platform"
-
-	// 初始应该允许
-	err := manager.Allow(platform)
+func TestCleanupIdleClosesOnlyExpiredBreakers(t *testing.T) {
+	manager := newTestChannelManager(t, testCircuitConfig())
+	breaker, err := manager.GetBreaker(8)
 	if err != nil {
-		t.Errorf("expected no error initially, got: %v", err)
+		t.Fatalf("GetBreaker() error = %v", err)
 	}
+	removed, err := manager.CleanupIdle(time.Hour)
+	if err != nil || removed != 0 {
+		t.Fatalf("first CleanupIdle() = (%d, %v)", removed, err)
+	}
+	breaker.lastUsed.Store(time.Now().Add(-2 * time.Hour).UnixNano())
+	removed, err = manager.CleanupIdle(time.Hour)
+	if err != nil || removed != 1 {
+		t.Fatalf("second CleanupIdle() = (%d, %v)", removed, err)
+	}
+	if _, err := breaker.Acquire(); !errors.Is(err, circuit.ErrBreakerClosed) {
+		t.Fatalf("removed breaker Acquire() error = %v", err)
+	}
+}
 
-	// 记录成功
-	manager.RecordSuccess(platform)
-
-	// 仍然应该允许
-	err = manager.Allow(platform)
+func TestCleanupIdlePreservesBreakerWithActivePermit(t *testing.T) {
+	manager := newTestChannelManager(t, testCircuitConfig())
+	breaker, err := manager.GetBreaker(9)
 	if err != nil {
-		t.Errorf("expected no error after success, got: %v", err)
+		t.Fatalf("GetBreaker() error = %v", err)
+	}
+	permit, err := breaker.Acquire()
+	if err != nil {
+		t.Fatalf("Acquire() error = %v", err)
+	}
+	breaker.lastUsed.Store(time.Now().Add(-2 * time.Hour).UnixNano())
+
+	removed, err := manager.CleanupIdle(time.Hour)
+	if err != nil || removed != 0 {
+		t.Fatalf("CleanupIdle() with active permit = (%d, %v), want (0, nil)", removed, err)
+	}
+	if completeErr := permit.Complete(nil); completeErr != nil {
+		t.Fatalf("active permit Complete() error = %v", completeErr)
+	}
+
+	breaker.lastUsed.Store(time.Now().Add(-2 * time.Hour).UnixNano())
+	removed, err = manager.CleanupIdle(time.Hour)
+	if err != nil || removed != 1 {
+		t.Fatalf("CleanupIdle() after completion = (%d, %v), want (1, nil)", removed, err)
 	}
 }
 
-func TestPlatformBreakerManager_GetAllStats(t *testing.T) {
-	manager := GetPlatformBreakerManager()
-
-	// 创建几个熔断器
-	manager.GetBreaker("platform1")
-	manager.GetBreaker("platform2")
-
-	stats := manager.GetAllStats()
-	if len(stats) < 2 {
-		t.Errorf("expected at least 2 stats, got %d", len(stats))
+func TestPlatformCircuitBreakerManager(t *testing.T) {
+	manager := newTestPlatformManager(t, testCircuitConfig())
+	if _, err := manager.GetBreaker(""); err == nil {
+		t.Fatal("GetBreaker() accepted an empty platform")
+	}
+	first, err := manager.GetBreaker("openai")
+	if err != nil {
+		t.Fatalf("GetBreaker(openai) error = %v", err)
+	}
+	second, err := manager.GetBreaker("openai")
+	if err != nil || first != second {
+		t.Fatalf("second GetBreaker(openai) = (%p, %v)", second, err)
+	}
+	_, _ = manager.Execute("openai", func() (any, error) { return nil, errors.New("failed") })
+	open, err := manager.IsOpen("openai")
+	if err != nil || !open {
+		t.Fatalf("IsOpen(openai) = (%v, %v)", open, err)
+	}
+	if err := manager.Reset("openai"); err != nil {
+		t.Fatalf("Reset(openai) error = %v", err)
+	}
+	if stats := manager.GetAllStats(); len(stats) != 1 || stats[0].Name != "platform_openai" {
+		t.Fatalf("GetAllStats() = %+v", stats)
 	}
 }
 
-func TestCircuitBreaker_RecordSuccess_InClosedState(t *testing.T) {
-	cb := NewCircuitBreaker("test", DefaultCircuitBreakerConfig())
-
-	cb.RecordFailure()
-	cb.RecordFailure()
-
-	stats := cb.Stats()
-	if stats.FailureCount != 2 {
-		t.Fatal("expected 2 failures")
+func TestCircuitBreakerManagerCloseRejectsNewWork(t *testing.T) {
+	manager, err := NewChannelCircuitBreakerManager(testCircuitConfig())
+	if err != nil {
+		t.Fatalf("NewChannelCircuitBreakerManager() error = %v", err)
 	}
-
-	// 记录成功应该重置失败计数
-	cb.RecordSuccess()
-
-	stats = cb.Stats()
-	if stats.FailureCount != 0 {
-		t.Errorf("expected FailureCount=0 after success in CLOSED, got %d", stats.FailureCount)
-	}
-	if stats.ConsecutiveErrors != 0 {
-		t.Errorf("expected ConsecutiveErrors=0, got %d", stats.ConsecutiveErrors)
+	manager.Close()
+	manager.Close()
+	if _, err := manager.GetBreaker(1); !errors.Is(err, circuit.ErrBreakerClosed) {
+		t.Fatalf("GetBreaker() after Close error = %v", err)
 	}
 }

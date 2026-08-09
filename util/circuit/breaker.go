@@ -3,20 +3,21 @@ package circuit
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
-// State 熔断器状态
+// State 表示熔断器状态。
 type State int32
 
 const (
-	// StateClosed 关闭状态（正常）
+	// StateClosed 表示正常放行请求。
 	StateClosed State = iota
-	// StateOpen 打开状态（熔断）
+	// StateOpen 表示拒绝请求。
 	StateOpen
-	// StateHalfOpen 半开状态（探测）
+	// StateHalfOpen 表示限量探测恢复状态。
 	StateHalfOpen
 )
 
@@ -34,69 +35,72 @@ func (s State) String() string {
 }
 
 var (
-	// ErrCircuitOpen 熔断器打开
+	// ErrCircuitOpen 表示熔断器正在拒绝请求。
 	ErrCircuitOpen = errors.New("circuit breaker is open")
-	// ErrTooManyRequests 半开状态下请求过多
+	// ErrTooManyRequests 表示半开探测请求已达到并发上限。
 	ErrTooManyRequests = errors.New("too many requests in half-open state")
+	// ErrBreakerClosed 表示熔断器生命周期已经结束。
+	ErrBreakerClosed = errors.New("circuit breaker is closed")
+	// ErrPermitCompleted 表示请求许可已经提交过结果。
+	ErrPermitCompleted = errors.New("circuit permit is already completed")
 )
 
-// Config 熔断器配置
+// Config 定义熔断策略。
 type Config struct {
-	// Threshold 失败阈值，达到后触发熔断
+	// Threshold 是连续失败达到熔断状态所需的次数。
 	Threshold int
-	// Timeout 熔断持续时间
+	// Timeout 是打开状态持续到允许恢复探测的时间。
 	Timeout time.Duration
-	// HalfOpenMaxRequests 半开状态下允许的最大请求数
+	// HalfOpenMaxRequests 是半开状态允许的最大并发探测数。
 	HalfOpenMaxRequests int
-	// SuccessThreshold 半开状态下恢复所需的连续成功次数
+	// SuccessThreshold 是半开状态恢复关闭所需的连续成功次数。
 	SuccessThreshold int
-	// IsFailure 判断是否为失败（默认任何错误都是失败）
+	// IsFailure 判断一次执行结果是否应计为失败。
 	IsFailure func(error) bool
-	// OnStateChange 状态变更回调
+	// OnStateChange 在状态变化后执行。
 	OnStateChange func(from, to State)
-	// Now 时间函数（用于测试）
+	// Now 提供当前时间，主要用于确定性测试。
 	Now func() time.Time
 }
 
-// Option 配置选项
+// Option 修改熔断策略。
 type Option func(*Config)
 
-// WithThreshold 设置失败阈值
+// WithThreshold 设置连续失败阈值。
 func WithThreshold(n int) Option {
-	return func(c *Config) { c.Threshold = n }
+	return func(config *Config) { config.Threshold = n }
 }
 
-// WithTimeout 设置熔断超时时间
-func WithTimeout(d time.Duration) Option {
-	return func(c *Config) { c.Timeout = d }
+// WithTimeout 设置打开状态持续时间。
+func WithTimeout(duration time.Duration) Option {
+	return func(config *Config) { config.Timeout = duration }
 }
 
-// WithHalfOpenMaxRequests 设置半开状态最大请求数
+// WithHalfOpenMaxRequests 设置半开探测并发上限。
 func WithHalfOpenMaxRequests(n int) Option {
-	return func(c *Config) { c.HalfOpenMaxRequests = n }
+	return func(config *Config) { config.HalfOpenMaxRequests = n }
 }
 
-// WithSuccessThreshold 设置恢复所需成功次数
+// WithSuccessThreshold 设置恢复所需的连续成功次数。
 func WithSuccessThreshold(n int) Option {
-	return func(c *Config) { c.SuccessThreshold = n }
+	return func(config *Config) { config.SuccessThreshold = n }
 }
 
-// WithIsFailure 设置失败判断函数
-func WithIsFailure(fn func(error) bool) Option {
-	return func(c *Config) { c.IsFailure = fn }
+// WithIsFailure 设置失败分类函数。
+func WithIsFailure(classify func(error) bool) Option {
+	return func(config *Config) { config.IsFailure = classify }
 }
 
-// WithOnStateChange 设置状态变更回调
-func WithOnStateChange(fn func(from, to State)) Option {
-	return func(c *Config) { c.OnStateChange = fn }
+// WithOnStateChange 设置状态变化回调。
+func WithOnStateChange(callback func(from, to State)) Option {
+	return func(config *Config) { config.OnStateChange = callback }
 }
 
-// WithNow 设置时间函数
-func WithNow(fn func() time.Time) Option {
-	return func(c *Config) { c.Now = fn }
+// WithNow 设置时钟函数。
+func WithNow(now func() time.Time) Option {
+	return func(config *Config) { config.Now = now }
 }
 
-// defaultConfig 默认配置
 func defaultConfig() Config {
 	return Config{
 		Threshold:           5,
@@ -110,536 +114,543 @@ func defaultConfig() Config {
 	}
 }
 
-// Breaker 熔断器
+func buildConfig(options ...Option) (Config, error) {
+	config := defaultConfig()
+	for index, option := range options {
+		if option == nil {
+			return Config{}, fmt.Errorf("circuit: option %d must not be nil", index)
+		}
+		option(&config)
+	}
+	switch {
+	case config.Threshold <= 0:
+		return Config{}, errors.New("circuit: threshold must be positive")
+	case config.Timeout <= 0:
+		return Config{}, errors.New("circuit: timeout must be positive")
+	case config.HalfOpenMaxRequests <= 0:
+		return Config{}, errors.New("circuit: half-open max requests must be positive")
+	case config.SuccessThreshold <= 0:
+		return Config{}, errors.New("circuit: success threshold must be positive")
+	case config.IsFailure == nil:
+		return Config{}, errors.New("circuit: failure classifier must not be nil")
+	case config.Now == nil:
+		return Config{}, errors.New("circuit: clock must not be nil")
+	default:
+		return config, nil
+	}
+}
+
+// Breaker 通过状态代际隔离并发请求的完成结果。
 type Breaker struct {
 	config Config
 
-	state           atomic.Int32
-	failures        atomic.Int32
-	successes       atomic.Int32
-	halfOpenCount   atomic.Int32
-	pendingHalfOpen atomic.Int32 // 手动 API（Allow）的半开请求计数，用于 Success/Failure 正确递减
-	lastFailureAt   atomic.Int64
-	openedAt        atomic.Int64
-
 	mu             sync.Mutex
+	state          State
+	generation     uint64
+	failures       int
+	successes      int
+	halfOpenCount  int
+	lastFailureAt  time.Time
+	openedAt       time.Time
 	stateListeners []func(from, to State)
-
-	// notifyCh 用于保序通知状态变更，单一 goroutine 消费确保顺序
-	notifyCh   chan stateChangeEvent
-	notifyOnce sync.Once
+	closed         atomic.Bool
 }
 
-// stateChangeEvent 状态变更事件
+// Permit 表示一次已获准执行的请求。
+// 每个许可必须且只能调用一次 Complete。
+type Permit struct {
+	breaker    *Breaker
+	generation uint64
+	state      State
+	completed  atomic.Bool
+}
+
 type stateChangeEvent struct {
 	from, to  State
 	listeners []func(from, to State)
 }
 
-// New 创建熔断器
-func New(opts ...Option) *Breaker {
-	cfg := defaultConfig()
-	for _, opt := range opts {
-		opt(&cfg)
+// New 创建并校验熔断器。
+func New(options ...Option) (*Breaker, error) {
+	config, err := buildConfig(options...)
+	if err != nil {
+		return nil, err
 	}
-
-	b := &Breaker{
-		config: cfg,
-	}
-
-	if cfg.OnStateChange != nil {
-		b.stateListeners = append(b.stateListeners, cfg.OnStateChange)
-	}
-
-	return b
+	return newBreaker(config), nil
 }
 
-// State 返回当前状态
+func newBreaker(config Config) *Breaker {
+	breaker := &Breaker{config: config, state: StateClosed}
+	if config.OnStateChange != nil {
+		breaker.stateListeners = append(breaker.stateListeners, config.OnStateChange)
+	}
+	return breaker
+}
+
+// State 返回当前状态。
 func (b *Breaker) State() State {
-	return State(b.state.Load())
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.state
 }
 
-// Execute 执行函数
-func (b *Breaker) Execute(fn func() (any, error)) (any, error) {
-	wasHalfOpen, err := b.beforeExecute()
-	if err != nil {
-		return nil, err
+// Acquire 获取一次请求许可。
+func (b *Breaker) Acquire() (*Permit, error) {
+	if b.closed.Load() {
+		return nil, ErrBreakerClosed
 	}
 
-	result, err := fn()
-	b.afterExecute(err, wasHalfOpen)
-	return result, err
+	var event *stateChangeEvent
+	b.mu.Lock()
+	if b.closed.Load() {
+		b.mu.Unlock()
+		return nil, ErrBreakerClosed
+	}
+	if b.state == StateOpen {
+		if b.config.Now().Sub(b.openedAt) < b.config.Timeout {
+			b.mu.Unlock()
+			return nil, ErrCircuitOpen
+		}
+		event = b.transitionLocked(StateHalfOpen)
+	}
+	if b.state == StateHalfOpen {
+		if b.halfOpenCount >= b.config.HalfOpenMaxRequests {
+			b.mu.Unlock()
+			return nil, ErrTooManyRequests
+		}
+		b.halfOpenCount++
+	}
+	permit := &Permit{breaker: b, generation: b.generation, state: b.state}
+	b.mu.Unlock()
+	invokeStateChange(event)
+	return permit, nil
 }
 
-// ExecuteContext 执行带上下文的函数
-func (b *Breaker) ExecuteContext(ctx context.Context, fn func(context.Context) (any, error)) (any, error) {
-	wasHalfOpen, err := b.beforeExecute()
-	if err != nil {
-		return nil, err
+// Complete 提交本次请求结果。
+func (p *Permit) Complete(resultErr error) error {
+	if p == nil || p.breaker == nil {
+		return errors.New("circuit: permit must not be nil")
 	}
-
-	result, err := fn(ctx)
-	b.afterExecute(err, wasHalfOpen)
-	return result, err
+	if !p.completed.CompareAndSwap(false, true) {
+		return ErrPermitCompleted
+	}
+	return p.breaker.complete(p, resultErr)
 }
 
-// Allow 检查是否允许请求通过
-//
-// 返回值：allowed 为 true 时表示请求在半开状态下被允许（已递增 halfOpenCount），
-// 调用者应在完成请求后调用 Success() 或 Failure() 以确保 halfOpenCount 正确递减。
-func (b *Breaker) Allow() error {
-	wasHalfOpen, err := b.beforeExecute()
-	if err != nil {
-		return err
+func (b *Breaker) complete(permit *Permit, resultErr error) error {
+	if b.closed.Load() {
+		return ErrBreakerClosed
 	}
-	if wasHalfOpen {
-		b.pendingHalfOpen.Add(1)
+	isFailure := classifyFailure(b.config.IsFailure, resultErr)
+
+	var event *stateChangeEvent
+	b.mu.Lock()
+	if b.closed.Load() {
+		b.mu.Unlock()
+		return ErrBreakerClosed
 	}
+	if permit.generation != b.generation || permit.state != b.state {
+		b.mu.Unlock()
+		return nil
+	}
+
+	switch permit.state {
+	case StateClosed:
+		if isFailure {
+			b.failures++
+			b.lastFailureAt = b.config.Now()
+			if b.failures >= b.config.Threshold {
+				event = b.transitionLocked(StateOpen)
+			}
+		} else {
+			b.failures = 0
+		}
+	case StateHalfOpen:
+		b.halfOpenCount--
+		if isFailure {
+			b.lastFailureAt = b.config.Now()
+			event = b.transitionLocked(StateOpen)
+		} else {
+			b.successes++
+			if b.successes >= b.config.SuccessThreshold {
+				event = b.transitionLocked(StateClosed)
+			}
+		}
+	}
+	b.mu.Unlock()
+	invokeStateChange(event)
 	return nil
 }
 
-// Success 报告成功
-func (b *Breaker) Success() {
-	wasHalfOpen := b.consumePendingHalfOpen()
-	b.afterExecute(nil, wasHalfOpen)
+func classifyFailure(classify func(error) bool, resultErr error) (failure bool) {
+	failure = true
+	defer func() {
+		if recover() != nil {
+			failure = true
+		}
+	}()
+	return classify(resultErr)
 }
 
-// Failure 报告失败
-func (b *Breaker) Failure() {
-	wasHalfOpen := b.consumePendingHalfOpen()
-	b.afterExecute(errors.New("manual failure"), wasHalfOpen)
-}
-
-// consumePendingHalfOpen 消费一个待处理的半开请求标记
-func (b *Breaker) consumePendingHalfOpen() bool {
-	for {
-		current := b.pendingHalfOpen.Load()
-		if current <= 0 {
-			return false
-		}
-		if b.pendingHalfOpen.CompareAndSwap(current, current-1) {
-			return true
-		}
+// Execute 执行函数并自动完成请求许可。
+func (b *Breaker) Execute(run func() (any, error)) (result any, resultErr error) {
+	if run == nil {
+		return nil, errors.New("circuit: execute function must not be nil")
 	}
+	permit, err := b.Acquire()
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			_ = permit.Complete(errors.New("circuit: execution panicked")) //nolint:errcheck // 必须优先传播原始 panic。
+			panic(recovered)
+		}
+		resultErr = errors.Join(resultErr, permit.Complete(resultErr))
+	}()
+	return run()
 }
 
-// beforeExecute 执行前检查
-// 返回 wasHalfOpen 标识请求是否在半开状态下被允许（已递增 halfOpenCount）
-func (b *Breaker) beforeExecute() (wasHalfOpen bool, _ error) {
-	now := b.config.Now()
-
-	for {
-		state := b.State()
-
-		switch state {
-		case StateClosed:
-			return false, nil
-
-		case StateOpen:
-			// 检查是否可以进入半开状态
-			openedAt := time.Unix(0, b.openedAt.Load())
-			if now.Sub(openedAt) >= b.config.Timeout {
-				// 使用 CAS 确保只有一个 goroutine 成功转换状态
-				if b.state.CompareAndSwap(int32(StateOpen), int32(StateHalfOpen)) {
-					// 成功转换，重置计数器
-					b.successes.Store(0)
-					b.halfOpenCount.Store(0)
-					// 通知监听器
-					b.notifyStateChange(StateOpen, StateHalfOpen)
-				}
-				// 转换成功或已被其他 goroutine 转换，重新检查状态
-				continue
-			}
-			return false, ErrCircuitOpen
-
-		case StateHalfOpen:
-			// 限制半开状态下的并发请求（使用 CAS 保证原子性）
-			for {
-				current := b.halfOpenCount.Load()
-				if current >= int32(b.config.HalfOpenMaxRequests) {
-					return false, ErrTooManyRequests
-				}
-				if b.halfOpenCount.CompareAndSwap(current, current+1) {
-					return true, nil
-				}
-				// CAS 失败，重试
-			}
-
-		default:
-			return false, ErrCircuitOpen
-		}
+// ExecuteContext 执行带上下文的函数并自动完成请求许可。
+func (b *Breaker) ExecuteContext(
+	ctx context.Context,
+	run func(context.Context) (any, error),
+) (result any, resultErr error) {
+	if ctx == nil {
+		return nil, errors.New("circuit: context must not be nil")
 	}
+	if run == nil {
+		return nil, errors.New("circuit: execute function must not be nil")
+	}
+	permit, err := b.Acquire()
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			_ = permit.Complete(errors.New("circuit: execution panicked")) //nolint:errcheck // 必须优先传播原始 panic。
+			panic(recovered)
+		}
+		resultErr = errors.Join(resultErr, permit.Complete(resultErr))
+	}()
+	return run(ctx)
 }
 
-// afterExecute 执行后处理
-// wasHalfOpen 标识该请求是否在半开状态下被 beforeExecute 允许（已递增 halfOpenCount）
-// 通过此标记确保 halfOpenCount 的递增/递减严格配对，避免状态转换导致的计数泄漏
-func (b *Breaker) afterExecute(err error, wasHalfOpen bool) {
-	isFailure := b.config.IsFailure(err)
-
-	if wasHalfOpen {
-		// 请求在半开状态被允许，无论当前状态如何都要递减 halfOpenCount
-		b.halfOpenCount.Add(-1)
-		if isFailure {
-			// 失败，回到打开状态
-			b.transitionTo(StateOpen)
-		} else {
-			successes := b.successes.Add(1)
-			if successes >= int32(b.config.SuccessThreshold) {
-				// 足够多的成功，恢复到关闭状态
-				b.transitionTo(StateClosed)
-			}
-		}
-		return
+func (b *Breaker) transitionLocked(to State) *stateChangeEvent {
+	from := b.state
+	if from == to {
+		return nil
 	}
-
-	// 非半开请求（或手动 API），使用当前状态判断
-	now := b.config.Now()
-	state := b.State()
-
-	switch state {
+	b.state = to
+	b.generation++
+	switch to {
 	case StateClosed:
-		if isFailure {
-			failures := b.failures.Add(1)
-			b.lastFailureAt.Store(now.UnixNano())
-			if failures >= int32(b.config.Threshold) {
-				b.transitionTo(StateOpen)
-			}
-		} else {
-			// 成功时重置失败计数
-			b.failures.Store(0)
-		}
-
+		b.failures = 0
+		b.successes = 0
+		b.halfOpenCount = 0
+		b.openedAt = time.Time{}
+	case StateOpen:
+		b.successes = 0
+		b.halfOpenCount = 0
+		b.openedAt = b.config.Now()
 	case StateHalfOpen:
-		// 手动 API（Allow + Success/Failure）走到这里
-		b.halfOpenCount.Add(-1)
-		if isFailure {
-			b.transitionTo(StateOpen)
-		} else {
-			successes := b.successes.Add(1)
-			if successes >= int32(b.config.SuccessThreshold) {
-				b.transitionTo(StateClosed)
-			}
-		}
+		b.successes = 0
+		b.halfOpenCount = 0
 	}
+	listeners := append([]func(from, to State){}, b.stateListeners...)
+	return &stateChangeEvent{from: from, to: to, listeners: listeners}
 }
 
-// transitionTo 状态转换（使用 CAS 保证原子性）
-// CAS 失败时检查新的当前状态，如果不再是预期的 from 状态则放弃转换，
-// 避免意外的状态跳转（如其他 goroutine 已将状态推进到更新的状态）
-func (b *Breaker) transitionTo(to State) {
-	for {
-		from := State(b.state.Load())
-		if from == to {
-			return
-		}
-
-		// 使用 CAS 确保状态转换的原子性
-		if !b.state.CompareAndSwap(int32(from), int32(to)) {
-			// CAS 失败，检查当前状态是否仍是预期的 from 状态
-			// 如果当前状态已改变（被其他 goroutine 转换），放弃本次转换
-			currentState := State(b.state.Load())
-			if currentState != from {
-				return
-			}
-			// 当前状态仍是 from，重试 CAS
-			continue
-		}
-
-		// CAS 成功，更新相关状态
-		switch to {
-		case StateClosed:
-			b.failures.Store(0)
-			b.successes.Store(0)
-			b.halfOpenCount.Store(0)
-		case StateOpen:
-			b.openedAt.Store(b.config.Now().UnixNano())
-			b.successes.Store(0)
-			b.halfOpenCount.Store(0)
-		case StateHalfOpen:
-			b.successes.Store(0)
-			b.halfOpenCount.Store(0)
-		}
-
-		// 通知监听器
-		b.notifyStateChange(from, to)
+func invokeStateChange(event *stateChangeEvent) {
+	if event == nil {
 		return
 	}
-}
-
-// startNotifier 启动有序通知 goroutine（只启动一次）
-func (b *Breaker) startNotifier() {
-	b.notifyOnce.Do(func() {
-		b.notifyCh = make(chan stateChangeEvent, 64)
-		go func() {
-			for event := range b.notifyCh {
-				for _, listener := range event.listeners {
-					func() {
-						defer func() {
-							if r := recover(); r != nil {
-								// 监听器 panic 不应影响熔断器正常工作
-							}
-						}()
-						listener(event.from, event.to)
-					}()
+	for _, listener := range event.listeners {
+		func() {
+			defer func() {
+				if recover() != nil {
+					return
 				}
-			}
+			}()
+			listener(event.from, event.to)
 		}()
-	})
+	}
 }
 
-// notifyStateChange 通知状态变更监听器（异步有序执行，通过单一 goroutine + channel 保序）
-func (b *Breaker) notifyStateChange(from, to State) {
+// Reset 重置熔断器和全部计数。
+func (b *Breaker) Reset() error {
+	if b.closed.Load() {
+		return ErrBreakerClosed
+	}
 	b.mu.Lock()
-	listeners := make([]func(from, to State), len(b.stateListeners))
-	copy(listeners, b.stateListeners)
+	if b.closed.Load() {
+		b.mu.Unlock()
+		return ErrBreakerClosed
+	}
+	event := b.transitionLocked(StateClosed)
+	if event == nil {
+		b.generation++
+		b.failures = 0
+		b.successes = 0
+		b.halfOpenCount = 0
+		b.lastFailureAt = time.Time{}
+		b.openedAt = time.Time{}
+	}
 	b.mu.Unlock()
-
-	if len(listeners) == 0 {
-		return
-	}
-
-	b.startNotifier()
-
-	// 非阻塞发送，避免在极端情况下阻塞熔断器
-	select {
-	case b.notifyCh <- stateChangeEvent{from: from, to: to, listeners: listeners}:
-	default:
-		// channel 满时丢弃通知，避免阻塞熔断器核心逻辑
-	}
+	invokeStateChange(event)
+	return nil
 }
 
-// Reset 重置熔断器
-//
-// 使用 CAS 循环确保状态转换的原子性，防止与其他状态转换操作产生竞态
-func (b *Breaker) Reset() {
-	for {
-		oldState := State(b.state.Load())
-		if oldState == StateClosed {
-			// 已经是 Closed 状态，只需重置计数器
-			b.failures.Store(0)
-			b.successes.Store(0)
-			b.halfOpenCount.Store(0)
-			b.lastFailureAt.Store(0)
-			b.openedAt.Store(0)
-			return
-		}
-
-		// 尝试 CAS 将状态改为 Closed
-		if b.state.CompareAndSwap(int32(oldState), int32(StateClosed)) {
-			// CAS 成功，重置所有计数器
-			b.failures.Store(0)
-			b.successes.Store(0)
-			b.halfOpenCount.Store(0)
-			b.lastFailureAt.Store(0)
-			b.openedAt.Store(0)
-
-			// 通知监听器
-			b.notifyStateChange(oldState, StateClosed)
-			return
-		}
-		// CAS 失败，状态已被其他 goroutine 改变，重试
+// OnStateChange 添加状态变化监听器。
+func (b *Breaker) OnStateChange(listener func(from, to State)) error {
+	if listener == nil {
+		return errors.New("circuit: state listener must not be nil")
 	}
-}
-
-// OnStateChange 添加状态变更监听器
-func (b *Breaker) OnStateChange(fn func(from, to State)) {
+	if b.closed.Load() {
+		return ErrBreakerClosed
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.stateListeners = append(b.stateListeners, fn)
+	if b.closed.Load() {
+		return ErrBreakerClosed
+	}
+	b.stateListeners = append(b.stateListeners, listener)
+	return nil
 }
 
-// Close 关闭熔断器，释放 notifier goroutine
-// 调用后不应再使用该 Breaker 实例
+// Close 关闭熔断器；多次调用是安全的。
 func (b *Breaker) Close() {
-	if b.notifyCh != nil {
-		close(b.notifyCh)
+	if !b.closed.CompareAndSwap(false, true) {
+		return
 	}
+	b.mu.Lock()
+	b.generation++
+	b.stateListeners = nil
+	b.mu.Unlock()
 }
 
-// Stats 统计信息
+// Stats 是熔断器的一致性统计快照。
 type Stats struct {
-	State         State
-	Failures      int
-	Successes     int
-	LastFailureAt time.Time
-	OpenedAt      time.Time
+	State            State
+	Failures         int
+	Successes        int
+	HalfOpenInFlight int
+	LastFailureAt    time.Time
+	OpenedAt         time.Time
 }
 
-// Stats 返回统计信息
+// Stats 返回一致性统计快照。
 func (b *Breaker) Stats() Stats {
-	stats := Stats{
-		State:     b.State(),
-		Failures:  int(b.failures.Load()),
-		Successes: int(b.successes.Load()),
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return Stats{
+		State:            b.state,
+		Failures:         b.failures,
+		Successes:        b.successes,
+		HalfOpenInFlight: b.halfOpenCount,
+		LastFailureAt:    b.lastFailureAt,
+		OpenedAt:         b.openedAt,
 	}
-	// 只有在有实际时间值时才设置（避免返回 1970-01-01）
-	if lastFailure := b.lastFailureAt.Load(); lastFailure > 0 {
-		stats.LastFailureAt = time.Unix(0, lastFailure)
+}
+
+// OpenAIConfig 是 OpenAI 调用的预设策略。
+func OpenAIConfig() []Option {
+	return []Option{
+		WithThreshold(5),
+		WithTimeout(60 * time.Second),
+		WithHalfOpenMaxRequests(2),
+		WithSuccessThreshold(2),
+		WithIsFailure(IsRateLimitOrServerError),
 	}
-	if opened := b.openedAt.Load(); opened > 0 {
-		stats.OpenedAt = time.Unix(0, opened)
+}
+
+// ClaudeConfig 是 Claude 调用的预设策略。
+func ClaudeConfig() []Option {
+	return []Option{
+		WithThreshold(3),
+		WithTimeout(30 * time.Second),
+		WithHalfOpenMaxRequests(1),
+		WithSuccessThreshold(1),
+		WithIsFailure(IsRateLimitOrServerError),
 	}
-	return stats
 }
 
-// ============== AI API 预设配置 ==============
-
-// OpenAIConfig OpenAI 推荐配置
-var OpenAIConfig = []Option{
-	WithThreshold(5),
-	WithTimeout(60 * time.Second),
-	WithHalfOpenMaxRequests(2),
-	WithSuccessThreshold(2),
-	WithIsFailure(IsRateLimitOrServerError),
+// GeminiConfig 是 Gemini 调用的预设策略。
+func GeminiConfig() []Option {
+	return []Option{
+		WithThreshold(5),
+		WithTimeout(30 * time.Second),
+		WithHalfOpenMaxRequests(2),
+		WithSuccessThreshold(2),
+		WithIsFailure(IsRateLimitOrServerError),
+	}
 }
 
-// ClaudeConfig Claude 推荐配置
-var ClaudeConfig = []Option{
-	WithThreshold(3),
-	WithTimeout(30 * time.Second),
-	WithHalfOpenMaxRequests(1),
-	WithSuccessThreshold(2),
-	WithIsFailure(IsRateLimitOrServerError),
+// AggressiveConfig 是快速熔断预设策略。
+func AggressiveConfig() []Option {
+	return []Option{
+		WithThreshold(3),
+		WithTimeout(10 * time.Second),
+		WithHalfOpenMaxRequests(1),
+		WithSuccessThreshold(1),
+	}
 }
 
-// GeminiConfig Gemini 推荐配置
-var GeminiConfig = []Option{
-	WithThreshold(5),
-	WithTimeout(30 * time.Second),
-	WithHalfOpenMaxRequests(2),
-	WithSuccessThreshold(2),
-	WithIsFailure(IsRateLimitOrServerError),
+// ConservativeConfig 是慢速熔断预设策略。
+func ConservativeConfig() []Option {
+	return []Option{
+		WithThreshold(10),
+		WithTimeout(120 * time.Second),
+		WithHalfOpenMaxRequests(5),
+		WithSuccessThreshold(3),
+	}
 }
 
-// AggressiveConfig 激进配置（快速熔断）
-var AggressiveConfig = []Option{
-	WithThreshold(3),
-	WithTimeout(10 * time.Second),
-	WithHalfOpenMaxRequests(1),
-	WithSuccessThreshold(1),
+// NewAIBreaker 创建并校验 AI API 熔断器。
+func NewAIBreaker(preset []Option, extra ...Option) (*Breaker, error) {
+	options := make([]Option, 0, len(preset)+len(extra))
+	options = append(options, preset...)
+	options = append(options, extra...)
+	return New(options...)
 }
 
-// ConservativeConfig 保守配置（慢速熔断）
-var ConservativeConfig = []Option{
-	WithThreshold(10),
-	WithTimeout(120 * time.Second),
-	WithHalfOpenMaxRequests(5),
-	WithSuccessThreshold(3),
-}
-
-// NewAIBreaker 创建 AI API 专用熔断器
-func NewAIBreaker(preset []Option, extra ...Option) *Breaker {
-	opts := make([]Option, 0, len(preset)+len(extra))
-	opts = append(opts, preset...)
-	opts = append(opts, extra...)
-	return New(opts...)
-}
-
-// ============== 错误判断函数 ==============
-
-// HTTPError 带状态码的 HTTP 错误
+// HTTPError 表示携带 HTTP 状态码的错误。
 type HTTPError interface {
 	StatusCode() int
 }
 
-// IsRateLimitOrServerError 判断是否为限流或服务器错误
+// IsRateLimitOrServerError 判断错误是否为限流或服务端错误。
 func IsRateLimitOrServerError(err error) bool {
 	if err == nil {
 		return false
 	}
-
 	var httpErr HTTPError
 	if errors.As(err, &httpErr) {
 		code := httpErr.StatusCode()
-		// 429 (Rate Limit) 或 5xx (Server Error)
 		return code == 429 || code >= 500
 	}
-
-	// 非 HTTP 错误认为是失败
 	return true
 }
 
-// IsServerError 判断是否为服务器错误（5xx）
+// IsServerError 判断错误是否为服务端错误。
 func IsServerError(err error) bool {
 	if err == nil {
 		return false
 	}
-
 	var httpErr HTTPError
-	if errors.As(err, &httpErr) {
-		return httpErr.StatusCode() >= 500
-	}
-
-	return false
+	return errors.As(err, &httpErr) && httpErr.StatusCode() >= 500
 }
 
-// IsRateLimitError 判断是否为限流错误（429）
+// IsRateLimitError 判断错误是否为限流错误。
 func IsRateLimitError(err error) bool {
 	if err == nil {
 		return false
 	}
-
 	var httpErr HTTPError
-	if errors.As(err, &httpErr) {
-		return httpErr.StatusCode() == 429
-	}
-
-	return false
+	return errors.As(err, &httpErr) && httpErr.StatusCode() == 429
 }
 
-// ============== 多熔断器管理 ==============
-
-// BreakerManager 熔断器管理器
+// BreakerManager 管理一组使用相同策略的熔断器。
 type BreakerManager struct {
-	breakers sync.Map
-	factory  func() *Breaker
+	mu       sync.Mutex
+	breakers map[string]*Breaker
+	config   Config
+	closed   bool
 }
 
-// NewBreakerManager 创建熔断器管理器
-func NewBreakerManager(factory func() *Breaker) *BreakerManager {
-	return &BreakerManager{
-		factory: factory,
+// NewBreakerManager 创建并校验熔断器管理器。
+func NewBreakerManager(options ...Option) (*BreakerManager, error) {
+	config, err := buildConfig(options...)
+	if err != nil {
+		return nil, err
 	}
+	return &BreakerManager{breakers: make(map[string]*Breaker), config: config}, nil
 }
 
-// Get 获取指定名称的熔断器
-func (m *BreakerManager) Get(name string) *Breaker {
-	if b, ok := m.breakers.Load(name); ok {
-		return b.(*Breaker)
+// Get 返回指定名称的熔断器，不存在时创建。
+func (m *BreakerManager) Get(name string) (*Breaker, error) {
+	if name == "" {
+		return nil, errors.New("circuit: breaker name must not be empty")
 	}
-
-	newBreaker := m.factory()
-	actual, _ := m.breakers.LoadOrStore(name, newBreaker)
-	return actual.(*Breaker)
-}
-
-// Execute 使用指定名称的熔断器执行函数
-func (m *BreakerManager) Execute(name string, fn func() (any, error)) (any, error) {
-	return m.Get(name).Execute(fn)
-}
-
-// Reset 重置指定名称的熔断器
-func (m *BreakerManager) Reset(name string) {
-	if b, ok := m.breakers.Load(name); ok {
-		b.(*Breaker).Reset()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return nil, ErrBreakerClosed
 	}
+	if breaker, ok := m.breakers[name]; ok {
+		return breaker, nil
+	}
+	breaker := newBreaker(m.config)
+	m.breakers[name] = breaker
+	return breaker, nil
 }
 
-// ResetAll 重置所有熔断器
-func (m *BreakerManager) ResetAll() {
-	m.breakers.Range(func(key, value any) bool {
-		value.(*Breaker).Reset()
-		return true
-	})
+// Execute 使用指定名称的熔断器执行函数。
+func (m *BreakerManager) Execute(name string, run func() (any, error)) (any, error) {
+	breaker, err := m.Get(name)
+	if err != nil {
+		return nil, err
+	}
+	return breaker.Execute(run)
 }
 
-// States 返回所有熔断器状态
+// Reset 重置指定名称的熔断器。
+func (m *BreakerManager) Reset(name string) error {
+	breaker, err := m.Get(name)
+	if err != nil {
+		return err
+	}
+	return breaker.Reset()
+}
+
+// ResetAll 重置所有熔断器。
+func (m *BreakerManager) ResetAll() error {
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return ErrBreakerClosed
+	}
+	breakers := make([]*Breaker, 0, len(m.breakers))
+	for _, breaker := range m.breakers {
+		breakers = append(breakers, breaker)
+	}
+	m.mu.Unlock()
+
+	var resultErr error
+	for _, breaker := range breakers {
+		resultErr = errors.Join(resultErr, breaker.Reset())
+	}
+	return resultErr
+}
+
+// States 返回所有熔断器的状态快照。
 func (m *BreakerManager) States() map[string]State {
-	states := make(map[string]State)
-	m.breakers.Range(func(key, value any) bool {
-		states[key.(string)] = value.(*Breaker).State()
-		return true
-	})
+	m.mu.Lock()
+	breakers := make(map[string]*Breaker, len(m.breakers))
+	for name, breaker := range m.breakers {
+		breakers[name] = breaker
+	}
+	m.mu.Unlock()
+
+	states := make(map[string]State, len(breakers))
+	for name, breaker := range breakers {
+		states[name] = breaker.State()
+	}
 	return states
+}
+
+// Close 关闭管理器及其全部熔断器。
+func (m *BreakerManager) Close() {
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return
+	}
+	m.closed = true
+	breakers := m.breakers
+	m.breakers = nil
+	m.mu.Unlock()
+	for _, breaker := range breakers {
+		breaker.Close()
+	}
 }

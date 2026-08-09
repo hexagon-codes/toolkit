@@ -6,10 +6,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 var (
@@ -17,17 +20,25 @@ var (
 	ErrStreamClosed = errors.New("stream closed")
 	// ErrInvalidSSE 无效的 SSE 格式
 	ErrInvalidSSE = errors.New("invalid SSE format")
+	// ErrStreamEventTooLarge 表示单个流事件超过允许的内存上限。
+	ErrStreamEventTooLarge = errors.New("stream event exceeds configured limit")
 )
+
+// DefaultMaxStreamEventSize 是单个流事件默认允许的最大字节数。
+const DefaultMaxStreamEventSize = 1 << 20
 
 // StreamResponse 流式响应
 type StreamResponse struct {
-	StatusCode int
-	Status     string
-	Headers    http.Header
-	body       io.ReadCloser
-	reader     *bufio.Reader
-	mu         sync.Mutex // 保护 closed 字段和 body 操作
-	closed     bool
+	StatusCode   int
+	Status       string
+	Headers      http.Header
+	body         io.ReadCloser
+	reader       *bufio.Reader
+	readMu       sync.Mutex
+	closeOnce    sync.Once
+	closeErr     error
+	closed       atomic.Bool
+	maxEventSize int
 }
 
 // SSEEvent Server-Sent Event 事件
@@ -42,13 +53,21 @@ type SSEEvent struct {
 type StreamOption func(*streamConfig)
 
 type streamConfig struct {
-	bufferSize int
+	bufferSize   int
+	maxEventSize int
 }
 
 // WithBufferSize 设置读取缓冲区大小
 func WithBufferSize(size int) StreamOption {
 	return func(c *streamConfig) {
 		c.bufferSize = size
+	}
+}
+
+// WithMaxEventSize 设置单个流事件允许的最大字节数。
+func WithMaxEventSize(size int) StreamOption {
+	return func(c *streamConfig) {
+		c.maxEventSize = size
 	}
 }
 
@@ -68,28 +87,42 @@ func (r *Request) PostStream(url string, opts ...StreamOption) (*StreamResponse,
 
 // executeStream 执行流式请求
 func (r *Request) executeStream(opts ...StreamOption) (*StreamResponse, error) {
+	if r == nil || r.client == nil || r.client.client == nil {
+		return nil, fmt.Errorf("%w: request client is missing", ErrInvalidRequest)
+	}
+	if r.ctx == nil {
+		return nil, ErrInvalidContext
+	}
+	if r.method == "" {
+		return nil, fmt.Errorf("%w: method is missing", ErrInvalidRequest)
+	}
+	if r.url == "" && r.client.baseURL == "" {
+		return nil, fmt.Errorf("%w: URL is missing", ErrInvalidRequest)
+	}
 	if r.jsonErr != nil {
 		return nil, r.jsonErr
 	}
 
 	cfg := &streamConfig{
-		bufferSize: 4096,
+		bufferSize:   4096,
+		maxEventSize: DefaultMaxStreamEventSize,
 	}
-	for _, opt := range opts {
-		opt(cfg)
-	}
-
-	fullURL := r.url
-	if r.client.baseURL != "" && !strings.HasPrefix(r.url, "http") {
-		fullURL = r.client.baseURL + "/" + strings.TrimLeft(r.url, "/")
-	}
-
-	if len(r.query) > 0 {
-		if strings.Contains(fullURL, "?") {
-			fullURL += "&" + r.query.Encode()
-		} else {
-			fullURL += "?" + r.query.Encode()
+	for index, opt := range opts {
+		if opt == nil {
+			return nil, fmt.Errorf("%w: stream option %d must not be nil", ErrInvalidClientConfig, index)
 		}
+		opt(cfg)
+		if cfg.bufferSize <= 0 {
+			return nil, fmt.Errorf("%w: stream option %d: buffer size must be positive", ErrInvalidClientConfig, index)
+		}
+		if cfg.maxEventSize <= 0 {
+			return nil, fmt.Errorf("%w: stream option %d: maximum event size must be positive", ErrInvalidClientConfig, index)
+		}
+	}
+
+	fullURL, err := resolveRequestURL(r.client.baseURL, r.url, r.query)
+	if err != nil {
+		return nil, err
 	}
 
 	req, err := http.NewRequestWithContext(r.ctx, r.method, fullURL, r.body)
@@ -112,43 +145,39 @@ func (r *Request) executeStream(opts ...StreamOption) (*StreamResponse, error) {
 		req.Header.Set("Accept", "text/event-stream")
 	}
 
-	httpResp, err := r.client.client.Do(req)
+	httpResp, err := r.client.client.Do(req) //nolint:bodyclose // StreamResponse 接管响应体。
 	if err != nil {
 		return nil, err
 	}
 
 	return &StreamResponse{
-		StatusCode: httpResp.StatusCode,
-		Status:     httpResp.Status,
-		Headers:    httpResp.Header,
-		body:       httpResp.Body,
-		reader:     bufio.NewReaderSize(httpResp.Body, cfg.bufferSize),
+		StatusCode:   httpResp.StatusCode,
+		Status:       httpResp.Status,
+		Headers:      httpResp.Header,
+		body:         httpResp.Body,
+		reader:       bufio.NewReaderSize(httpResp.Body, cfg.bufferSize),
+		maxEventSize: cfg.maxEventSize,
 	}, nil
 }
 
 // ReadLine 读取一行数据
 func (s *StreamResponse) ReadLine() (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.readMu.Lock()
+	defer s.readMu.Unlock()
 
-	if s.closed {
+	if s.closed.Load() {
 		return "", ErrStreamClosed
 	}
 
-	line, err := s.reader.ReadString('\n')
-	if err != nil {
-		return "", err
-	}
-
-	return strings.TrimRight(line, "\r\n"), nil
+	return s.readLineLimited()
 }
 
 // ReadSSE 读取下一个 SSE 事件
 func (s *StreamResponse) ReadSSE() (*SSEEvent, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.readMu.Lock()
+	defer s.readMu.Unlock()
 
-	if s.closed {
+	if s.closed.Load() {
 		return nil, ErrStreamClosed
 	}
 
@@ -159,19 +188,18 @@ func (s *StreamResponse) ReadSSE() (*SSEEvent, error) {
 func (s *StreamResponse) readSSELocked() (*SSEEvent, error) {
 	event := &SSEEvent{}
 	var dataLines []string
+	eventSize := 0
 
 	for {
-		line, err := s.reader.ReadString('\n')
-		if err != nil {
-			if err == io.EOF && (event.Event != "" || len(dataLines) > 0) {
-				// EOF 但有数据，返回最后的事件
-				event.Data = strings.Join(dataLines, "\n")
-				return event, nil
-			}
+		line, err := s.readLineLimited()
+		atEOF := errors.Is(err, io.EOF)
+		if err != nil && !atEOF {
 			return nil, err
 		}
-
-		line = strings.TrimRight(line, "\r\n")
+		if len(line) > s.eventSizeLimit()-eventSize {
+			return nil, s.eventLimitError()
+		}
+		eventSize += len(line)
 
 		// 空行表示事件结束
 		if line == "" {
@@ -179,36 +207,84 @@ func (s *StreamResponse) readSSELocked() (*SSEEvent, error) {
 				event.Data = strings.Join(dataLines, "\n")
 				return event, nil
 			}
+			if atEOF {
+				return nil, io.EOF
+			}
 			continue
 		}
 
-		// 解析 SSE 字段
-		if strings.HasPrefix(line, "data:") {
-			data := strings.TrimPrefix(line, "data:")
-			data = strings.TrimPrefix(data, " ")
-			dataLines = append(dataLines, data)
-		} else if strings.HasPrefix(line, "event:") {
-			event.Event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-		} else if strings.HasPrefix(line, "id:") {
-			event.ID = strings.TrimSpace(strings.TrimPrefix(line, "id:"))
-		} else if strings.HasPrefix(line, "retry:") {
-			// 解析 retry 字段，忽略解析错误
-			if retry, err := parseRetry(strings.TrimSpace(strings.TrimPrefix(line, "retry:"))); err == nil {
-				event.Retry = retry
+		// 注释行按 SSE 规范忽略。
+		if !strings.HasPrefix(line, ":") {
+			field, value, hasColon := strings.Cut(line, ":")
+			if !hasColon {
+				value = ""
 			}
-		} else if strings.HasPrefix(line, ":") {
-			// 注释行，忽略
-			continue
+			value = strings.TrimPrefix(value, " ")
+			switch field {
+			case "data":
+				dataLines = append(dataLines, value)
+			case "event":
+				event.Event = value
+			case "id":
+				if !strings.ContainsRune(value, '\x00') {
+					event.ID = value
+				}
+			case "retry":
+				// 非十进制或溢出的 retry 值按 SSE 规范忽略。
+				if retry, parseErr := parseRetry(value); parseErr == nil {
+					event.Retry = retry
+				}
+			}
+		}
+		if atEOF {
+			if event.Event != "" || len(dataLines) > 0 || event.ID != "" {
+				event.Data = strings.Join(dataLines, "\n")
+				return event, nil
+			}
+			return nil, io.EOF
 		}
 	}
 }
 
+func (s *StreamResponse) readLineLimited() (string, error) {
+	limit := s.eventSizeLimit()
+	buffer := make([]byte, 0, min(s.reader.Size(), limit))
+	for {
+		fragment, err := s.reader.ReadSlice('\n')
+		if len(fragment) > limit-len(buffer) {
+			return "", s.eventLimitError()
+		}
+		buffer = append(buffer, fragment...)
+		switch {
+		case err == nil:
+			return strings.TrimRight(string(buffer), "\r\n"), nil
+		case errors.Is(err, bufio.ErrBufferFull):
+			continue
+		case errors.Is(err, io.EOF):
+			return strings.TrimRight(string(buffer), "\r\n"), io.EOF
+		default:
+			return "", err
+		}
+	}
+}
+
+func (s *StreamResponse) eventSizeLimit() int {
+	if s.maxEventSize > 0 {
+		return s.maxEventSize
+	}
+	return DefaultMaxStreamEventSize
+}
+
+func (s *StreamResponse) eventLimitError() error {
+	return errors.Join(ErrInvalidSSE, ErrStreamEventTooLarge, s.Close())
+}
+
 // ReadJSON 读取下一个 JSON 数据（从 SSE data 字段）
 func (s *StreamResponse) ReadJSON(v any) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.readMu.Lock()
+	defer s.readMu.Unlock()
 
-	if s.closed {
+	if s.closed.Load() {
 		return ErrStreamClosed
 	}
 
@@ -227,10 +303,10 @@ func (s *StreamResponse) ReadJSON(v any) error {
 
 // ReadBytes 读取原始字节流
 func (s *StreamResponse) ReadBytes(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.readMu.Lock()
+	defer s.readMu.Unlock()
 
-	if s.closed {
+	if s.closed.Load() {
 		return 0, ErrStreamClosed
 	}
 
@@ -239,14 +315,11 @@ func (s *StreamResponse) ReadBytes(p []byte) (int, error) {
 
 // Close 关闭流（并发安全）
 func (s *StreamResponse) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.closed {
-		return nil
-	}
-	s.closed = true
-	return s.body.Close()
+	s.closeOnce.Do(func() {
+		s.closed.Store(true)
+		s.closeErr = s.body.Close()
+	})
+	return s.closeErr
 }
 
 // IsSuccess 判断是否成功
@@ -261,14 +334,19 @@ func (s *StreamResponse) IsError() bool {
 
 // parseRetry 解析 retry 值
 func parseRetry(s string) (int, error) {
-	var retry int
+	if s == "" {
+		return 0, ErrInvalidSSE
+	}
 	for _, c := range s {
 		if c < '0' || c > '9' {
 			return 0, ErrInvalidSSE
 		}
-		retry = retry*10 + int(c-'0')
 	}
-	return retry, nil
+	retry, err := strconv.ParseUint(s, 10, strconv.IntSize)
+	if err != nil {
+		return 0, fmt.Errorf("%w: parse retry value: %w", ErrInvalidSSE, err)
+	}
+	return int(retry), nil
 }
 
 // ============== 流式迭代器 ==============
@@ -305,12 +383,12 @@ func (it *SSEIterator) Err() error {
 
 // GetStream 发送流式 GET 请求
 func GetStream(ctx context.Context, url string) (*StreamResponse, error) {
-	return NewClient().R().SetContext(ctx).GetStream(url)
+	return getDefaultClient().R().SetContext(ctx).GetStream(url)
 }
 
 // PostStream 发送流式 POST 请求
 func PostStream(ctx context.Context, url string, body any) (*StreamResponse, error) {
-	return NewClient().R().SetContext(ctx).SetJSONBody(body).PostStream(url)
+	return getDefaultClient().R().SetContext(ctx).SetJSONBody(body).PostStream(url)
 }
 
 // ============== 流式数据处理 ==============
@@ -319,8 +397,11 @@ func PostStream(ctx context.Context, url string, body any) (*StreamResponse, err
 type StreamHandler func(event *SSEEvent) error
 
 // OnData 设置数据处理回调
-func (s *StreamResponse) OnData(handler StreamHandler) error {
-	defer s.Close()
+func (s *StreamResponse) OnData(handler StreamHandler) (err error) {
+	defer func() { err = errors.Join(err, s.Close()) }()
+	if handler == nil {
+		return fmt.Errorf("%w: stream handler must not be nil", ErrInvalidRequest)
+	}
 
 	for {
 		event, err := s.ReadSSE()
@@ -343,10 +424,9 @@ func (s *StreamResponse) OnData(handler StreamHandler) error {
 }
 
 // CollectData 收集所有数据
-func (s *StreamResponse) CollectData() ([]string, error) {
-	defer s.Close()
+func (s *StreamResponse) CollectData() (data []string, err error) {
+	defer func() { err = errors.Join(err, s.Close()) }()
 
-	var data []string
 	for {
 		event, err := s.ReadSSE()
 		if err != nil {
@@ -365,10 +445,12 @@ func (s *StreamResponse) CollectData() ([]string, error) {
 }
 
 // CollectJSON 收集所有 JSON 数据
-func (s *StreamResponse) CollectJSON(factory func() any) ([]any, error) {
-	defer s.Close()
+func (s *StreamResponse) CollectJSON(factory func() any) (results []any, err error) {
+	defer func() { err = errors.Join(err, s.Close()) }()
+	if factory == nil {
+		return nil, fmt.Errorf("%w: JSON factory must not be nil", ErrInvalidRequest)
+	}
 
-	var results []any
 	for {
 		v := factory()
 		err := s.ReadJSON(v)
@@ -412,21 +494,21 @@ func (s *StreamResponse) ReadOpenAIChunk() (*OpenAIStreamChunk, error) {
 }
 
 // CollectOpenAIContent 收集 OpenAI 流式响应的所有内容
-func (s *StreamResponse) CollectOpenAIContent() (string, error) {
-	defer s.Close()
+func (s *StreamResponse) CollectOpenAIContent() (content string, err error) {
+	defer func() { err = errors.Join(err, s.Close()) }()
 
-	var content bytes.Buffer
+	var builder bytes.Buffer
 	for {
 		chunk, err := s.ReadOpenAIChunk()
 		if err != nil {
 			if err == io.EOF {
-				return content.String(), nil
+				return builder.String(), nil
 			}
-			return content.String(), err
+			return builder.String(), err
 		}
 
 		if len(chunk.Choices) > 0 {
-			content.WriteString(chunk.Choices[0].Delta.Content)
+			builder.WriteString(chunk.Choices[0].Delta.Content)
 		}
 	}
 }

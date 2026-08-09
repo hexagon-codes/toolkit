@@ -1,6 +1,9 @@
 package asynq
 
 import (
+	"context"
+	"errors"
+	"sort"
 	"testing"
 	"time"
 )
@@ -62,6 +65,12 @@ func TestQueueBackpressure(t *testing.T) {
 	if bp.State != StateNormal {
 		t.Errorf("expected state NORMAL, got %s", bp.State.String())
 	}
+	if bp.StateStr != "NORMAL" || bp.CurrentSize != 100 || bp.MaxSize != 1000 {
+		t.Errorf("unexpected queue snapshot: %+v", bp)
+	}
+	if bp.RejectCount != 0 || bp.LastCheckTime.IsZero() {
+		t.Errorf("unexpected rejection metadata: %+v", bp)
+	}
 
 	if bp.Utilization != 0.1 {
 		t.Errorf("expected utilization 0.1, got %f", bp.Utilization)
@@ -96,6 +105,9 @@ func TestBackpressureController_StateTransition(t *testing.T) {
 		WarningThreshold:  0.7,
 		CriticalThreshold: 0.9,
 		CheckInterval:     time.Second,
+	}
+	if config.CheckInterval != time.Second {
+		t.Fatalf("unexpected check interval: %v", config.CheckInterval)
 	}
 
 	tests := []struct {
@@ -133,10 +145,6 @@ func TestBackpressureController_Callbacks(t *testing.T) {
 	recoverCalled := false
 
 	config := BackpressureConfig{
-		MaxQueueSize:      1000,
-		WarningThreshold:  0.7,
-		CriticalThreshold: 0.9,
-		CheckInterval:     time.Second,
 		OnWarning: func(queue string, size int, threshold int) {
 			warningCalled = true
 		},
@@ -192,6 +200,98 @@ func TestBackpressureThresholds(t *testing.T) {
 	}
 }
 
+func TestBackpressureConfigValidation(t *testing.T) {
+	tests := []BackpressureConfig{
+		{MaxQueueSize: 0, WarningThreshold: 0.7, CriticalThreshold: 0.9, CheckInterval: time.Second},
+		{MaxQueueSize: 100, WarningThreshold: 0.9, CriticalThreshold: 0.7, CheckInterval: time.Second},
+		{MaxQueueSize: 100, WarningThreshold: -0.1, CriticalThreshold: 0.9, CheckInterval: time.Second},
+		{MaxQueueSize: 100, WarningThreshold: 0.7, CriticalThreshold: 1.1, CheckInterval: time.Second},
+	}
+	for _, config := range tests {
+		controller := &BackpressureController{}
+		if err := controller.SetConfig(config); !errors.Is(err, ErrInvalidConfig) {
+			t.Fatalf("expected ErrInvalidConfig for %+v, got %v", config, err)
+		}
+	}
+}
+
+func TestBackpressureCallbackPanicIsContained(t *testing.T) {
+	config := DefaultBackpressureConfig()
+	config.OnWarning = func(string, int, int) { panic("callback failure") }
+	handleBackpressureStateChange(config, "queue", StateNormal, StateWarning, 8_000)
+}
+
+func TestRateLimiterRejectsInvalidConfiguration(t *testing.T) {
+	for _, test := range []struct{ rate, burst int }{{0, 1}, {-1, 1}, {1, 0}, {1, -1}} {
+		if _, err := NewRateLimiter(test.rate, test.burst); !errors.Is(err, ErrInvalidConfig) {
+			t.Fatalf("expected ErrInvalidConfig for rate=%d burst=%d, got %v", test.rate, test.burst, err)
+		}
+	}
+}
+
+func TestRateLimiterWaitSupportsHighRatesAndCancellation(t *testing.T) {
+	limiter, err := NewRateLimiter(10_000, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !limiter.Allow() {
+		t.Fatal("expected initial burst token")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if waitErr := limiter.Wait(ctx); waitErr != nil {
+		t.Fatalf("high-rate wait failed: %v", waitErr)
+	}
+
+	limiter, err = NewRateLimiter(1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !limiter.Allow() {
+		t.Fatal("expected initial burst token")
+	}
+	canceled, cancelNow := context.WithCancel(context.Background())
+	cancelNow()
+	if err := limiter.Wait(canceled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation, got %v", err)
+	}
+}
+
+func TestRateLimiterWaitRejectsNilContext(t *testing.T) {
+	limiter, err := NewRateLimiter(1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("Wait(nil) panicked: %v", recovered)
+		}
+	}()
+	//nolint:staticcheck // 需要验证公开 API 对 nil context 的错误合同。
+	if err := limiter.Wait(nil); !errors.Is(err, ErrInvalidContext) {
+		t.Fatalf("Wait(nil) error = %v, want ErrInvalidContext", err)
+	}
+}
+
+func TestBackpressureGetAllStatesIsSorted(t *testing.T) {
+	controller := &BackpressureController{
+		states: map[string]*QueueBackpressure{},
+	}
+	for _, queue := range []string{"zeta", "alpha", "theta", "beta", "gamma", "delta"} {
+		controller.states[queue] = &QueueBackpressure{Queue: queue}
+	}
+	for range 32 {
+		states := controller.GetAllStates()
+		queues := make([]string, len(states))
+		for index := range states {
+			queues[index] = states[index].Queue
+		}
+		if !sort.StringsAreSorted(queues) {
+			t.Fatalf("GetAllStates() order = %v, want sorted", queues)
+		}
+	}
+}
+
 func TestBackpressureController_RejectCount(t *testing.T) {
 	bp := &QueueBackpressure{
 		Queue:       "test",
@@ -199,6 +299,9 @@ func TestBackpressureController_RejectCount(t *testing.T) {
 		CurrentSize: 950,
 		MaxSize:     1000,
 		RejectCount: 0,
+	}
+	if bp.Queue != "test" || bp.State != StateCritical || bp.CurrentSize != 950 || bp.MaxSize != 1000 {
+		t.Fatalf("unexpected initial backpressure state: %+v", bp)
 	}
 
 	// 模拟拒绝请求

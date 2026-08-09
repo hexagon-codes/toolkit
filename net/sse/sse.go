@@ -6,9 +6,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
+	"net/textproto"
+	neturl "net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,10 +23,20 @@ import (
 var (
 	// ErrStreamClosed 流已关闭
 	ErrStreamClosed = errors.New("sse: stream closed")
-	// ErrConnectionFailed 连接失败
-	ErrConnectionFailed = errors.New("sse: connection failed")
 	// ErrInvalidEvent 无效的事件格式
 	ErrInvalidEvent = errors.New("sse: invalid event format")
+	// ErrInvalidReaderConfig 表示读取器配置无效。
+	ErrInvalidReaderConfig = errors.New("sse: invalid reader configuration")
+	// ErrInvalidClientConfig 表示客户端配置无效。
+	ErrInvalidClientConfig = errors.New("sse: invalid client configuration")
+	// ErrInvalidWriter 表示响应写入器无效。
+	ErrInvalidWriter = errors.New("sse: invalid response writer")
+	// ErrInvalidContext 表示调用方传入了空上下文。
+	ErrInvalidContext = errors.New("sse: context must not be nil")
+	// ErrInvalidHandler 表示调用方传入了空处理函数。
+	ErrInvalidHandler = errors.New("sse: handler must not be nil")
+	// ErrUnexpectedContentType 表示响应不是 SSE 媒体类型。
+	ErrUnexpectedContentType = errors.New("sse: unexpected response content type")
 	// ErrMaxBytesExceeded 读取累计字节数超过配置的上限
 	//
 	// 该错误用于防御不可信上游通过超长 SSE 流量耗尽内存的拒绝服务（DoS）攻击。
@@ -31,6 +46,17 @@ var (
 	// 信息做断言或日志归类；错误身份保持不变，调用方应始终通过 errors.Is 判定，
 	// 而非比较错误字符串。
 	ErrMaxBytesExceeded = errors.New("sse: exceeded maximum total bytes limit")
+	// ErrMaxLineBytesExceeded 表示单行超过读取器上限。
+	ErrMaxLineBytesExceeded = errors.New("sse: exceeded maximum line bytes limit")
+	// ErrMaxEventBytesExceeded 表示单个事件超过读取器上限。
+	ErrMaxEventBytesExceeded = errors.New("sse: exceeded maximum event bytes limit")
+)
+
+const (
+	defaultMaxLineBytes   int64 = 1 << 20
+	defaultMaxEventBytes  int64 = 8 << 20
+	defaultEventBuffer          = 16
+	maxHTTPErrorBodyBytes       = 64 << 10
 )
 
 // Event 表示一个 SSE 事件
@@ -39,15 +65,24 @@ type Event struct {
 	Event string // 事件类型
 	Data  string // 事件数据
 	Retry int    // 重连时间（毫秒）
+
+	idSet    bool
+	retrySet bool
 }
 
 // IsEmpty 检查事件是否为空
 func (e *Event) IsEmpty() bool {
-	return e.ID == "" && e.Event == "" && e.Data == ""
+	if e == nil {
+		return true
+	}
+	return e.ID == "" && e.Event == "" && e.Data == "" && !e.idSet && !e.retrySet && e.Retry == 0
 }
 
 // JSON 将 Data 解析为 JSON
 func (e *Event) JSON(v any) error {
+	if e == nil {
+		return fmt.Errorf("%w: event must not be nil", ErrInvalidEvent)
+	}
 	return json.Unmarshal([]byte(e.Data), v)
 }
 
@@ -55,22 +90,32 @@ func (e *Event) JSON(v any) error {
 
 // Reader SSE 事件读取器
 //
-// 默认情况下 Reader 行为宽松且无字节上限，与历史版本完全兼容：
+// 默认情况下 Reader 使用标准 data 字段解析，并保留长连接的无限总寿命：
 //   - data 字段：识别任意以 "data:" 开头的行，并自动剥离紧随冒号后的一个可选空格。
-//   - 无总字节上限：可无限读取，直到底层 io.Reader 返回 EOF 或错误。
+//   - 总字节数不设上限，但单行默认限制为 1 MiB、单事件默认限制为 8 MiB，避免无界内存增长。
 //
-// 通过 NewReaderWithOptions 配合 ReaderOption 可启用两类可选的安全增强能力：
+// 通过 NewReaderWithOptions 配合 ReaderOption 可调整以下行为：
 //   - WithMaxTotalBytes：限制累计读取字节数，超限返回 ErrMaxBytesExceeded，
 //     用于防御不可信上游的内存耗尽型 DoS 攻击。
-//   - WithStrictDataPrefix：启用严格 data 前缀模式，仅识别精确的 "data:" 或
-//     "data: "（单空格）前缀，避免将形如 "datax:" 之类的行误判为 data 字段。
+//   - WithMaxLineBytes / WithMaxEventBytes：覆盖默认的单行与单事件上限。
+//   - WithStrictDataPrefix：启用严格 data 前缀模式，仅识别精确的 "data: "
+//     （单空格）前缀，避免接受非标准 data 字段。
 //
 // 线程安全：所有方法均通过内部互斥锁保护，可并发调用。
 type Reader struct {
-	reader *bufio.Reader
-	closed bool
-	lastID string
-	mu     sync.Mutex
+	reader           *bufio.Reader
+	source           io.Closer
+	closed           bool
+	lastID           string
+	reconnectionTime time.Duration
+	retrySet         bool
+	atStart          bool
+	skipLeadingLF    bool
+	terminalErr      error
+	readMu           sync.Mutex
+	mu               sync.RWMutex
+	closeOnce        sync.Once
+	closeErr         error
 
 	// maxTotalBytes 为累计读取字节数的上限，单位为字节。
 	// 值为 0 表示不限制（默认）。当累计读取字节数超过该上限时，
@@ -82,9 +127,13 @@ type Reader struct {
 	// strictData 为 true 时启用严格 data 前缀模式：
 	// 仅识别精确的 "data:" 或 "data: " 前缀，不再宽松匹配任意 "data:" 开头的行。
 	strictData bool
+	// maxLineBytes 限制单行原始字节数，0 表示不限制。
+	maxLineBytes int64
+	// maxEventBytes 限制两个事件边界之间的原始字节数，0 表示不限制。
+	maxEventBytes int64
 	// doneFunc 为可选的事件级流结束判定函数（provider 无关的 done 谓词）。
 	//
-	// 为 nil 时（默认）不做任何结束判定，Read 行为与历史版本完全一致。配置后，
+	// 为 nil 时（默认）不做任何结束判定。配置后，
 	// 仅 ReadUntilDone 与 Each 会在每个非空事件上调用该函数：返回 true 即视为
 	// 流的逻辑结束（如 OpenAI 的 "[DONE]"、Claude 的 message_stop、Gemini 的
 	// finishReason 非空），由消费方注入各 provider 的判定规则，无需在本包写死。
@@ -94,24 +143,46 @@ type Reader struct {
 
 // ReaderOption 用于配置 Reader 的可选行为。
 //
-// 选项通过 NewReaderWithOptions 应用，未提供任何选项时 Reader 保持与
-// NewReader 完全一致的默认行为，确保向后兼容。
-type ReaderOption func(*Reader)
+// 选项通过 NewReaderWithOptions 应用；未提供选项时使用 NewReader 的安全默认值。
+type ReaderOption func(*Reader) error
 
 // WithMaxTotalBytes 设置 Reader 累计读取字节数的上限（单位：字节）。
 //
-// 当累计读取的原始字节数（含换行符）超过 max 时，Read 将返回 ErrMaxBytesExceeded，
+// 当累计读取的原始字节数（含换行符）超过 limit 时，Read 将返回 ErrMaxBytesExceeded，
 // 从而中止对超长流的继续读取。该能力用于防御不可信上游通过无限或超长 SSE
 // 响应耗尽进程内存的拒绝服务（DoS）攻击。
 //
-// 参数 max <= 0 表示不限制（与默认行为一致）。上限按累计字节计算，
+// 参数 limit 为 0 时表示不限制；负数属于无效配置。上限按累计字节计算，
 // 而非单事件或单行字节，因此可有效约束整个流的总体内存占用。
-func WithMaxTotalBytes(max int64) ReaderOption {
-	return func(r *Reader) {
-		if max < 0 {
-			max = 0
+func WithMaxTotalBytes(limit int64) ReaderOption {
+	return func(r *Reader) error {
+		if limit < 0 {
+			return errors.New("maximum total bytes must not be negative")
 		}
-		r.maxTotalBytes = max
+		r.maxTotalBytes = limit
+		return nil
+	}
+}
+
+// WithMaxLineBytes 设置单行原始字节数上限，0 表示不限制。
+func WithMaxLineBytes(limit int64) ReaderOption {
+	return func(r *Reader) error {
+		if limit < 0 {
+			return errors.New("maximum line bytes must not be negative")
+		}
+		r.maxLineBytes = limit
+		return nil
+	}
+}
+
+// WithMaxEventBytes 设置单个事件原始字节数上限，0 表示不限制。
+func WithMaxEventBytes(limit int64) ReaderOption {
+	return func(r *Reader) error {
+		if limit < 0 {
+			return errors.New("maximum event bytes must not be negative")
+		}
+		r.maxEventBytes = limit
+		return nil
 	}
 }
 
@@ -132,8 +203,9 @@ func WithMaxTotalBytes(max int64) ReaderOption {
 // 严格模式仅收紧 data 行的前缀判定，不改变多行 data 的拼接方式，也不改变
 // event/id/retry/注释等其它字段的解析逻辑。
 func WithStrictDataPrefix() ReaderOption {
-	return func(r *Reader) {
+	return func(r *Reader) error {
 		r.strictData = true
+		return nil
 	}
 }
 
@@ -154,29 +226,78 @@ func WithStrictDataPrefix() ReaderOption {
 //
 // 典型用法（以 OpenAI 为例，复用既有 IsOpenAIDone）：
 //
-//	r := sse.NewReaderWithOptions(body, sse.WithDoneFunc(sse.IsOpenAIDone))
+//	r, err := sse.NewReaderWithOptions(body, sse.WithDoneFunc(sse.IsOpenAIDone))
+//	if err != nil {
+//	    return err
+//	}
 //	_ = r.Each(func(ev *sse.Event) error {
 //	    // 处理增量 chunk……
 //	    return nil
 //	})
 func WithDoneFunc(fn func(*Event) bool) ReaderOption {
-	return func(r *Reader) {
+	return func(r *Reader) error {
+		if fn == nil {
+			return errors.New("done function must not be nil")
+		}
 		r.doneFunc = fn
+		return nil
 	}
 }
 
-// NewReader 创建 SSE 事件读取器
-func NewReader(r io.Reader) *Reader {
-	return &Reader{
-		reader: bufio.NewReader(r),
+// NewReader 校验输入并创建 SSE 事件读取器。
+func NewReader(r io.Reader) (*Reader, error) {
+	if isNil(r) {
+		return nil, fmt.Errorf("%w: source must not be nil", ErrInvalidReaderConfig)
 	}
+	reader := &Reader{
+		reader:        bufio.NewReader(r),
+		atStart:       true,
+		maxLineBytes:  defaultMaxLineBytes,
+		maxEventBytes: defaultMaxEventBytes,
+	}
+	if source, ok := r.(io.Closer); ok {
+		reader.source = source
+	}
+	return reader, nil
 }
 
-// NewReaderWithSize 创建指定缓冲区大小的 SSE 事件读取器
-func NewReaderWithSize(r io.Reader, size int) *Reader {
-	return &Reader{
-		reader: bufio.NewReaderSize(r, size),
+// MustNewReader 创建读取器，输入无效时触发 panic。
+// 仅应用于编译期已知且经过测试的输入。
+func MustNewReader(r io.Reader) *Reader {
+	reader, err := NewReader(r)
+	if err != nil {
+		panic(err)
 	}
+	return reader
+}
+
+// NewReaderWithSize 校验输入并创建指定缓冲区大小的 SSE 事件读取器。
+func NewReaderWithSize(r io.Reader, size int) (*Reader, error) {
+	if isNil(r) {
+		return nil, fmt.Errorf("%w: source must not be nil", ErrInvalidReaderConfig)
+	}
+	if size <= 0 {
+		return nil, fmt.Errorf("%w: buffer size must be positive", ErrInvalidReaderConfig)
+	}
+	reader := &Reader{
+		reader:        bufio.NewReaderSize(r, size),
+		atStart:       true,
+		maxLineBytes:  defaultMaxLineBytes,
+		maxEventBytes: defaultMaxEventBytes,
+	}
+	if source, ok := r.(io.Closer); ok {
+		reader.source = source
+	}
+	return reader, nil
+}
+
+// MustNewReaderWithSize 创建指定缓冲区大小的读取器，配置无效时触发 panic。
+func MustNewReaderWithSize(r io.Reader, size int) *Reader {
+	reader, err := NewReaderWithSize(r, size)
+	if err != nil {
+		panic(err)
+	}
+	return reader
 }
 
 // NewReaderWithOptions 创建可配置的 SSE 事件读取器。
@@ -187,97 +308,234 @@ func NewReaderWithSize(r io.Reader, size int) *Reader {
 //
 // 各选项之间相互独立，可任意组合。例如：
 //
-//	r := sse.NewReaderWithOptions(body,
+//	r, err := sse.NewReaderWithOptions(body,
 //	    sse.WithMaxTotalBytes(8<<20),   // 累计上限 8 MiB
-//	    sse.WithStrictDataPrefix(),     // 仅识别精确 data: / data: 前缀
+//	    sse.WithStrictDataPrefix(),     // 仅识别精确的 data: 加单空格前缀
 //	)
-func NewReaderWithOptions(r io.Reader, opts ...ReaderOption) *Reader {
-	reader := &Reader{
-		reader: bufio.NewReader(r),
+//	if err != nil {
+//	    return err
+//	}
+func NewReaderWithOptions(r io.Reader, opts ...ReaderOption) (*Reader, error) {
+	reader, err := NewReader(r)
+	if err != nil {
+		return nil, err
 	}
-	for _, opt := range opts {
-		opt(reader)
+	for index, opt := range opts {
+		if opt == nil {
+			return nil, fmt.Errorf("%w: option %d must not be nil", ErrInvalidReaderConfig, index)
+		}
+		if err := opt(reader); err != nil {
+			return nil, fmt.Errorf("%w: option %d: %w", ErrInvalidReaderConfig, index, err)
+		}
+	}
+	return reader, nil
+}
+
+// MustNewReaderWithOptions 创建可配置读取器，配置无效时触发 panic。
+func MustNewReaderWithOptions(r io.Reader, opts ...ReaderOption) *Reader {
+	reader, err := NewReaderWithOptions(r, opts...)
+	if err != nil {
+		panic(err)
 	}
 	return reader
 }
 
 // Read 读取下一个 SSE 事件
 func (r *Reader) Read() (*Event, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	if r == nil || r.reader == nil {
+		return nil, fmt.Errorf("%w: reader is not initialized", ErrInvalidReaderConfig)
+	}
+	r.readMu.Lock()
+	defer r.readMu.Unlock()
 
-	if r.closed {
+	if r.isClosed() {
 		return nil, ErrStreamClosed
+	}
+	if r.terminalErr != nil {
+		return nil, r.terminalErr
 	}
 
 	event := &Event{}
 	var dataLines []string
+	var eventBytes int64
 
 	for {
-		line, err := r.reader.ReadString('\n')
-		// 在剥离换行符之前累加原始字节数，确保上限按真实流量计算。
-		// 即便本次读取以错误结束，已读到的部分字节也需计入累计值。
-		if len(line) > 0 {
-			r.totalBytes += int64(len(line))
-			if r.maxTotalBytes > 0 && r.totalBytes > r.maxTotalBytes {
-				return nil, ErrMaxBytesExceeded
+		line, rawLineBytes, err := r.readLine()
+		if r.isClosed() {
+			if err != nil {
+				return nil, errors.Join(ErrStreamClosed, err)
 			}
+			return nil, ErrStreamClosed
 		}
-		if err != nil {
-			if err == io.EOF {
-				// 处理最后一行（可能没有换行符）
-				if line != "" {
-					line = strings.TrimRight(line, "\r\n")
-					if data, ok := r.matchData(line); ok {
-						dataLines = append(dataLines, data)
-					} else if strings.HasPrefix(line, "event:") {
-						event.Event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-					} else if strings.HasPrefix(line, "id:") {
-						event.ID = strings.TrimSpace(strings.TrimPrefix(line, "id:"))
-					}
-				}
-				// EOF 但有数据，返回最后的事件
-				if len(dataLines) > 0 || event.Event != "" || event.ID != "" {
-					event.Data = strings.Join(dataLines, "\n")
-					if event.ID != "" {
-						r.lastID = event.ID
-					}
-					return event, nil
-				}
+		line = strings.ToValidUTF8(line, "\uFFFD")
+		if r.atStart {
+			line = strings.TrimPrefix(line, "\ufeff")
+			r.atStart = false
+		}
+		if line != "" {
+			if r.maxEventBytes > 0 && rawLineBytes > r.maxEventBytes-eventBytes {
+				return nil, r.setTerminalError(ErrMaxEventBytesExceeded)
 			}
-			return nil, err
+			eventBytes += rawLineBytes
+			r.parseField(event, &dataLines, line)
 		}
 
-		line = strings.TrimRight(line, "\r\n")
+		if err != nil {
+			return nil, r.setTerminalError(err)
+		}
 
 		// 空行表示事件结束
 		if line == "" {
-			if len(dataLines) > 0 || event.Event != "" || event.ID != "" {
-				event.Data = strings.Join(dataLines, "\n")
-				if event.ID != "" {
-					r.lastID = event.ID
-				}
-				return event, nil
+			if eventReady(event, dataLines) {
+				return r.finishEvent(event, dataLines), nil
 			}
-			continue
-		}
-
-		// 解析字段
-		if data, ok := r.matchData(line); ok {
-			dataLines = append(dataLines, data)
-		} else if strings.HasPrefix(line, "event:") {
-			event.Event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-		} else if strings.HasPrefix(line, "id:") {
-			event.ID = strings.TrimSpace(strings.TrimPrefix(line, "id:"))
-		} else if strings.HasPrefix(line, "retry:") {
-			if retry, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "retry:"))); err == nil {
-				event.Retry = retry
-			}
-		} else if strings.HasPrefix(line, ":") {
-			// 注释行，忽略
+			event = &Event{}
+			dataLines = nil
+			eventBytes = 0
 			continue
 		}
 	}
+}
+
+func (r *Reader) parseField(event *Event, dataLines *[]string, line string) {
+	if data, ok := r.matchData(line); ok {
+		*dataLines = append(*dataLines, data)
+		return
+	}
+	if strings.HasPrefix(line, ":") {
+		return
+	}
+
+	field, value, found := strings.Cut(line, ":")
+	if !found {
+		value = ""
+	}
+	value = strings.TrimPrefix(value, " ")
+
+	switch field {
+	case "event":
+		event.Event = value
+	case "id":
+		if !strings.ContainsRune(value, '\x00') {
+			r.mu.Lock()
+			r.lastID = value
+			r.mu.Unlock()
+			event.ID = value
+			event.idSet = true
+		}
+	case "retry":
+		if retry, ok := parseRetry(value); ok {
+			r.mu.Lock()
+			r.reconnectionTime = time.Duration(retry) * time.Millisecond
+			r.retrySet = true
+			r.mu.Unlock()
+			event.Retry = retry
+			event.retrySet = true
+		}
+	}
+}
+
+func parseRetry(value string) (int, bool) {
+	if value == "" {
+		return 0, false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return 0, false
+		}
+	}
+	retry, err := strconv.ParseUint(value, 10, 63)
+	if err != nil || retry > uint64((1<<63-1)/int64(time.Millisecond)) || retry > uint64(^uint(0)>>1) {
+		return 0, false
+	}
+	return int(retry), true
+}
+
+func eventReady(event *Event, dataLines []string) bool {
+	return len(dataLines) > 0
+}
+
+func (r *Reader) finishEvent(event *Event, dataLines []string) *Event {
+	event.Data = strings.Join(dataLines, "\n")
+	r.mu.RLock()
+	event.ID = r.lastID
+	r.mu.RUnlock()
+	if event.Event == "" {
+		event.Event = "message"
+	}
+	return event
+}
+
+func (r *Reader) isClosed() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.closed
+}
+
+func (r *Reader) setTerminalError(err error) error {
+	if r.terminalErr == nil {
+		r.terminalErr = err
+	}
+	return r.terminalErr
+}
+
+// readLine 识别 CRLF、单独 LF 和单独 CR，并在追加前执行字节上限检查。
+func (r *Reader) readLine() (text string, rawBytes int64, err error) {
+	line := make([]byte, 0, 128)
+	var firstByte byte
+	hasFirstByte := false
+
+	if r.skipLeadingLF {
+		character, err := r.readByte()
+		r.skipLeadingLF = false
+		if err != nil {
+			return "", 0, err
+		}
+		if character != '\n' {
+			firstByte = character
+			hasFirstByte = true
+		}
+	}
+
+	for {
+		var character byte
+		var err error
+		if hasFirstByte {
+			character = firstByte
+			hasFirstByte = false
+		} else {
+			character, err = r.readByte()
+			if err != nil {
+				return string(line), rawBytes, err
+			}
+		}
+
+		rawBytes++
+		if r.maxLineBytes > 0 && rawBytes > r.maxLineBytes {
+			return "", rawBytes, ErrMaxLineBytesExceeded
+		}
+		switch character {
+		case '\n':
+			return string(line), rawBytes, nil
+		case '\r':
+			r.skipLeadingLF = true
+			return string(line), rawBytes, nil
+		default:
+			line = append(line, character)
+		}
+	}
+}
+
+func (r *Reader) readByte() (byte, error) {
+	character, err := r.reader.ReadByte()
+	if err != nil {
+		return 0, err
+	}
+	if r.maxTotalBytes > 0 && r.totalBytes >= r.maxTotalBytes {
+		return 0, ErrMaxBytesExceeded
+	}
+	r.totalBytes++
+	return character, nil
 }
 
 // ReadUntilDone 读取下一个事件，并在该事件命中 done 谓词时同时返回 done=true。
@@ -314,9 +572,9 @@ func (r *Reader) ReadUntilDone() (event *Event, done bool, err error) {
 	// 读锁内访问 doneFunc 字段，避免与潜在的并发配置产生数据竞争。
 	// doneFunc 在构造期由 ReaderOption 设置、之后只读，这里加锁主要为与
 	// Read/Close 等持锁方法保持一致的内存可见性语义。
-	r.mu.Lock()
+	r.mu.RLock()
 	fn := r.doneFunc
-	r.mu.Unlock()
+	r.mu.RUnlock()
 	if fn != nil {
 		done = fn(ev)
 	}
@@ -339,10 +597,13 @@ func (r *Reader) ReadUntilDone() (event *Event, done bool, err error) {
 // 该方法是对 ReadUntilDone 的便捷封装，适用于消费方只需顺序处理事件、
 // 无需手写读取循环的场景。
 func (r *Reader) Each(handler func(*Event) error) error {
+	if handler == nil {
+		return ErrInvalidHandler
+	}
 	for {
 		ev, done, err := r.ReadUntilDone()
 		if err != nil {
-			if err == io.EOF {
+			if isOnlyEOF(err) {
 				return nil
 			}
 			return err
@@ -377,10 +638,13 @@ func (r *Reader) matchData(line string) (string, bool) {
 		return "", false
 	}
 
-	// 宽松模式：保持历史行为，识别任意 "data:" 开头并剥离一个可选前导空格。
+	// 宽松模式遵循规范：无冒号的 data 字段值为空；有冒号时剥离一个可选前导空格。
+	if line == "data" {
+		return "", true
+	}
 	if strings.HasPrefix(line, "data:") {
 		data := strings.TrimPrefix(line, "data:")
-		if len(data) > 0 && data[0] == ' ' {
+		if data != "" && data[0] == ' ' {
 			data = data[1:]
 		}
 		return data, true
@@ -388,18 +652,80 @@ func (r *Reader) matchData(line string) (string, bool) {
 	return "", false
 }
 
+func isOnlyEOF(err error) bool {
+	if err == nil {
+		return false
+	}
+	if multiError, ok := err.(interface{ Unwrap() []error }); ok {
+		found := false
+		for _, nested := range multiError.Unwrap() {
+			if nested == nil {
+				continue
+			}
+			found = true
+			if !isOnlyEOF(nested) {
+				return false
+			}
+		}
+		return found
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		nested := wrapped.Unwrap()
+		if nested != nil {
+			return isOnlyEOF(nested)
+		}
+	}
+	return err == io.EOF
+}
+
 // LastEventID 返回最后接收的事件 ID
 func (r *Reader) LastEventID() string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	if r == nil {
+		return ""
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.lastID
 }
 
-// Close 关闭读取器
-func (r *Reader) Close() {
+// ReconnectionTime 返回最近一次有效 retry 字段设置的重连间隔。
+func (r *Reader) ReconnectionTime() (time.Duration, bool) {
+	if r == nil {
+		return 0, false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.reconnectionTime, r.retrySet
+}
+
+// Close 关闭读取器，并在底层输入实现 io.Closer 时中断正在进行的读取。
+func (r *Reader) Close() error {
+	if r == nil {
+		return nil
+	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.closed = true
+	r.mu.Unlock()
+
+	r.closeOnce.Do(func() {
+		if r.source != nil {
+			r.closeErr = r.source.Close()
+		}
+	})
+	return r.closeErr
+}
+
+func isNil(value any) bool {
+	if value == nil {
+		return true
+	}
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return reflected.IsNil()
+	default:
+		return false
+	}
 }
 
 // ============== SSE Client ==============
@@ -410,10 +736,6 @@ type ClientConfig struct {
 	Headers map[string]string
 	// Timeout 连接超时
 	Timeout time.Duration
-	// RetryInterval 重连间隔
-	RetryInterval time.Duration
-	// MaxRetries 最大重试次数（0 表示无限）
-	MaxRetries int
 	// HTTPClient 自定义 HTTP 客户端
 	HTTPClient *http.Client
 	// LastEventID 上次事件 ID（用于断点续传）
@@ -426,101 +748,193 @@ type Client struct {
 	config ClientConfig
 }
 
-// NewClient 创建 SSE 客户端
-func NewClient(url string, opts ...ClientOption) *Client {
-	c := &Client{
-		url: url,
-		config: ClientConfig{
-			Headers:       make(map[string]string),
-			Timeout:       30 * time.Second,
-			RetryInterval: 3 * time.Second,
-			MaxRetries:    0,
-		},
+// NewClient 校验端点与选项并创建 SSE 客户端。
+func NewClient(url string, opts ...ClientOption) (*Client, error) {
+	normalizedURL, err := normalizeEndpoint(url)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidClientConfig, err)
+	}
+	config := ClientConfig{
+		Headers: make(map[string]string),
+		Timeout: 30 * time.Second,
 	}
 
-	for _, opt := range opts {
-		opt(&c.config)
+	for index, opt := range opts {
+		if opt == nil {
+			return nil, fmt.Errorf("%w: option %d must not be nil", ErrInvalidClientConfig, index)
+		}
+		if err := opt(&config); err != nil {
+			return nil, fmt.Errorf("%w: option %d: %w", ErrInvalidClientConfig, index, err)
+		}
+	}
+	if err := validateClientConfig(config); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidClientConfig, err)
 	}
 
-	if c.config.HTTPClient == nil {
-		// SSE 是长连接流式响应，不应设置整体请求超时（http.Client.Timeout）
-		// 连接超时通过 Transport 层控制
-		c.config.HTTPClient = &http.Client{
-			Timeout: 0,
-			Transport: &http.Transport{
-				DialContext: (&net.Dialer{
-					Timeout:   c.config.Timeout,
-					KeepAlive: 30 * time.Second,
-				}).DialContext,
-				TLSHandshakeTimeout: c.config.Timeout,
-			},
+	immutableConfig := config
+	immutableConfig.Headers = cloneHeaders(config.Headers)
+
+	if immutableConfig.HTTPClient == nil {
+		defaultTransport, ok := http.DefaultTransport.(*http.Transport)
+		if !ok {
+			return nil, fmt.Errorf("%w: default transport cannot be cloned", ErrInvalidClientConfig)
+		}
+		// SSE 是长连接流式响应，不设置整体请求超时；仅限制流建立阶段。
+		transport := defaultTransport.Clone()
+		transport.DialContext = (&net.Dialer{
+			Timeout:   immutableConfig.Timeout,
+			KeepAlive: 30 * time.Second,
+		}).DialContext
+		transport.TLSHandshakeTimeout = immutableConfig.Timeout
+		transport.ResponseHeaderTimeout = immutableConfig.Timeout
+		immutableConfig.HTTPClient = &http.Client{
+			Timeout:   0,
+			Transport: transport,
 		}
 	}
 
-	return c
+	return &Client{url: normalizedURL, config: immutableConfig}, nil
+}
+
+// MustNewClient 创建 SSE 客户端，配置无效时触发 panic。
+// 仅应用于编译期已知且经过测试的静态配置。
+func MustNewClient(url string, opts ...ClientOption) *Client {
+	client, err := NewClient(url, opts...)
+	if err != nil {
+		panic(err)
+	}
+	return client
 }
 
 // ClientOption 客户端选项
-type ClientOption func(*ClientConfig)
+type ClientOption func(*ClientConfig) error
 
 // WithHeaders 设置请求头
 func WithHeaders(headers map[string]string) ClientOption {
-	return func(c *ClientConfig) {
+	return func(c *ClientConfig) error {
+		for key, value := range headers {
+			if err := validateHeader(key, value); err != nil {
+				return err
+			}
+		}
+		if c.Headers == nil {
+			c.Headers = make(map[string]string, len(headers))
+		}
 		for k, v := range headers {
 			c.Headers[k] = v
 		}
+		return nil
 	}
+}
+
+func validateClientConfig(config ClientConfig) error {
+	if config.Timeout < 0 {
+		return errors.New("timeout must not be negative")
+	}
+	if err := validateSingleLine("last event ID", config.LastEventID); err != nil {
+		return err
+	}
+	for key, value := range config.Headers {
+		if err := validateHeader(key, value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func cloneHeaders(headers map[string]string) map[string]string {
+	cloned := make(map[string]string, len(headers))
+	for key, value := range headers {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 // WithTimeout 设置超时
 func WithTimeout(timeout time.Duration) ClientOption {
-	return func(c *ClientConfig) {
+	return func(c *ClientConfig) error {
+		if timeout < 0 {
+			return errors.New("timeout must not be negative")
+		}
 		c.Timeout = timeout
-	}
-}
-
-// WithRetryInterval 设置重连间隔
-func WithRetryInterval(interval time.Duration) ClientOption {
-	return func(c *ClientConfig) {
-		c.RetryInterval = interval
-	}
-}
-
-// WithMaxRetries 设置最大重试次数
-func WithMaxRetries(n int) ClientOption {
-	return func(c *ClientConfig) {
-		c.MaxRetries = n
+		return nil
 	}
 }
 
 // WithHTTPClient 设置自定义 HTTP 客户端
 func WithHTTPClient(client *http.Client) ClientOption {
-	return func(c *ClientConfig) {
+	return func(c *ClientConfig) error {
+		if client == nil {
+			return errors.New("HTTP client must not be nil")
+		}
 		c.HTTPClient = client
+		return nil
 	}
 }
 
 // WithLastEventID 设置上次事件 ID
 func WithLastEventID(id string) ClientOption {
-	return func(c *ClientConfig) {
+	return func(c *ClientConfig) error {
+		if err := validateSingleLine("last event ID", id); err != nil {
+			return err
+		}
 		c.LastEventID = id
+		return nil
 	}
+}
+
+func normalizeEndpoint(rawURL string) (string, error) {
+	rawURL = strings.TrimSpace(rawURL)
+	parsed, err := neturl.Parse(rawURL)
+	if err != nil || parsed.Host == "" ||
+		(!strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https")) {
+		return "", errors.New("endpoint must be an absolute HTTP or HTTPS URL")
+	}
+	if parsed.User != nil || parsed.Fragment != "" {
+		return "", errors.New("endpoint must not contain user information or a fragment")
+	}
+	return rawURL, nil
+}
+
+func validateHeader(key, value string) error {
+	if key == "" || textproto.CanonicalMIMEHeaderKey(key) == "" {
+		return errors.New("header name is invalid")
+	}
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if (character < ' ' && character != '\t') || character == 0x7f {
+			return fmt.Errorf("header %q contains an invalid value", key)
+		}
+	}
+	return nil
+}
+
+func validateSingleLine(field, value string) error {
+	if strings.ContainsAny(value, "\r\n\x00") {
+		return fmt.Errorf("%s must not contain line breaks or null bytes", field)
+	}
+	return nil
 }
 
 // Stream SSE 事件流
 type Stream struct {
 	reader   *Reader
-	response *http.Response
 	events   chan *Event
 	errors   chan error
-	done     chan struct{}
-	closed   bool
-	mu       sync.Mutex
+	ctx      context.Context
+	cancel   context.CancelCauseFunc
+	finished chan struct{}
 }
 
 // Connect 连接到 SSE 端点
 func (c *Client) Connect(ctx context.Context) (*Stream, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url, nil)
+	if c == nil || c.config.HTTPClient == nil {
+		return nil, fmt.Errorf("%w: client is not initialized", ErrInvalidClientConfig)
+	}
+	if isNil(ctx) {
+		return nil, ErrInvalidContext
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url, http.NoBody)
 	if err != nil {
 		return nil, err
 	}
@@ -540,129 +954,215 @@ func (c *Client) Connect(ctx context.Context) (*Stream, error) {
 		req.Header.Set("Last-Event-ID", c.config.LastEventID)
 	}
 
-	resp, err := c.config.HTTPClient.Do(req)
+	resp, err := c.config.HTTPClient.Do(req) //nolint:bodyclose // 成功路径把响应体所有权交给 Reader。
 	if err != nil {
 		return nil, err
 	}
+	if resp == nil {
+		return nil, fmt.Errorf("%w: HTTP client returned a nil response", ErrInvalidClientConfig)
+	}
+	if isNil(resp.Body) {
+		return nil, fmt.Errorf("%w: response body must not be nil", ErrInvalidReaderConfig)
+	}
 
 	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		return nil, &HTTPError{
-			StatusCode: resp.StatusCode,
-			Status:     resp.Status,
-		}
+		return nil, newHTTPResponseError(resp)
+	}
+	contentType := resp.Header.Get("Content-Type")
+	mediaType, _, parseErr := mime.ParseMediaType(contentType)
+	if parseErr != nil || !strings.EqualFold(mediaType, "text/event-stream") {
+		contentTypeErr := fmt.Errorf("%w: got %q", ErrUnexpectedContentType, contentType)
+		return nil, errors.Join(contentTypeErr, closeResponseBody(resp.Body))
 	}
 
-	stream := &Stream{
-		reader:   NewReader(resp.Body),
-		response: resp,
-		events:   make(chan *Event, 100),
-		errors:   make(chan error, 1),
-		done:     make(chan struct{}),
+	reader, err := NewReader(resp.Body)
+	if err != nil {
+		return nil, errors.Join(err, closeResponseBody(resp.Body))
 	}
 
-	// 启动事件读取协程
-	go stream.readLoop()
+	return startStream(ctx, reader), nil
+}
 
-	return stream, nil
+func closeResponseBody(body io.ReadCloser) error {
+	if isNil(body) {
+		return nil
+	}
+	return body.Close()
+}
+
+// CloseIdleConnections 关闭客户端当前持有的空闲连接。
+func (c *Client) CloseIdleConnections() {
+	if c == nil || c.config.HTTPClient == nil {
+		return
+	}
+	c.config.HTTPClient.CloseIdleConnections()
 }
 
 // HTTPError HTTP 错误
 type HTTPError struct {
 	StatusCode int
 	Status     string
+	// Body 保存受限长度的响应正文，便于定位上游拒绝原因。
+	Body string
+	// BodyTruncated 表示响应正文超过诊断上限。
+	BodyTruncated bool
 }
 
 func (e *HTTPError) Error() string {
-	return "sse: HTTP " + e.Status
+	if e == nil {
+		return "sse: unexpected HTTP response"
+	}
+	status := e.Status
+	if status == "" {
+		status = strconv.Itoa(e.StatusCode)
+	}
+	return "sse: HTTP " + status
+}
+
+func newHTTPResponseError(response *http.Response) error {
+	data, readErr := io.ReadAll(io.LimitReader(response.Body, maxHTTPErrorBodyBytes+1))
+	truncated := len(data) > maxHTTPErrorBodyBytes
+	if truncated {
+		data = data[:maxHTTPErrorBodyBytes]
+	}
+	httpErr := &HTTPError{
+		StatusCode:    response.StatusCode,
+		Status:        response.Status,
+		Body:          strings.ToValidUTF8(string(data), "\uFFFD"),
+		BodyTruncated: truncated,
+	}
+	closeErr := closeResponseBody(response.Body)
+	if readErr == nil && closeErr == nil {
+		return httpErr
+	}
+	return errors.Join(httpErr, readErr, closeErr)
 }
 
 // readLoop 事件读取循环
 func (s *Stream) readLoop() {
+	var readErr error
 	defer func() {
-		// 保护 panic，确保资源被正确释放
-		if r := recover(); r != nil {
-			select {
-			case s.errors <- errors.New("sse: internal error in readLoop"):
-			default:
-			}
+		if recovered := recover(); recovered != nil {
+			readErr = errors.Join(readErr, errors.New("sse: internal error in read loop"))
+		}
+
+		closeErr := s.reader.Close()
+		if terminalErr := s.terminalError(readErr, closeErr); terminalErr != nil {
+			s.errors <- terminalErr
 		}
 		close(s.events)
 		close(s.errors)
+		close(s.finished)
 	}()
 
 	for {
 		select {
-		case <-s.done:
+		case <-s.ctx.Done():
 			return
 		default:
-			event, err := s.reader.Read()
-			if err != nil {
-				if err != io.EOF {
-					select {
-					case s.errors <- err:
-					default:
-					}
-				}
-				return
-			}
+		}
 
-			if !event.IsEmpty() {
-				select {
-				case s.events <- event:
-				case <-s.done:
-					return
-				default:
-					// 事件通道已满，丢弃最旧的事件以防止阻塞
-					// 这是一个权衡：防止 goroutine 泄漏比丢失事件更重要
-					select {
-					case <-s.events: // 丢弃一个旧事件
-						select {
-						case s.events <- event: // 写入新事件
-						case <-s.done:
-							return
-						default:
-							// 如果还是失败，跳过这个事件
-						}
-					case <-s.done:
-						return
-					default:
-						// 如果还是失败，跳过这个事件
-					}
-				}
-			}
+		event, err := s.reader.Read()
+		if err != nil {
+			readErr = err
+			return
+		}
+
+		select {
+		case s.events <- event:
+		case <-s.ctx.Done():
+			return
 		}
 	}
 }
 
+func startStream(ctx context.Context, reader *Reader) *Stream {
+	streamContext, cancel := context.WithCancelCause(ctx)
+	stream := &Stream{
+		reader:   reader,
+		events:   make(chan *Event, defaultEventBuffer),
+		errors:   make(chan error, 1),
+		ctx:      streamContext,
+		cancel:   cancel,
+		finished: make(chan struct{}),
+	}
+	go stream.closeReaderOnCancellation()
+	go stream.readLoop()
+	return stream
+}
+
+// closeReaderOnCancellation 确保取消能够打断阻塞在底层响应体上的读取。
+func (s *Stream) closeReaderOnCancellation() {
+	select {
+	case <-s.ctx.Done():
+		_ = s.reader.Close() //nolint:errcheck // 关闭错误由读取循环统一汇总。
+	case <-s.finished:
+	}
+}
+
+func (s *Stream) terminalError(readErr, closeErr error) error {
+	cause := context.Cause(s.ctx)
+	if cause != nil {
+		if errors.Is(readErr, ErrStreamClosed) {
+			readErr = nil
+		}
+		if !errors.Is(cause, ErrStreamClosed) {
+			readErr = errors.Join(cause, readErr)
+		}
+	} else if isOnlyEOF(readErr) {
+		readErr = nil
+	}
+	return errors.Join(readErr, closeErr)
+}
+
 // Events 返回事件通道
 func (s *Stream) Events() <-chan *Event {
+	if s == nil {
+		return nil
+	}
 	return s.events
 }
 
 // Errors 返回错误通道
 func (s *Stream) Errors() <-chan error {
+	if s == nil {
+		return nil
+	}
 	return s.errors
+}
+
+// Done 返回在读取循环和资源释放全部结束后关闭的通道。
+func (s *Stream) Done() <-chan struct{} {
+	if s == nil {
+		return nil
+	}
+	return s.finished
 }
 
 // LastEventID 返回最后接收的事件 ID
 func (s *Stream) LastEventID() string {
+	if s == nil || s.reader == nil {
+		return ""
+	}
 	return s.reader.LastEventID()
 }
 
 // Close 关闭流
 func (s *Stream) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.closed {
+	if s == nil {
 		return nil
 	}
-
-	s.closed = true
-	close(s.done)
-	s.reader.Close()
-	return s.response.Body.Close()
+	if s.cancel != nil {
+		s.cancel(ErrStreamClosed)
+	}
+	var closeErr error
+	if s.reader != nil {
+		closeErr = s.reader.Close()
+	}
+	if s.finished != nil {
+		<-s.finished
+	}
+	return closeErr
 }
 
 // ============== SSE Writer（服务器端）==============
@@ -676,9 +1176,15 @@ type Writer struct {
 	buf     bytes.Buffer // 复用缓冲区，避免每次 Write 分配
 }
 
-// NewWriter 创建 SSE 事件写入器
-func NewWriter(w http.ResponseWriter) *Writer {
-	flusher, _ := w.(http.Flusher)
+// NewWriter 校验响应写入器并创建 SSE 事件写入器。
+func NewWriter(w http.ResponseWriter) (*Writer, error) {
+	if isNil(w) {
+		return nil, ErrInvalidWriter
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		flusher = nil
+	}
 
 	// 设置 SSE 响应头
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -689,11 +1195,27 @@ func NewWriter(w http.ResponseWriter) *Writer {
 	return &Writer{
 		w:       w,
 		flusher: flusher,
+	}, nil
+}
+
+// MustNewWriter 创建 SSE 写入器，输入无效时触发 panic。
+// 仅应用于 net/http 已保证 ResponseWriter 非空的处理链路。
+func MustNewWriter(w http.ResponseWriter) *Writer {
+	writer, err := NewWriter(w)
+	if err != nil {
+		panic(err)
 	}
+	return writer
 }
 
 // Write 写入 SSE 事件
 func (w *Writer) Write(event *Event) error {
+	if w == nil || isNil(w.w) {
+		return ErrInvalidWriter
+	}
+	if err := validateEvent(event); err != nil {
+		return err
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -704,38 +1226,14 @@ func (w *Writer) Write(event *Event) error {
 	// 复用缓冲区，避免每次分配
 	w.buf.Reset()
 
-	if event.ID != "" {
-		w.buf.WriteString("id: ")
-		w.buf.WriteString(event.ID)
-		w.buf.WriteByte('\n')
-	}
+	appendEvent(&w.buf, event)
 
-	if event.Event != "" {
-		w.buf.WriteString("event: ")
-		w.buf.WriteString(event.Event)
-		w.buf.WriteByte('\n')
-	}
-
-	if event.Data != "" {
-		lines := strings.Split(event.Data, "\n")
-		for _, line := range lines {
-			w.buf.WriteString("data: ")
-			w.buf.WriteString(line)
-			w.buf.WriteByte('\n')
-		}
-	}
-
-	if event.Retry > 0 {
-		w.buf.WriteString("retry: ")
-		w.buf.WriteString(strconv.Itoa(event.Retry))
-		w.buf.WriteByte('\n')
-	}
-
-	w.buf.WriteByte('\n')
-
-	_, err := w.w.Write(w.buf.Bytes())
+	written, err := w.w.Write(w.buf.Bytes())
 	if err != nil {
 		return err
+	}
+	if written != w.buf.Len() {
+		return io.ErrShortWrite
 	}
 
 	if w.flusher != nil {
@@ -761,6 +1259,12 @@ func (w *Writer) WriteJSON(v any) error {
 
 // WriteComment 写入注释（用于保持连接）
 func (w *Writer) WriteComment(comment string) error {
+	if w == nil || isNil(w.w) {
+		return ErrInvalidWriter
+	}
+	if err := validateSingleLine("comment", comment); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidEvent, err)
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -768,9 +1272,13 @@ func (w *Writer) WriteComment(comment string) error {
 		return ErrStreamClosed
 	}
 
-	_, err := w.w.Write([]byte(": " + comment + "\n"))
+	payload := []byte(": " + comment + "\n")
+	written, err := w.w.Write(payload)
 	if err != nil {
 		return err
+	}
+	if written != len(payload) {
+		return io.ErrShortWrite
 	}
 
 	if w.flusher != nil {
@@ -782,6 +1290,11 @@ func (w *Writer) WriteComment(comment string) error {
 
 // Flush 刷新缓冲区
 func (w *Writer) Flush() {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if w.flusher != nil {
 		w.flusher.Flush()
 	}
@@ -789,6 +1302,9 @@ func (w *Writer) Flush() {
 
 // Close 关闭写入器
 func (w *Writer) Close() {
+	if w == nil {
+		return
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.closed = true
@@ -798,43 +1314,67 @@ func (w *Writer) Close() {
 
 // ParseEvent 从字符串解析 SSE 事件
 func ParseEvent(data string) (*Event, error) {
-	reader := NewReader(strings.NewReader(data + "\n\n"))
+	reader, err := NewReader(strings.NewReader(data + "\n\n"))
+	if err != nil {
+		return nil, err
+	}
 	return reader.Read()
 }
 
 // FormatEvent 将事件格式化为 SSE 字符串
-func FormatEvent(event *Event) string {
+func FormatEvent(event *Event) (string, error) {
+	if err := validateEvent(event); err != nil {
+		return "", err
+	}
 	var buf bytes.Buffer
+	appendEvent(&buf, event)
+	return buf.String(), nil
+}
 
-	if event.ID != "" {
-		buf.WriteString("id: ")
-		buf.WriteString(event.ID)
-		buf.WriteByte('\n')
+func validateEvent(event *Event) error {
+	if event == nil {
+		return fmt.Errorf("%w: event must not be nil", ErrInvalidEvent)
+	}
+	if err := validateSingleLine("event ID", event.ID); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidEvent, err)
+	}
+	if err := validateSingleLine("event type", event.Event); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidEvent, err)
+	}
+	if event.Retry < 0 {
+		return fmt.Errorf("%w: retry must not be negative", ErrInvalidEvent)
+	}
+	return nil
+}
+
+func appendEvent(buffer *bytes.Buffer, event *Event) {
+	if event.ID != "" || event.idSet {
+		buffer.WriteString("id: ")
+		buffer.WriteString(event.ID)
+		buffer.WriteByte('\n')
 	}
 
 	if event.Event != "" {
-		buf.WriteString("event: ")
-		buf.WriteString(event.Event)
-		buf.WriteByte('\n')
+		buffer.WriteString("event: ")
+		buffer.WriteString(event.Event)
+		buffer.WriteByte('\n')
 	}
 
-	if event.Data != "" {
-		lines := strings.Split(event.Data, "\n")
-		for _, line := range lines {
-			buf.WriteString("data: ")
-			buf.WriteString(line)
-			buf.WriteByte('\n')
-		}
+	normalizedData := strings.ReplaceAll(event.Data, "\r\n", "\n")
+	normalizedData = strings.ReplaceAll(normalizedData, "\r", "\n")
+	for _, line := range strings.Split(normalizedData, "\n") {
+		buffer.WriteString("data: ")
+		buffer.WriteString(line)
+		buffer.WriteByte('\n')
 	}
 
-	if event.Retry > 0 {
-		buf.WriteString("retry: ")
-		buf.WriteString(strconv.Itoa(event.Retry))
-		buf.WriteByte('\n')
+	if event.Retry > 0 || event.retrySet {
+		buffer.WriteString("retry: ")
+		buffer.WriteString(strconv.Itoa(event.Retry))
+		buffer.WriteByte('\n')
 	}
 
-	buf.WriteByte('\n')
-	return buf.String()
+	buffer.WriteByte('\n')
 }
 
 // ============== AI API 专用 ==============
@@ -844,17 +1384,26 @@ const OpenAIDoneToken = "[DONE]"
 
 // IsOpenAIDone 检查是否是 OpenAI 结束标记
 func IsOpenAIDone(event *Event) bool {
+	if event == nil {
+		return false
+	}
 	return strings.TrimSpace(event.Data) == OpenAIDoneToken
 }
 
 // ReadOpenAIStream 读取 OpenAI 格式的流式响应
 func ReadOpenAIStream[T any](r io.Reader, handler func(T) error) error {
-	reader := NewReader(r)
+	if handler == nil {
+		return ErrInvalidHandler
+	}
+	reader, err := NewReader(r)
+	if err != nil {
+		return err
+	}
 
 	for {
 		event, err := reader.Read()
 		if err != nil {
-			if err == io.EOF {
+			if isOnlyEOF(err) {
 				return nil
 			}
 			return err

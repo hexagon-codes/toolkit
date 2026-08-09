@@ -1,23 +1,29 @@
 package httpx
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	neturl "net/url"
+	"strings"
 	"testing"
 	"time"
 )
 
 func TestNewClient(t *testing.T) {
-	c := NewClient()
+	c := MustNewClient()
 	if c == nil {
 		t.Error("NewClient should not return nil")
 	}
 }
 
 func TestNewClientWithOptions(t *testing.T) {
-	c := NewClient(
+	c := MustNewClient(
 		WithTimeout(5*time.Second),
 		WithBaseURL("https://example.com"),
 		WithHeader("X-Custom", "value"),
@@ -44,6 +50,173 @@ func TestNewClientWithOptions(t *testing.T) {
 	if c.retries != 3 {
 		t.Error("Retries not set correctly")
 	}
+}
+
+func TestRequest_ResponseBodyLimitIsEnforced(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("12345"))
+	}))
+	defer server.Close()
+
+	_, err := MustNewClient(WithMaxBodySize(4)).R().Get(server.URL)
+	if !errors.Is(err, ErrResponseBodyTooLarge) {
+		t.Fatalf("expected ErrResponseBodyTooLarge, got %v", err)
+	}
+}
+
+func TestRequest_ResponseBodyAtLimitSucceeds(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("1234"))
+	}))
+	defer server.Close()
+
+	resp, err := MustNewClient(WithMaxBodySize(4)).R().Get(server.URL)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(resp.Body) != "1234" {
+		t.Fatalf("unexpected response body %q", resp.Body)
+	}
+}
+
+func TestRequest_SetBodyRejectsNonReplayableReaderWhenRetrying(t *testing.T) {
+	client := MustNewClient(WithRetry(1, time.Millisecond))
+	reader := ioReaderOnly{Reader: strings.NewReader("payload")}
+
+	_, err := client.R().SetBody(reader).Put("http://example.invalid")
+	if !errors.Is(err, ErrRequestBodyNotReplayable) {
+		t.Fatalf("expected ErrRequestBodyNotReplayable, got %v", err)
+	}
+}
+
+func TestRequest_SetBodyReplaysKnownReader(t *testing.T) {
+	var bodies []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data := new(bytes.Buffer)
+		_, _ = data.ReadFrom(r.Body)
+		bodies = append(bodies, data.String())
+		if len(bodies) == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	_, err := MustNewClient(WithRetry(1, time.Millisecond)).R().
+		SetHeader("Idempotency-Key", "request-1").
+		SetBody(strings.NewReader("payload")).
+		Post(server.URL)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(bodies) != 2 || bodies[0] != "payload" || bodies[1] != "payload" {
+		t.Fatalf("unexpected replayed bodies: %#v", bodies)
+	}
+}
+
+func TestRequest_SetBodySnapshotsMutableReaders(t *testing.T) {
+	tests := []struct {
+		name   string
+		reader func() (io.Reader, func())
+	}{
+		{
+			name: "bytes buffer",
+			reader: func() (io.Reader, func()) {
+				buffer := bytes.NewBufferString("original")
+				return buffer, func() { buffer.Bytes()[0] = 'X' }
+			},
+		},
+		{
+			name: "bytes reader",
+			reader: func() (io.Reader, func()) {
+				data := []byte("original")
+				return bytes.NewReader(data), func() { data[0] = 'X' }
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reader, mutate := test.reader()
+			request := MustNewClient(WithRetry(1, time.Millisecond)).R().SetBody(reader)
+			mutate()
+
+			var replay bytes.Buffer
+			if _, err := replay.ReadFrom(request.bodyFactory()); err != nil {
+				t.Fatal(err)
+			}
+			if replay.String() != "original" {
+				t.Fatalf("replayed body = %q, want original", replay.String())
+			}
+		})
+	}
+}
+
+func TestSSRFSafeTransportValidatesTargetWhenUsingProxy(t *testing.T) {
+	proxyReached := false
+	proxy := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		proxyReached = true
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer proxy.Close()
+	proxyURL, err := neturl.Parse(proxy.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	baseTransport := http.DefaultTransport.(*http.Transport).Clone()
+	baseTransport.Proxy = http.ProxyURL(proxyURL)
+	client := &http.Client{
+		Transport: newSSRFSafeTransport(baseTransport, []string{proxyURL.Host}),
+	}
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://127.0.0.1:1/private", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Do(request)
+	if response != nil {
+		_ = response.Body.Close()
+	}
+	if !errors.Is(err, ErrSSRFBlocked) {
+		t.Fatalf("client.Get() error = %v, want ErrSSRFBlocked", err)
+	}
+	if proxyReached {
+		t.Fatal("proxy received a request for a blocked private target")
+	}
+}
+
+func TestSSRFProtectionBlocksSpecialPurposeAddresses(t *testing.T) {
+	blocked := []string{
+		"0.0.0.1",
+		"192.0.2.1",
+		"198.18.0.1",
+		"198.51.100.1",
+		"203.0.113.1",
+		"240.0.0.1",
+		"64:ff9b::7f00:1",
+		"2001:db8::1",
+		"2002:7f00:1::",
+	}
+	for _, address := range blocked {
+		t.Run("blocked_"+address, func(t *testing.T) {
+			if !isBlockedSSRFIP(net.ParseIP(address)) {
+				t.Fatalf("isBlockedSSRFIP(%q) = false, want true", address)
+			}
+		})
+	}
+
+	for _, address := range []string{"8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"} {
+		t.Run("public_"+address, func(t *testing.T) {
+			if isBlockedSSRFIP(net.ParseIP(address)) {
+				t.Fatalf("isBlockedSSRFIP(%q) = true, want false", address)
+			}
+		})
+	}
+}
+
+type ioReaderOnly struct {
+	*strings.Reader
 }
 
 func TestGet(t *testing.T) {
@@ -194,7 +367,7 @@ func TestRequestWithQuery(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient()
+	c := MustNewClient()
 	resp, err := c.R().
 		SetQuery("name", "test").
 		SetQueries(map[string]string{"page": "1"}).
@@ -221,7 +394,7 @@ func TestRequestWithHeaders(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient()
+	c := MustNewClient()
 	resp, err := c.R().
 		SetHeader("X-Custom", "value").
 		SetHeaders(map[string]string{"X-Another": "value2"}).
@@ -311,7 +484,7 @@ func TestBaseURL(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient(WithBaseURL(server.URL))
+	c := MustNewClient(WithBaseURL(server.URL))
 	resp, err := c.R().Get("/api/users")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -334,7 +507,7 @@ func TestQueryWithExistingQuery(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient()
+	c := MustNewClient()
 	_, err := c.R().
 		SetQuery("b", "2").
 		Get(server.URL + "?a=1")
@@ -356,7 +529,7 @@ func TestRetry(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient(WithRetry(3, 10*time.Millisecond))
+	c := MustNewClient(WithRetry(3, 10*time.Millisecond))
 	resp, err := c.R().Get(server.URL)
 
 	if err != nil {
@@ -381,7 +554,7 @@ func TestPatch(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient()
+	c := MustNewClient()
 	resp, err := c.R().Patch(server.URL)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -402,7 +575,7 @@ func TestHead(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient()
+	c := MustNewClient()
 	resp, err := c.R().Head(server.URL)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -423,10 +596,29 @@ func TestContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately
 
-	c := NewClient()
+	c := MustNewClient()
 	_, err := c.R().SetContext(ctx).Get(server.URL)
 
 	if err == nil {
-		t.Error("expected error for cancelled context")
+		t.Error("expected error for canceled context")
+	}
+}
+
+func TestRequestBodyReplacementClearsPreviousJSONError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	request := MustNewClient().R().SetJSONBody(func() {})
+	if _, err := request.Post(server.URL); err == nil {
+		t.Fatal("Post() error = nil after an unsupported JSON value")
+	}
+	response, err := request.SetJSONBody(map[string]string{"status": "ok"}).Post(server.URL)
+	if err != nil {
+		t.Fatalf("Post() error after body replacement = %v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("Post() status = %d", response.StatusCode)
 	}
 }

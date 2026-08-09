@@ -12,8 +12,7 @@ func RegisterTaskHandler(taskType string, handler asynq.HandlerFunc) error {
 	if m == nil {
 		return ErrManagerNotInitialized
 	}
-	m.RegisterHandler(taskType, handler)
-	return nil
+	return m.RegisterHandler(taskType, handler)
 }
 
 // RegisterScheduledTask 注册定时任务（使用全局管理器）

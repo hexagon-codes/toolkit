@@ -10,20 +10,20 @@ import (
 // resolver (including proxy fake-IP DNS). Public entries use documentation-only
 // address ranges; private entries exercise every blocked address family.
 var deterministicDNSFixtures = map[string][]string{
-	"example.com":         {"192.0.2.10"},
-	"google.com":          {"2001:db8::10"},
-	"api.github.com":      {"198.51.100.10", "2001:db8::20"},
-	"private-v4.test":     {"10.23.4.5"},
-	"private-v6.test":     {"fe80::10"},
-	"private-ula.test":    {"fdfe:dcba:9876::98"},
-	"loopback-v4.test":    {"127.0.0.1"},
-	"loopback-v6.test":    {"::1"},
-	"127.0.0.1":           {"127.0.0.1"},
-	"::1":                 {"::1"},
-	"10.0.0.1":            {"10.0.0.1"},
-	"172.16.0.1":          {"172.16.0.1"},
-	"192.168.1.1":         {"192.168.1.1"},
-	"169.254.169.254":     {"169.254.169.254"},
+	"example.com":      {"192.0.2.10"},
+	"google.com":       {"2001:db8::10"},
+	"api.github.com":   {"198.51.100.10", "2001:db8::20"},
+	"private-v4.test":  {"10.23.4.5"},
+	"private-v6.test":  {"fe80::10"},
+	"private-ula.test": {"fdfe:dcba:9876::98"},
+	"loopback-v4.test": {"127.0.0.1"},
+	"loopback-v6.test": {"::1"},
+	"127.0.0.1":        {"127.0.0.1"},
+	"::1":              {"::1"},
+	"10.0.0.1":         {"10.0.0.1"},
+	"172.16.0.1":       {"172.16.0.1"},
+	"192.168.1.1":      {"192.168.1.1"},
+	"169.254.169.254":  {"169.254.169.254"},
 }
 
 func deterministicLookupHost(host string) ([]string, error) {

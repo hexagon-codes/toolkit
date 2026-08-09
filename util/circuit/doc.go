@@ -1,65 +1,31 @@
-// Package circuit 提供熔断器实现
+// Package circuit 提供并发安全的熔断器。
 //
-// 熔断器用于防止级联故障，当下游服务不可用时自动断开，
-// 避免持续的失败请求消耗系统资源。
-//
-// 熔断器有三种状态：
-//   - Closed（关闭）：正常状态，所有请求通过
-//   - Open（打开）：熔断状态，拒绝所有请求
-//   - HalfOpen（半开）：探测状态，允许部分请求通过以检测恢复
+// 熔断器在关闭、打开和半开三种状态间切换。Acquire 返回的 Permit 将每次
+// 放行与完成结果绑定，调用方必须且只能调用一次 Complete。直接执行函数时
+// 优先使用 Execute 或 ExecuteContext，由熔断器自动管理许可。
 //
 // 基本用法：
 //
-//	breaker := circuit.New(
-//	    circuit.WithThreshold(5),        // 5 次失败后熔断
-//	    circuit.WithTimeout(30*time.Second), // 熔断 30 秒后进入半开
+//	breaker, err := circuit.New(
+//		circuit.WithThreshold(5),
+//		circuit.WithTimeout(30*time.Second),
 //	)
-//
+//	if err != nil {
+//		return err
+//	}
+//	defer breaker.Close()
 //	result, err := breaker.Execute(func() (any, error) {
-//	    return callExternalAPI()
+//		return callExternalAPI()
 //	})
 //
-// AI API 专用：
+// 手动管理异步请求：
 //
-//	breaker := circuit.NewAIBreaker(circuit.OpenAIConfig)
-//
-// 支持观察者模式：
-//
-//	breaker.OnStateChange(func(from, to circuit.State) {
-//	    log.Printf("breaker state changed: %s -> %s", from, to)
-//	})
-//
-// --- English ---
-//
-// Package circuit provides a circuit breaker implementation.
-//
-// The circuit breaker prevents cascading failures by automatically
-// tripping when a downstream service becomes unavailable, avoiding
-// continuous failed requests that consume system resources.
-//
-// The circuit breaker has three states:
-//   - Closed: normal state, all requests pass through
-//   - Open: tripped state, all requests are rejected
-//   - HalfOpen: probing state, limited requests pass through to detect recovery
-//
-// Basic usage:
-//
-//	breaker := circuit.New(
-//	    circuit.WithThreshold(5),            // trip after 5 failures
-//	    circuit.WithTimeout(30*time.Second), // enter half-open after 30 seconds
-//	)
-//
-//	result, err := breaker.Execute(func() (any, error) {
-//	    return callExternalAPI()
-//	})
-//
-// For AI APIs:
-//
-//	breaker := circuit.NewAIBreaker(circuit.OpenAIConfig)
-//
-// Supports observer pattern:
-//
-//	breaker.OnStateChange(func(from, to circuit.State) {
-//	    log.Printf("breaker state changed: %s -> %s", from, to)
-//	})
+//	permit, err := breaker.Acquire()
+//	if err != nil {
+//		return err
+//	}
+//	resultErr := callExternalAPIAsync()
+//	if err := permit.Complete(resultErr); err != nil {
+//		return err
+//	}
 package circuit

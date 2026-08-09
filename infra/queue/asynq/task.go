@@ -12,6 +12,7 @@ import (
 // 任务构建器和辅助函数
 // 提供便捷的任务创建和入队方法
 // =========================================
+
 // TaskBuilder 任务构建器
 type TaskBuilder struct {
 	taskType string
@@ -129,6 +130,7 @@ func (b *TaskBuilder) EnqueueWith(ctx context.Context, m *Manager) (*asynq.TaskI
 // =========================================
 // 快捷入队函数
 // =========================================
+
 // EnqueueTask 快捷入队任务
 func EnqueueTask(ctx context.Context, taskType string, payload interface{}, opts ...asynq.Option) (*asynq.TaskInfo, error) {
 	manager := GetManager()
@@ -164,6 +166,7 @@ func EnqueueTaskUnique(ctx context.Context, taskType string, payload interface{}
 // =========================================
 // 任务载荷解析
 // =========================================
+
 // ParsePayload 解析任务载荷
 func ParsePayload[T any](t *asynq.Task) (*T, error) {
 	var payload T

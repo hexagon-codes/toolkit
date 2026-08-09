@@ -1,11 +1,13 @@
 package httpx
 
 import (
+	"bufio"
 	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -27,7 +29,7 @@ data: [DONE]
 	}))
 	defer server.Close()
 
-	client := NewClient()
+	client := MustNewClient()
 	stream, err := client.R().SetContext(context.Background()).GetStream(server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -80,7 +82,7 @@ data: [DONE]
 	}))
 	defer server.Close()
 
-	client := NewClient()
+	client := MustNewClient()
 	stream, err := client.R().SetContext(context.Background()).GetStream(server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -137,7 +139,7 @@ data: [DONE]
 	}))
 	defer server.Close()
 
-	client := NewClient()
+	client := MustNewClient()
 	stream, err := client.R().SetContext(context.Background()).GetStream(server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -171,7 +173,7 @@ data: [DONE]
 	}))
 	defer server.Close()
 
-	client := NewClient()
+	client := MustNewClient()
 	stream, err := client.R().SetContext(context.Background()).GetStream(server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -206,7 +208,7 @@ func TestStreamResponse_PostStream(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient()
+	client := MustNewClient()
 	stream, err := client.R().
 		SetContext(context.Background()).
 		SetJSONBody(map[string]string{"msg": "hello"}).
@@ -238,7 +240,7 @@ data: line3
 	}))
 	defer server.Close()
 
-	client := NewClient()
+	client := MustNewClient()
 	stream, err := client.R().SetContext(context.Background()).GetStream(server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -270,7 +272,7 @@ data: hello
 	}))
 	defer server.Close()
 
-	client := NewClient()
+	client := MustNewClient()
 	stream, err := client.R().SetContext(context.Background()).GetStream(server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -305,7 +307,7 @@ data: actual data
 	}))
 	defer server.Close()
 
-	client := NewClient()
+	client := MustNewClient()
 	stream, err := client.R().SetContext(context.Background()).GetStream(server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -329,7 +331,7 @@ func TestStreamResponse_IsSuccess(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient()
+	client := MustNewClient()
 	stream, err := client.R().SetContext(context.Background()).GetStream(server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -352,7 +354,7 @@ func TestStreamResponse_Closed(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient()
+	client := MustNewClient()
 	stream, err := client.R().SetContext(context.Background()).GetStream(server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -364,6 +366,59 @@ func TestStreamResponse_Closed(t *testing.T) {
 	_, err = stream.ReadSSE()
 	if err != ErrStreamClosed {
 		t.Errorf("expected ErrStreamClosed, got %v", err)
+	}
+}
+
+type blockingStreamBody struct {
+	started   chan struct{}
+	closed    chan struct{}
+	startOnce sync.Once
+	closeOnce sync.Once
+}
+
+func newBlockingStreamBody() *blockingStreamBody {
+	return &blockingStreamBody{started: make(chan struct{}), closed: make(chan struct{})}
+}
+
+func (b *blockingStreamBody) Read([]byte) (int, error) {
+	b.startOnce.Do(func() { close(b.started) })
+	<-b.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (b *blockingStreamBody) Close() error {
+	b.closeOnce.Do(func() { close(b.closed) })
+	return nil
+}
+
+func TestStreamResponseCloseInterruptsBlockedRead(t *testing.T) {
+	body := newBlockingStreamBody()
+	stream := &StreamResponse{body: body, reader: bufio.NewReader(body)}
+	readResult := make(chan error, 1)
+	go func() {
+		_, err := stream.ReadLine()
+		readResult <- err
+	}()
+	select {
+	case <-body.started:
+	case <-time.After(time.Second):
+		t.Fatal("ReadLine() did not begin reading")
+	}
+
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- stream.Close() }()
+	select {
+	case err := <-closeResult:
+		if err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close() did not interrupt the blocked read")
+	}
+	select {
+	case <-readResult:
+	case <-time.After(time.Second):
+		t.Fatal("ReadLine() remained blocked after Close")
 	}
 }
 
@@ -382,7 +437,7 @@ data: item3
 	}))
 	defer server.Close()
 
-	client := NewClient()
+	client := MustNewClient()
 	stream, err := client.R().SetContext(context.Background()).GetStream(server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -423,7 +478,7 @@ data: [DONE]
 	}))
 	defer server.Close()
 
-	client := NewClient()
+	client := MustNewClient()
 	stream, err := client.R().SetContext(context.Background()).GetStream(server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -504,7 +559,7 @@ func TestWithBufferSize(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient()
+	client := MustNewClient()
 	stream, err := client.R().
 		SetContext(context.Background()).
 		GetStream(server.URL, WithBufferSize(8192))

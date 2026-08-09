@@ -1,6 +1,7 @@
 package ip
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -174,7 +175,7 @@ func TestIsInRange(t *testing.T) {
 }
 
 func TestGetLocalIP(t *testing.T) {
-	ip, err := GetLocalIP()
+	ip, err := GetLocalIP(context.Background())
 	if err != nil {
 		// This might fail in some test environments, so just log
 		t.Logf("GetLocalIP error (may be expected): %v", err)
@@ -247,7 +248,7 @@ func TestFromRequest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 			req.RemoteAddr = tt.remoteAddr
 			for k, v := range tt.headers {
 				req.Header.Set(k, v)
@@ -358,7 +359,7 @@ func TestParseCIDR(t *testing.T) {
 
 func TestResolveHost(t *testing.T) {
 	// This test depends on network, may fail in some environments
-	ips, err := ResolveHost("localhost")
+	ips, err := ResolveHost(context.Background(), "localhost")
 	if err != nil {
 		t.Logf("ResolveHost error (may be expected): %v", err)
 		return

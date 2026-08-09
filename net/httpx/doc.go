@@ -1,48 +1,56 @@
-// Package httpx 提供增强型 HTTP 客户端
+// Package httpx 提供增强型 HTTP 客户端。
 //
-// 支持重试、超时、熔断器和请求/响应日志记录。
+// 支持重试、超时、熔断器、请求/响应日志记录和有界主机连接池。
 //
 // 基本用法:
 //
-//	client := httpx.New()
-//	resp, err := client.Get(ctx, "https://api.example.com/data")
-//
-// 带选项:
-//
-//	client := httpx.New(
+//	client, err := httpx.NewClient(
 //	    httpx.WithTimeout(10*time.Second),
-//	    httpx.WithRetry(3),
-//	    httpx.WithBaseURL("https://api.example.com"),
 //	)
+//	if err != nil {
+//	    return err
+//	}
+//	resp, err := client.R().SetContext(ctx).Get("https://api.example.com/data")
 //
-// POST JSON:
+// 有界主机连接池:
 //
-//	resp, err := client.PostJSON(ctx, "/users", map[string]any{
-//	    "name": "John",
-//	})
+//	config := httpx.DefaultHostPoolConfig()
+//	config.MaxHosts = 128
+//	hostPool, err := httpx.NewHostPool(config)
+//	if err != nil {
+//	    return err
+//	}
+//	defer hostPool.Close()
+//	if err := hostPool.RemoveHost("api.example.com"); err != nil {
+//	    return err
+//	}
 //
 // --- English ---
 //
 // Package httpx provides an enhanced HTTP client.
 //
-// Features retry, timeout, circuit breaker, and request/response logging.
+// 支持重试、超时、熔断器、请求/响应日志记录和有界主机连接池。
 //
 // Basic usage:
 //
-//	client := httpx.New()
-//	resp, err := client.Get(ctx, "https://api.example.com/data")
-//
-// With options:
-//
-//	client := httpx.New(
+//	client, err := httpx.NewClient(
 //	    httpx.WithTimeout(10*time.Second),
-//	    httpx.WithRetry(3),
-//	    httpx.WithBaseURL("https://api.example.com"),
 //	)
+//	if err != nil {
+//	    return err
+//	}
+//	resp, err := client.R().SetContext(ctx).Get("https://api.example.com/data")
 //
-// POST with JSON:
+// 有界主机连接池:
 //
-//	resp, err := client.PostJSON(ctx, "/users", map[string]any{
-//	    "name": "John",
-//	})
+//	config := httpx.DefaultHostPoolConfig()
+//	config.MaxHosts = 128
+//	hostPool, err := httpx.NewHostPool(config)
+//	if err != nil {
+//	    return err
+//	}
+//	defer hostPool.Close()
+//	if err := hostPool.RemoveHost("api.example.com"); err != nil {
+//	    return err
+//	}
 package httpx

@@ -2,10 +2,13 @@ package sse
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -18,7 +21,7 @@ event: message
 data: {"content": " World"}
 
 `
-	reader := NewReader(strings.NewReader(input))
+	reader := MustNewReader(strings.NewReader(input))
 
 	// 第一个事件
 	event1, err := reader.Read()
@@ -42,13 +45,111 @@ data: {"content": " World"}
 	}
 }
 
+type boundedCountingReader struct {
+	remaining int
+	read      int
+}
+
+func (r *boundedCountingReader) Read(buffer []byte) (int, error) {
+	if r.remaining == 0 {
+		return 0, io.EOF
+	}
+	count := min(len(buffer), r.remaining)
+	for index := range count {
+		buffer[index] = 'x'
+	}
+	r.remaining -= count
+	r.read += count
+	return count, nil
+}
+
+func TestReaderMaxTotalBytesStopsReadingAnOversizedLineEarly(t *testing.T) {
+	source := &boundedCountingReader{remaining: 1 << 20}
+	reader := MustNewReaderWithOptions(source, WithMaxTotalBytes(32))
+	if _, err := reader.Read(); !errors.Is(err, ErrMaxBytesExceeded) {
+		t.Fatalf("Read() error = %v, want ErrMaxBytesExceeded", err)
+	}
+	if source.read > 8<<10 {
+		t.Fatalf("Read() consumed %d bytes before enforcing a 32-byte limit", source.read)
+	}
+}
+
+type blockingReadCloser struct {
+	started   chan struct{}
+	closed    chan struct{}
+	startOnce sync.Once
+	closeOnce sync.Once
+}
+
+func newBlockingReadCloser() *blockingReadCloser {
+	return &blockingReadCloser{started: make(chan struct{}), closed: make(chan struct{})}
+}
+
+func (r *blockingReadCloser) Read([]byte) (int, error) {
+	r.startOnce.Do(func() { close(r.started) })
+	<-r.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (r *blockingReadCloser) Close() error {
+	r.closeOnce.Do(func() { close(r.closed) })
+	return nil
+}
+
+func TestStreamCloseInterruptsBlockedRead(t *testing.T) {
+	body := newBlockingReadCloser()
+	stream := startStream(context.Background(), MustNewReader(body))
+	select {
+	case <-body.started:
+	case <-time.After(time.Second):
+		t.Fatal("stream did not begin reading")
+	}
+
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- stream.Close() }()
+	select {
+	case err := <-closeResult:
+		if err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close() did not interrupt the blocked read")
+	}
+}
+
+func TestStreamAppliesBackpressureWithoutDroppingEvents(t *testing.T) {
+	const eventCount = 150
+	var input strings.Builder
+	for index := range eventCount {
+		input.WriteString("data: ")
+		input.WriteString(strconv.Itoa(index))
+		input.WriteString("\n\n")
+	}
+	body := io.NopCloser(strings.NewReader(input.String()))
+	stream := startStream(context.Background(), MustNewReader(body))
+	time.Sleep(20 * time.Millisecond)
+
+	var received []string
+	for event := range stream.Events() {
+		received = append(received, event.Data)
+	}
+	if len(received) != eventCount {
+		t.Fatalf("received %d events, want %d", len(received), eventCount)
+	}
+	for index, value := range received {
+		if value != strconv.Itoa(index) {
+			t.Fatalf("event %d = %q", index, value)
+		}
+	}
+}
+
 func TestReader_MultilineData(t *testing.T) {
 	input := `data: line1
 data: line2
 data: line3
 
 `
-	reader := NewReader(strings.NewReader(input))
+	reader := MustNewReader(strings.NewReader(input))
 
 	event, err := reader.Read()
 	if err != nil {
@@ -67,7 +168,7 @@ event: update
 data: hello
 
 `
-	reader := NewReader(strings.NewReader(input))
+	reader := MustNewReader(strings.NewReader(input))
 
 	event, err := reader.Read()
 	if err != nil {
@@ -90,7 +191,7 @@ func TestReader_RetryField(t *testing.T) {
 data: test
 
 `
-	reader := NewReader(strings.NewReader(input))
+	reader := MustNewReader(strings.NewReader(input))
 
 	event, err := reader.Read()
 	if err != nil {
@@ -107,7 +208,7 @@ func TestReader_Comment(t *testing.T) {
 data: actual data
 
 `
-	reader := NewReader(strings.NewReader(input))
+	reader := MustNewReader(strings.NewReader(input))
 
 	event, err := reader.Read()
 	if err != nil {
@@ -127,7 +228,7 @@ id: event-2
 data: second
 
 `
-	reader := NewReader(strings.NewReader(input))
+	reader := MustNewReader(strings.NewReader(input))
 
 	_, _ = reader.Read()
 	if reader.LastEventID() != "event-1" {
@@ -141,7 +242,7 @@ data: second
 }
 
 func TestReader_Close(t *testing.T) {
-	reader := NewReader(strings.NewReader(`data: test`))
+	reader := MustNewReader(strings.NewReader(`data: test`))
 	reader.Close()
 
 	_, err := reader.Read()
@@ -182,7 +283,7 @@ func TestEvent_IsEmpty(t *testing.T) {
 
 func TestWriter_Write(t *testing.T) {
 	recorder := httptest.NewRecorder()
-	writer := NewWriter(recorder)
+	writer := MustNewWriter(recorder)
 
 	event := &Event{
 		ID:    "123",
@@ -204,7 +305,7 @@ func TestWriter_Write(t *testing.T) {
 
 func TestWriter_WriteMultilineData(t *testing.T) {
 	recorder := httptest.NewRecorder()
-	writer := NewWriter(recorder)
+	writer := MustNewWriter(recorder)
 
 	event := &Event{Data: "line1\nline2\nline3"}
 
@@ -221,7 +322,7 @@ func TestWriter_WriteMultilineData(t *testing.T) {
 
 func TestWriter_WriteData(t *testing.T) {
 	recorder := httptest.NewRecorder()
-	writer := NewWriter(recorder)
+	writer := MustNewWriter(recorder)
 
 	err := writer.WriteData("simple message")
 	if err != nil {
@@ -236,7 +337,7 @@ func TestWriter_WriteData(t *testing.T) {
 
 func TestWriter_WriteJSON(t *testing.T) {
 	recorder := httptest.NewRecorder()
-	writer := NewWriter(recorder)
+	writer := MustNewWriter(recorder)
 
 	err := writer.WriteJSON(map[string]int{"id": 1})
 	if err != nil {
@@ -251,7 +352,7 @@ func TestWriter_WriteJSON(t *testing.T) {
 
 func TestWriter_WriteComment(t *testing.T) {
 	recorder := httptest.NewRecorder()
-	writer := NewWriter(recorder)
+	writer := MustNewWriter(recorder)
 
 	err := writer.WriteComment("keep-alive")
 	if err != nil {
@@ -266,7 +367,7 @@ func TestWriter_WriteComment(t *testing.T) {
 
 func TestWriter_Close(t *testing.T) {
 	recorder := httptest.NewRecorder()
-	writer := NewWriter(recorder)
+	writer := MustNewWriter(recorder)
 	writer.Close()
 
 	err := writer.Write(&Event{Data: "test"})
@@ -277,7 +378,7 @@ func TestWriter_Close(t *testing.T) {
 
 func TestWriter_Headers(t *testing.T) {
 	recorder := httptest.NewRecorder()
-	_ = NewWriter(recorder)
+	_ = MustNewWriter(recorder)
 
 	if recorder.Header().Get("Content-Type") != "text/event-stream" {
 		t.Errorf("unexpected Content-Type: %s", recorder.Header().Get("Content-Type"))
@@ -293,13 +394,13 @@ func TestClient_Connect(t *testing.T) {
 			t.Errorf("missing Accept header")
 		}
 
-		writer := NewWriter(w)
+		writer := MustNewWriter(w)
 		writer.Write(&Event{Data: "hello"})
 		writer.Write(&Event{Data: "world"})
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL)
+	client := MustNewClient(server.URL)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -325,12 +426,12 @@ func TestClient_WithHeaders(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer token" {
 			t.Errorf("missing Authorization header")
 		}
-		writer := NewWriter(w)
+		writer := MustNewWriter(w)
 		writer.WriteData("ok")
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, WithHeaders(map[string]string{
+	client := MustNewClient(server.URL, WithHeaders(map[string]string{
 		"Authorization": "Bearer token",
 	}))
 
@@ -349,12 +450,12 @@ func TestClient_WithLastEventID(t *testing.T) {
 		if r.Header.Get("Last-Event-ID") != "event-5" {
 			t.Errorf("expected Last-Event-ID 'event-5', got '%s'", r.Header.Get("Last-Event-ID"))
 		}
-		writer := NewWriter(w)
+		writer := MustNewWriter(w)
 		writer.WriteData("ok")
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, WithLastEventID("event-5"))
+	client := MustNewClient(server.URL, WithLastEventID("event-5"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -372,7 +473,7 @@ func TestClient_HTTPError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL)
+	client := MustNewClient(server.URL)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -411,7 +512,10 @@ func TestFormatEvent(t *testing.T) {
 		Data:  "hello",
 	}
 
-	result := FormatEvent(event)
+	result, err := FormatEvent(event)
+	if err != nil {
+		t.Fatalf("format error: %v", err)
+	}
 	expected := "id: 1\nevent: message\ndata: hello\n\n"
 
 	if result != expected {
@@ -485,7 +589,7 @@ func TestNewReaderWithSize(t *testing.T) {
 	input := `data: test
 
 `
-	reader := NewReaderWithSize(strings.NewReader(input), 1024)
+	reader := MustNewReaderWithSize(strings.NewReader(input), 1024)
 
 	event, err := reader.Read()
 	if err != nil {
@@ -498,13 +602,13 @@ func TestNewReaderWithSize(t *testing.T) {
 
 func TestStream_LastEventID(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writer := NewWriter(w)
+		writer := MustNewWriter(w)
 		writer.Write(&Event{ID: "evt-1", Data: "first"})
 		writer.Write(&Event{ID: "evt-2", Data: "second"})
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL)
+	client := MustNewClient(server.URL)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -515,7 +619,8 @@ func TestStream_LastEventID(t *testing.T) {
 	defer stream.Close()
 
 	// 读取所有事件
-	for range stream.Events() {
+	for event := range stream.Events() {
+		_ = event
 	}
 
 	lastID := stream.LastEventID()
@@ -524,22 +629,20 @@ func TestStream_LastEventID(t *testing.T) {
 	}
 }
 
-func TestReader_EOF(t *testing.T) {
-	input := `data: last event`
-	reader := NewReader(strings.NewReader(input))
+func TestReader_EOFDiscardsIncompleteEvent(t *testing.T) {
+	input := "data: complete\n\ndata: incomplete"
+	reader := MustNewReader(strings.NewReader(input))
 
-	// 没有结束空行，应该在 EOF 时返回事件
 	event, err := reader.Read()
 	if err != nil {
 		t.Fatalf("read error: %v", err)
 	}
-	if event.Data != "last event" {
-		t.Errorf("expected 'last event', got '%s'", event.Data)
+	if event.Data != "complete" {
+		t.Errorf("expected complete event, got %q", event.Data)
 	}
 
-	// 再次读取应该返回 EOF
-	_, err = reader.Read()
-	if err != io.EOF {
-		t.Errorf("expected EOF, got %v", err)
+	event, err = reader.Read()
+	if event != nil || !errors.Is(err, io.EOF) {
+		t.Fatalf("Read() = (%#v, %v), want discarded incomplete event and io.EOF", event, err)
 	}
 }

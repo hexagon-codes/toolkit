@@ -2,13 +2,23 @@ package httpx
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	neturl "net/url"
+	"sync/atomic"
 	"testing"
 )
 
+func mustPresetClient(client *Client, err error) *Client {
+	if err != nil {
+		panic(err)
+	}
+	return client
+}
+
 func TestOpenAIClient(t *testing.T) {
-	client := OpenAIClient("test-api-key")
+	client := mustPresetClient(OpenAIClient("test-api-key"))
 
 	if client.baseURL != "https://api.openai.com/v1" {
 		t.Errorf("unexpected baseURL: %s", client.baseURL)
@@ -22,7 +32,7 @@ func TestOpenAIClient(t *testing.T) {
 }
 
 func TestOpenAIClientWithOrg(t *testing.T) {
-	client := OpenAIClientWithOrg("test-api-key", "org-123")
+	client := mustPresetClient(OpenAIClientWithOrg("test-api-key", "org-123"))
 
 	if client.headers["OpenAI-Organization"] != "org-123" {
 		t.Errorf("unexpected OpenAI-Organization header: %s", client.headers["OpenAI-Organization"])
@@ -30,7 +40,7 @@ func TestOpenAIClientWithOrg(t *testing.T) {
 }
 
 func TestClaudeClient(t *testing.T) {
-	client := ClaudeClient("test-api-key")
+	client := mustPresetClient(ClaudeClient("test-api-key"))
 
 	if client.baseURL != "https://api.anthropic.com/v1" {
 		t.Errorf("unexpected baseURL: %s", client.baseURL)
@@ -44,7 +54,7 @@ func TestClaudeClient(t *testing.T) {
 }
 
 func TestClaudeClientWithVersion(t *testing.T) {
-	client := ClaudeClientWithVersion("test-api-key", "2024-01-01")
+	client := mustPresetClient(ClaudeClientWithVersion("test-api-key", "2024-01-01"))
 
 	if client.headers["anthropic-version"] != "2024-01-01" {
 		t.Errorf("unexpected anthropic-version header: %s", client.headers["anthropic-version"])
@@ -52,15 +62,84 @@ func TestClaudeClientWithVersion(t *testing.T) {
 }
 
 func TestGeminiClient(t *testing.T) {
-	client := GeminiClient("test-api-key")
+	client := mustPresetClient(GeminiClient("test-api-key"))
 
 	if client.baseURL != "https://generativelanguage.googleapis.com/v1beta" {
 		t.Errorf("unexpected baseURL: %s", client.baseURL)
 	}
+	if got := client.headers["x-goog-api-key"]; got != "test-api-key" {
+		t.Errorf("x-goog-api-key header = %q, want test-api-key", got)
+	}
+}
+
+func TestAzureOpenAIClientUsesAPIVersion(t *testing.T) {
+	client := mustPresetClient(AzureOpenAIClient("https://example.openai.azure.com/openai", "test-api-key", "2026-01-01"))
+	parsed, err := neturl.Parse(client.baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parsed.Query().Get("api-version"); got != "2026-01-01" {
+		t.Fatalf("api-version query = %q, want 2026-01-01", got)
+	}
+}
+
+func TestAIPresetsRejectEmptyRequiredConfiguration(t *testing.T) {
+	tests := []struct {
+		name string
+		new  func() (*Client, error)
+	}{
+		{name: "OpenAI API key", new: func() (*Client, error) { return OpenAIClient("") }},
+		{name: "OpenAI organization", new: func() (*Client, error) { return OpenAIClientWithOrg("key", "") }},
+		{name: "Azure endpoint", new: func() (*Client, error) { return AzureOpenAIClient("", "key", "version") }},
+		{name: "Azure API key", new: func() (*Client, error) { return AzureOpenAIClient("https://example.com", "", "version") }},
+		{name: "Azure API version", new: func() (*Client, error) { return AzureOpenAIClient("https://example.com", "key", "") }},
+		{name: "Claude version", new: func() (*Client, error) { return ClaudeClientWithVersion("key", "") }},
+		{name: "Gemini API key", new: func() (*Client, error) { return GeminiClient("") }},
+		{name: "Vertex project", new: func() (*Client, error) { return VertexAIClient("", "region", "token") }},
+		{name: "Vertex region", new: func() (*Client, error) { return VertexAIClient("project", "", "token") }},
+		{name: "Vertex token", new: func() (*Client, error) { return VertexAIClient("project", "region", "") }},
+		{name: "Custom base URL", new: func() (*Client, error) { return CustomAIClient("", "key") }},
+		{name: "Custom API key", new: func() (*Client, error) { return CustomAIClient("https://example.com", "") }},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client, err := test.new()
+			if client != nil {
+				client.CloseIdleConnections()
+				t.Fatalf("preset client = %#v, want nil", client)
+			}
+			if !errors.Is(err, ErrInvalidClientConfig) {
+				t.Fatalf("preset error = %v, want ErrInvalidClientConfig", err)
+			}
+		})
+	}
+}
+
+func TestVertexAIClientRejectsEndpointInjection(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		projectID string
+		region    string
+	}{
+		{name: "region changes host", projectID: "project-1", region: "attacker.example/path"},
+		{name: "project changes path", projectID: "project-1/../other", region: "us-central1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client, err := VertexAIClient(test.projectID, test.region, "token")
+			if client != nil {
+				client.CloseIdleConnections()
+				t.Fatalf("VertexAIClient() client = %#v, want nil", client)
+			}
+			if !errors.Is(err, ErrInvalidClientConfig) {
+				t.Fatalf("VertexAIClient() error = %v, want ErrInvalidClientConfig", err)
+			}
+		})
+	}
 }
 
 func TestDeepSeekClient(t *testing.T) {
-	client := DeepSeekClient("test-api-key")
+	client := mustPresetClient(DeepSeekClient("test-api-key"))
 
 	if client.baseURL != "https://api.deepseek.com/v1" {
 		t.Errorf("unexpected baseURL: %s", client.baseURL)
@@ -71,7 +150,7 @@ func TestDeepSeekClient(t *testing.T) {
 }
 
 func TestQwenClient(t *testing.T) {
-	client := QwenClient("test-api-key")
+	client := mustPresetClient(QwenClient("test-api-key"))
 
 	if client.baseURL != "https://dashscope.aliyuncs.com/api/v1" {
 		t.Errorf("unexpected baseURL: %s", client.baseURL)
@@ -79,7 +158,7 @@ func TestQwenClient(t *testing.T) {
 }
 
 func TestZhipuClient(t *testing.T) {
-	client := ZhipuClient("test-api-key")
+	client := mustPresetClient(ZhipuClient("test-api-key"))
 
 	if client.baseURL != "https://open.bigmodel.cn/api/paas/v4" {
 		t.Errorf("unexpected baseURL: %s", client.baseURL)
@@ -87,7 +166,7 @@ func TestZhipuClient(t *testing.T) {
 }
 
 func TestMoonshotClient(t *testing.T) {
-	client := MoonshotClient("test-api-key")
+	client := mustPresetClient(MoonshotClient("test-api-key"))
 
 	if client.baseURL != "https://api.moonshot.cn/v1" {
 		t.Errorf("unexpected baseURL: %s", client.baseURL)
@@ -95,7 +174,7 @@ func TestMoonshotClient(t *testing.T) {
 }
 
 func TestMistralClient(t *testing.T) {
-	client := MistralClient("test-api-key")
+	client := mustPresetClient(MistralClient("test-api-key"))
 
 	if client.baseURL != "https://api.mistral.ai/v1" {
 		t.Errorf("unexpected baseURL: %s", client.baseURL)
@@ -103,7 +182,7 @@ func TestMistralClient(t *testing.T) {
 }
 
 func TestCohereClient(t *testing.T) {
-	client := CohereClient("test-api-key")
+	client := mustPresetClient(CohereClient("test-api-key"))
 
 	if client.baseURL != "https://api.cohere.ai/v1" {
 		t.Errorf("unexpected baseURL: %s", client.baseURL)
@@ -111,7 +190,7 @@ func TestCohereClient(t *testing.T) {
 }
 
 func TestCustomAIClient(t *testing.T) {
-	client := CustomAIClient("https://custom.api.com/v1", "custom-key")
+	client := mustPresetClient(CustomAIClient("https://custom.api.com/v1", "custom-key"))
 
 	if client.baseURL != "https://custom.api.com/v1" {
 		t.Errorf("unexpected baseURL: %s", client.baseURL)
@@ -126,7 +205,7 @@ func TestCustomAIClientWithHeaders(t *testing.T) {
 		"X-Custom-Header": "custom-value",
 		"Authorization":   "Custom auth",
 	}
-	client := CustomAIClientWithHeaders("https://custom.api.com", headers)
+	client := mustPresetClient(CustomAIClientWithHeaders("https://custom.api.com", headers))
 
 	if client.headers["X-Custom-Header"] != "custom-value" {
 		t.Errorf("unexpected X-Custom-Header: %s", client.headers["X-Custom-Header"])
@@ -137,7 +216,7 @@ func TestCustomAIClientWithHeaders(t *testing.T) {
 }
 
 func TestVertexAIClient(t *testing.T) {
-	client := VertexAIClient("my-project", "us-central1", "test-token")
+	client := mustPresetClient(VertexAIClient("my-project", "us-central1", "test-token"))
 
 	expectedBase := "https://us-central1-aiplatform.googleapis.com/v1/projects/my-project/locations/us-central1"
 	if client.baseURL != expectedBase {
@@ -193,7 +272,7 @@ func TestChatCompletion(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(WithBaseURL(server.URL))
+	client := MustNewClient(WithBaseURL(server.URL))
 
 	req := &AIRequest{
 		Model: "gpt-4",
@@ -228,7 +307,7 @@ func TestChatCompletion_Error(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(WithBaseURL(server.URL))
+	client := MustNewClient(WithBaseURL(server.URL))
 
 	req := &AIRequest{
 		Model: "gpt-4",
@@ -275,7 +354,7 @@ data: [DONE]
 	}))
 	defer server.Close()
 
-	client := NewClient(WithBaseURL(server.URL))
+	client := MustNewClient(WithBaseURL(server.URL))
 
 	req := &AIRequest{
 		Model: "gpt-4",
@@ -289,6 +368,9 @@ data: [DONE]
 		t.Fatalf("unexpected error: %v", err)
 	}
 	defer stream.Close()
+	if req.Stream {
+		t.Fatal("ChatCompletionStream() mutated the caller request")
+	}
 
 	// 读取第一个块
 	chunk1, err := stream.ReadOpenAIChunk()
@@ -306,6 +388,48 @@ data: [DONE]
 	}
 	if chunk2.Choices[0].Delta.Content != "Hello" {
 		t.Errorf("unexpected content: %s", chunk2.Choices[0].Delta.Content)
+	}
+}
+
+func TestChatCompletionRejectsNilRequestWithoutNetworkCall(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		writer.WriteHeader(http.StatusOK)
+		_, _ = writer.Write([]byte("{}"))
+	}))
+	defer server.Close()
+
+	client := MustNewClient(WithBaseURL(server.URL))
+	defer client.CloseIdleConnections()
+	response, err := client.ChatCompletion(nil)
+	if response != nil {
+		t.Fatalf("ChatCompletion(nil) response = %#v, want nil", response)
+	}
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("ChatCompletion(nil) error = %v, want ErrInvalidRequest", err)
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("network calls = %d, want 0", got)
+	}
+}
+
+func TestChatCompletionStreamRejectsNilRequestWithoutPanic(t *testing.T) {
+	client := MustNewClient(WithBaseURL("https://example.com"))
+	defer client.CloseIdleConnections()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("ChatCompletionStream(nil) panicked: %v", recovered)
+		}
+	}()
+
+	stream, err := client.ChatCompletionStream(nil)
+	if stream != nil {
+		_ = stream.Close()
+		t.Fatalf("ChatCompletionStream(nil) stream = %#v, want nil", stream)
+	}
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("ChatCompletionStream(nil) error = %v, want ErrInvalidRequest", err)
 	}
 }
 

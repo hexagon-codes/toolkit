@@ -8,17 +8,23 @@
 package httpx
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
-	"net/url"
+	neturl "net/url"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/time/rate"
+
+	"github.com/hexagon-codes/toolkit/util/circuit"
 )
 
 // ============== 连接池配置 ==============
@@ -59,22 +65,24 @@ type PoolConfig struct {
 	TLSConfig *tls.Config
 
 	// Proxy 代理设置
-	Proxy func(*http.Request) (*url.URL, error)
+	Proxy func(*http.Request) (*neturl.URL, error)
 
 	// DialContext 自定义拨号函数
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
-// DefaultPoolConfig 默认连接池配置
-var DefaultPoolConfig = PoolConfig{
-	MaxIdleConns:          100,
-	MaxConnsPerHost:       10,
-	MaxIdleConnsPerHost:   5,
-	IdleConnTimeout:       90 * time.Second,
-	ConnectTimeout:        30 * time.Second,
-	ResponseHeaderTimeout: 30 * time.Second,
-	TLSHandshakeTimeout:   10 * time.Second,
-	ExpectContinueTimeout: 1 * time.Second,
+// DefaultPoolConfig 返回默认连接池配置。
+func DefaultPoolConfig() PoolConfig {
+	return PoolConfig{
+		MaxIdleConns:          100,
+		MaxConnsPerHost:       10,
+		MaxIdleConnsPerHost:   5,
+		IdleConnTimeout:       90 * time.Second,
+		ConnectTimeout:        30 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
 }
 
 // ============== 连接池 ==============
@@ -95,8 +103,6 @@ type Pool struct {
 
 	// 关闭标记
 	closed atomic.Bool
-
-	mu sync.RWMutex
 }
 
 // PoolStats 连接池统计
@@ -107,37 +113,24 @@ type PoolStats struct {
 	// ActiveRequests 活跃请求数
 	ActiveRequests atomic.Int64
 
-	// TotalConnections 总连接数（历史）
-	TotalConnections atomic.Int64
-
-	// IdleConnections 当前空闲连接数
-	IdleConnections atomic.Int64
-
-	// WaitCount 等待获取连接的次数
-	WaitCount atomic.Int64
-
-	// WaitDuration 等待获取连接的总时间
-	WaitDuration atomic.Int64
-
 	// ErrorCount 错误数
 	ErrorCount atomic.Int64
 
 	// TimeoutCount 超时数
 	TimeoutCount atomic.Int64
 
-	// AvgResponseTime 平均响应时间（纳秒）
-	AvgResponseTime atomic.Int64
-
-	// MaxResponseTime 最大响应时间（纳秒）
-	MaxResponseTime atomic.Int64
+	responseMu        sync.RWMutex
+	completedRequests int64
+	totalResponseTime int64
+	maxResponseTime   int64
 }
 
-// NewPool 创建连接池
-func NewPool(config ...PoolConfig) *Pool {
-	cfg := DefaultPoolConfig
-	if len(config) > 0 {
-		cfg = config[0]
+// NewPool 校验配置并创建连接池。
+func NewPool(config PoolConfig) (*Pool, error) {
+	if err := validatePoolConfig(config); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidPoolConfig, err)
 	}
+	cfg := clonePoolConfig(config)
 
 	dialer := &net.Dialer{
 		Timeout:   cfg.ConnectTimeout,
@@ -157,6 +150,7 @@ func NewPool(config ...PoolConfig) *Pool {
 		TLSClientConfig:       cfg.TLSConfig,
 		Proxy:                 cfg.Proxy,
 		DialContext:           cfg.DialContext,
+		ForceAttemptHTTP2:     true,
 	}
 
 	if transport.DialContext == nil {
@@ -168,13 +162,68 @@ func NewPool(config ...PoolConfig) *Pool {
 		client:    &http.Client{Transport: transport},
 		config:    cfg,
 		stats:     &PoolStats{},
+	}, nil
+}
+
+// NewDefaultPool 使用包内默认配置创建连接池。
+func NewDefaultPool() *Pool {
+	return MustNewPool(DefaultPoolConfig())
+}
+
+// MustNewPool 创建连接池，配置无效时触发 panic。
+// 仅应用于编译期已知且经过测试的静态配置。
+func MustNewPool(config PoolConfig) *Pool {
+	pool, err := NewPool(config)
+	if err != nil {
+		panic(err)
+	}
+	return pool
+}
+
+func validatePoolConfig(config PoolConfig) error {
+	switch {
+	case config.MaxIdleConns < 0:
+		return errors.New("maximum idle connections must not be negative")
+	case config.MaxConnsPerHost < 0:
+		return errors.New("maximum connections per host must not be negative")
+	case config.MaxIdleConnsPerHost < 0:
+		return errors.New("maximum idle connections per host must not be negative")
+	case config.MaxIdleConns > 0 && config.MaxIdleConnsPerHost > config.MaxIdleConns:
+		return errors.New("maximum idle connections per host must not exceed the global maximum")
+	case config.MaxConnsPerHost > 0 && config.MaxIdleConnsPerHost > config.MaxConnsPerHost:
+		return errors.New("maximum idle connections per host must not exceed maximum connections per host")
+	case config.IdleConnTimeout < 0:
+		return errors.New("idle connection timeout must not be negative")
+	case config.ConnectTimeout < 0:
+		return errors.New("connect timeout must not be negative")
+	case config.ResponseHeaderTimeout < 0:
+		return errors.New("response header timeout must not be negative")
+	case config.TLSHandshakeTimeout < 0:
+		return errors.New("TLS handshake timeout must not be negative")
+	case config.ExpectContinueTimeout < 0:
+		return errors.New("expect-continue timeout must not be negative")
+	default:
+		return nil
 	}
 }
 
-// Do 执行 HTTP 请求
+func clonePoolConfig(config PoolConfig) PoolConfig {
+	if config.TLSConfig != nil {
+		config.TLSConfig = config.TLSConfig.Clone()
+	}
+	return config
+}
+
+// Do 执行调用方已构造且目标可信的 HTTP 请求。
+//
+// Pool 是基础传输组件，不判断业务 URL。来自不可信输入的 URL 应通过启用了
+// WithSSRFProtection 的 Client 执行。
 func (p *Pool) Do(req *http.Request) (*http.Response, error) {
+	if err := validateHTTPRequest(req); err != nil {
+		return nil, err
+	}
 	if p.closed.Load() {
-		return nil, fmt.Errorf("pool is closed")
+		return nil, ErrPoolClosed
 	}
 
 	p.stats.TotalRequests.Add(1)
@@ -183,7 +232,7 @@ func (p *Pool) Do(req *http.Request) (*http.Response, error) {
 
 	startTime := time.Now()
 
-	resp, err := p.client.Do(req)
+	resp, err := p.client.Do(req) // #nosec G704 -- 仅执行调用方构造的可信目标请求，安全边界已在方法契约中声明。
 
 	duration := time.Since(startTime)
 	p.updateResponseTime(duration)
@@ -201,12 +250,21 @@ func (p *Pool) Do(req *http.Request) (*http.Response, error) {
 
 // DoWithContext 带上下文执行请求
 func (p *Pool) DoWithContext(ctx context.Context, req *http.Request) (*http.Response, error) {
+	if ctx == nil {
+		return nil, ErrInvalidContext
+	}
+	if err := validateHTTPRequest(req); err != nil {
+		return nil, err
+	}
 	return p.Do(req.WithContext(ctx))
 }
 
 // Get 发送 GET 请求
 func (p *Pool) Get(ctx context.Context, url string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if ctx == nil {
+		return nil, ErrInvalidContext
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", url, http.NoBody)
 	if err != nil {
 		return nil, err
 	}
@@ -215,6 +273,9 @@ func (p *Pool) Get(ctx context.Context, url string) (*http.Response, error) {
 
 // Post 发送 POST 请求
 func (p *Pool) Post(ctx context.Context, url, contentType string, body io.Reader) (*http.Response, error) {
+	if ctx == nil {
+		return nil, ErrInvalidContext
+	}
 	req, err := http.NewRequestWithContext(ctx, "POST", url, body)
 	if err != nil {
 		return nil, err
@@ -226,48 +287,43 @@ func (p *Pool) Post(ctx context.Context, url, contentType string, body io.Reader
 // updateResponseTime 更新响应时间统计
 func (p *Pool) updateResponseTime(duration time.Duration) {
 	ns := duration.Nanoseconds()
-
-	// 更新平均响应时间（指数移动平均，使用 CAS 保证原子性）
-	for {
-		oldAvg := p.stats.AvgResponseTime.Load()
-		newAvg := (oldAvg*9 + ns) / 10
-		if p.stats.AvgResponseTime.CompareAndSwap(oldAvg, newAvg) {
-			break
-		}
-	}
-
-	// 更新最大响应时间
-	for {
-		max := p.stats.MaxResponseTime.Load()
-		if ns <= max {
-			break
-		}
-		if p.stats.MaxResponseTime.CompareAndSwap(max, ns) {
-			break
-		}
+	p.stats.responseMu.Lock()
+	defer p.stats.responseMu.Unlock()
+	p.stats.completedRequests++
+	p.stats.totalResponseTime += ns
+	if ns > p.stats.maxResponseTime {
+		p.stats.maxResponseTime = ns
 	}
 }
 
 // GetStats 获取统计信息
 func (p *Pool) GetStats() PoolStatsSnapshot {
+	p.stats.responseMu.RLock()
+	defer p.stats.responseMu.RUnlock()
+	var average time.Duration
+	if p.stats.completedRequests > 0 {
+		average = time.Duration(p.stats.totalResponseTime / p.stats.completedRequests)
+	}
 	return PoolStatsSnapshot{
-		TotalRequests:   p.stats.TotalRequests.Load(),
-		ActiveRequests:  p.stats.ActiveRequests.Load(),
-		ErrorCount:      p.stats.ErrorCount.Load(),
-		TimeoutCount:    p.stats.TimeoutCount.Load(),
-		AvgResponseTime: time.Duration(p.stats.AvgResponseTime.Load()),
-		MaxResponseTime: time.Duration(p.stats.MaxResponseTime.Load()),
+		TotalRequests:     p.stats.TotalRequests.Load(),
+		ActiveRequests:    p.stats.ActiveRequests.Load(),
+		CompletedRequests: p.stats.completedRequests,
+		ErrorCount:        p.stats.ErrorCount.Load(),
+		TimeoutCount:      p.stats.TimeoutCount.Load(),
+		AvgResponseTime:   average,
+		MaxResponseTime:   time.Duration(p.stats.maxResponseTime),
 	}
 }
 
 // PoolStatsSnapshot 连接池统计快照
 type PoolStatsSnapshot struct {
-	TotalRequests   int64         `json:"total_requests"`
-	ActiveRequests  int64         `json:"active_requests"`
-	ErrorCount      int64         `json:"error_count"`
-	TimeoutCount    int64         `json:"timeout_count"`
-	AvgResponseTime time.Duration `json:"avg_response_time"`
-	MaxResponseTime time.Duration `json:"max_response_time"`
+	TotalRequests     int64         `json:"total_requests"`
+	ActiveRequests    int64         `json:"active_requests"`
+	CompletedRequests int64         `json:"completed_requests"`
+	ErrorCount        int64         `json:"error_count"`
+	TimeoutCount      int64         `json:"timeout_count"`
+	AvgResponseTime   time.Duration `json:"avg_response_time"`
+	MaxResponseTime   time.Duration `json:"max_response_time"`
 }
 
 // Close 关闭连接池
@@ -293,13 +349,43 @@ func (p *Pool) Transport() *http.Transport {
 }
 
 func isTimeout(err error) bool {
-	if netErr, ok := err.(net.Error); ok {
-		return netErr.Timeout()
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+func validateHTTPRequest(req *http.Request) error {
+	if req == nil {
+		return fmt.Errorf("%w: request must not be nil", ErrInvalidRequest)
 	}
-	return false
+	if req.URL == nil || req.URL.Scheme == "" || req.URL.Host == "" {
+		return fmt.Errorf("%w: request URL must be absolute", ErrInvalidRequest)
+	}
+	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+		return fmt.Errorf("%w: request URL scheme must be HTTP or HTTPS", ErrInvalidRequest)
+	}
+	return nil
 }
 
 // ============== 主机级连接池 ==============
+
+// DefaultMaxHostPools 是默认允许保留的主机连接池数量。
+const DefaultMaxHostPools = 256
+
+// HostPoolConfig 配置主机级连接池。
+type HostPoolConfig struct {
+	// Pool 是每个主机连接池的默认配置。
+	Pool PoolConfig
+	// MaxHosts 是配置与已创建主机的联合上限。
+	MaxHosts int
+}
+
+// DefaultHostPoolConfig 返回独立的默认主机连接池配置。
+func DefaultHostPoolConfig() HostPoolConfig {
+	return HostPoolConfig{
+		Pool:     DefaultPoolConfig(),
+		MaxHosts: DefaultMaxHostPools,
+	}
+}
 
 // HostPool 主机级连接池管理
 type HostPool struct {
@@ -312,46 +398,94 @@ type HostPool struct {
 	// hostConfigs 主机特定配置
 	hostConfigs map[string]PoolConfig
 
+	// maxHosts 配置与已创建主机的联合上限
+	maxHosts int
+
 	mu sync.RWMutex
+
+	closed bool
 }
 
-// NewHostPool 创建主机级连接池
-func NewHostPool(defaultConfig ...PoolConfig) *HostPool {
-	cfg := DefaultPoolConfig
-	if len(defaultConfig) > 0 {
-		cfg = defaultConfig[0]
+// NewHostPool 校验配置并创建有界主机连接池。
+func NewHostPool(config HostPoolConfig) (*HostPool, error) {
+	if config.MaxHosts <= 0 {
+		return nil, fmt.Errorf("%w: maximum hosts must be greater than zero", ErrInvalidPoolConfig)
+	}
+	if err := validatePoolConfig(config.Pool); err != nil {
+		return nil, fmt.Errorf("%w: default host pool configuration: %w", ErrInvalidPoolConfig, err)
 	}
 
 	return &HostPool{
 		pools:         make(map[string]*Pool),
-		defaultConfig: cfg,
+		defaultConfig: clonePoolConfig(config.Pool),
 		hostConfigs:   make(map[string]PoolConfig),
-	}
+		maxHosts:      config.MaxHosts,
+	}, nil
 }
 
-// SetHostConfig 设置主机特定配置
-func (hp *HostPool) SetHostConfig(host string, config PoolConfig) {
+// NewDefaultHostPool 使用默认配置创建主机级连接池。
+func NewDefaultHostPool() *HostPool {
+	hostPool, err := NewHostPool(DefaultHostPoolConfig())
+	if err != nil {
+		panic(err)
+	}
+	return hostPool
+}
+
+// SetHostConfig 在主机连接池首次创建前设置专属配置。
+func (hp *HostPool) SetHostConfig(host string, config PoolConfig) error {
+	host, err := normalizeHostPoolKey(host)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidPoolConfig, err)
+	}
+	if err = validatePoolConfig(config); err != nil {
+		return fmt.Errorf("%w: host %q: %w", ErrInvalidPoolConfig, host, err)
+	}
 	hp.mu.Lock()
 	defer hp.mu.Unlock()
-	hp.hostConfigs[host] = config
+	if hp.closed {
+		return ErrPoolClosed
+	}
+	if _, exists := hp.pools[host]; exists {
+		return fmt.Errorf("%w: host %q pool is already initialized", ErrInvalidPoolConfig, host)
+	}
+	if _, configured := hp.hostConfigs[host]; !configured && hp.hostCountLocked() >= hp.maxHosts {
+		return fmt.Errorf("%w: maximum hosts %d", ErrHostPoolCapacity, hp.maxHosts)
+	}
+	hp.hostConfigs[host] = clonePoolConfig(config)
+	return nil
 }
 
 // GetPool 获取指定主机的连接池
-func (hp *HostPool) GetPool(host string) *Pool {
+func (hp *HostPool) GetPool(host string) (*Pool, error) {
+	host, err := normalizeHostPoolKey(host)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidRequest, err)
+	}
 	hp.mu.RLock()
 	pool, exists := hp.pools[host]
+	closed := hp.closed
 	hp.mu.RUnlock()
 
+	if closed {
+		return nil, ErrPoolClosed
+	}
 	if exists {
-		return pool
+		return pool, nil
 	}
 
 	hp.mu.Lock()
 	defer hp.mu.Unlock()
+	if hp.closed {
+		return nil, ErrPoolClosed
+	}
 
 	// 双重检查
 	if pool, exists = hp.pools[host]; exists {
-		return pool
+		return pool, nil
+	}
+	if _, configured := hp.hostConfigs[host]; !configured && hp.hostCountLocked() >= hp.maxHosts {
+		return nil, fmt.Errorf("%w: maximum hosts %d", ErrHostPoolCapacity, hp.maxHosts)
 	}
 
 	// 创建新池
@@ -360,27 +494,64 @@ func (hp *HostPool) GetPool(host string) *Pool {
 		cfg = hostCfg
 	}
 
-	pool = NewPool(cfg)
+	pool, err = NewPool(cfg)
+	if err != nil {
+		return nil, err
+	}
 	hp.pools[host] = pool
-	return pool
+	return pool, nil
 }
 
 // Do 执行请求（自动选择连接池）
 func (hp *HostPool) Do(req *http.Request) (*http.Response, error) {
+	if err := validateHTTPRequest(req); err != nil {
+		return nil, err
+	}
 	host := req.URL.Host
-	pool := hp.GetPool(host)
+	pool, err := hp.GetPool(host)
+	if err != nil {
+		return nil, err
+	}
 	return pool.Do(req)
+}
+
+// RemoveHost 移除主机专属配置与连接池，并释放对应容量。
+func (hp *HostPool) RemoveHost(host string) error {
+	host, err := normalizeHostPoolKey(host)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidRequest, err)
+	}
+
+	hp.mu.Lock()
+	if hp.closed {
+		hp.mu.Unlock()
+		return ErrPoolClosed
+	}
+	pool := hp.pools[host]
+	delete(hp.pools, host)
+	delete(hp.hostConfigs, host)
+	hp.mu.Unlock()
+
+	if pool != nil {
+		pool.Close()
+	}
+	return nil
 }
 
 // Close 关闭所有连接池
 func (hp *HostPool) Close() {
 	hp.mu.Lock()
 	defer hp.mu.Unlock()
+	if hp.closed {
+		return
+	}
+	hp.closed = true
 
 	for _, pool := range hp.pools {
 		pool.Close()
 	}
 	hp.pools = make(map[string]*Pool)
+	hp.hostConfigs = make(map[string]PoolConfig)
 }
 
 // GetAllStats 获取所有主机的统计
@@ -393,6 +564,49 @@ func (hp *HostPool) GetAllStats() map[string]PoolStatsSnapshot {
 		stats[host] = pool.GetStats()
 	}
 	return stats
+}
+
+func (hp *HostPool) hostCountLocked() int {
+	count := len(hp.pools)
+	for host := range hp.hostConfigs {
+		if _, exists := hp.pools[host]; !exists {
+			count++
+		}
+	}
+	return count
+}
+
+func normalizeHostPoolKey(host string) (string, error) {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return "", errors.New("host must not be empty")
+	}
+	parsed, err := neturl.Parse("//" + host)
+	if err != nil {
+		return "", fmt.Errorf("invalid host %q: %w", host, err)
+	}
+	if parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("invalid host %q", host)
+	}
+	hostname := strings.TrimRight(strings.ToLower(parsed.Hostname()), ".")
+	if hostname == "" {
+		return "", fmt.Errorf("invalid host %q", host)
+	}
+	parsedPort := parsed.Port()
+	if parsedPort == "" && strings.HasSuffix(parsed.Host, ":") {
+		return "", fmt.Errorf("invalid host %q", host)
+	}
+	if parsedPort != "" {
+		portNumber, parseErr := strconv.Atoi(parsedPort)
+		if parseErr != nil || portNumber < 1 || portNumber > 65535 {
+			return "", fmt.Errorf("invalid host %q", host)
+		}
+		return net.JoinHostPort(hostname, parsedPort), nil
+	}
+	if strings.Contains(hostname, ":") {
+		return "[" + hostname + "]", nil
+	}
+	return hostname, nil
 }
 
 // ============== 全局连接池 ==============
@@ -418,7 +632,7 @@ func GlobalPool() *Pool {
 		return p
 	}
 
-	p := NewPool()
+	p := NewDefaultPool()
 	globalPool.Store(p)
 	return p
 }
@@ -427,10 +641,17 @@ func GlobalPool() *Pool {
 //
 // 注意：应在程序启动时调用，不建议在运行时频繁更换
 // 旧的连接池不会被自动关闭，调用者负责管理其生命周期
-func SetGlobalPool(pool *Pool) {
+func SetGlobalPool(pool *Pool) error {
+	if pool == nil {
+		return fmt.Errorf("%w: global pool must not be nil", ErrInvalidPoolConfig)
+	}
+	if pool.closed.Load() {
+		return ErrPoolClosed
+	}
 	globalPoolMu.Lock()
 	defer globalPoolMu.Unlock()
 	globalPool.Store(pool)
+	return nil
 }
 
 // ============== 重试中间件 ==============
@@ -450,17 +671,22 @@ type RetryConfig struct {
 	RetryCondition func(resp *http.Response, err error) bool
 }
 
-// DefaultRetryConfig 默认重试配置
-var DefaultRetryConfig = RetryConfig{
-	MaxRetries:   3,
-	RetryWait:    100 * time.Millisecond,
-	MaxRetryWait: 5 * time.Second,
-	RetryCondition: func(resp *http.Response, err error) bool {
-		if err != nil {
-			return true
-		}
-		return resp.StatusCode >= 500 || resp.StatusCode == 429
-	},
+// ErrInvalidRetryConfig 表示 HTTP 重试连接池配置无效。
+var ErrInvalidRetryConfig = errors.New("httpx: invalid retry pool configuration")
+
+// DefaultRetryConfig 返回独立的默认重试配置。
+func DefaultRetryConfig() RetryConfig {
+	return RetryConfig{
+		MaxRetries:   3,
+		RetryWait:    100 * time.Millisecond,
+		MaxRetryWait: 5 * time.Second,
+		RetryCondition: func(resp *http.Response, err error) bool {
+			if err != nil {
+				return true
+			}
+			return resp.StatusCode >= 500 || resp.StatusCode == 429
+		},
+	}
 }
 
 // RetryPool 带重试的连接池
@@ -469,65 +695,91 @@ type RetryPool struct {
 	config RetryConfig
 }
 
-// NewRetryPool 创建带重试的连接池
-func NewRetryPool(pool *Pool, config ...RetryConfig) *RetryPool {
-	cfg := DefaultRetryConfig
-	if len(config) > 0 {
-		cfg = config[0]
+// NewRetryPool 校验配置并创建带重试的连接池。
+func NewRetryPool(pool *Pool, config RetryConfig) (*RetryPool, error) {
+	switch {
+	case pool == nil:
+		return nil, fmt.Errorf("%w: pool must not be nil", ErrInvalidRetryConfig)
+	case pool.closed.Load():
+		return nil, fmt.Errorf("%w: pool: %w", ErrInvalidRetryConfig, ErrPoolClosed)
+	case config.MaxRetries < 0:
+		return nil, fmt.Errorf("%w: maximum retries must not be negative", ErrInvalidRetryConfig)
+	case config.RetryWait < 0:
+		return nil, fmt.Errorf("%w: retry wait must not be negative", ErrInvalidRetryConfig)
+	case config.MaxRetryWait < config.RetryWait:
+		return nil, fmt.Errorf("%w: maximum retry wait must not be shorter than retry wait", ErrInvalidRetryConfig)
+	case config.RetryCondition == nil:
+		return nil, fmt.Errorf("%w: retry condition must not be nil", ErrInvalidRetryConfig)
 	}
 
 	return &RetryPool{
 		pool:   pool,
-		config: cfg,
-	}
+		config: config,
+	}, nil
 }
 
 // Do 执行带重试的请求
 //
-// 注意：对于带 Body 的请求（POST/PUT 等），会在首次发送前缓存 Body 内容，
-// 以便后续重试能够重放请求体。如果 Body 非常大，请考虑内存影响。
+// 带 Body 且需要重试的请求必须提供 GetBody。http.NewRequest 对 bytes.Buffer、
+// bytes.Reader 和 strings.Reader 会自动设置 GetBody。
 func (rp *RetryPool) Do(req *http.Request) (*http.Response, error) {
-	// 缓存请求体以支持重试重放
-	var bodyBytes []byte
-	if req.Body != nil && req.Body != http.NoBody {
-		var err error
-		bodyBytes, err = io.ReadAll(req.Body)
-		_ = req.Body.Close()
-		if err != nil {
-			return nil, fmt.Errorf("retry pool: failed to read request body: %w", err)
-		}
-		// 恢复 Body 供首次使用
-		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-		req.GetBody = func() (io.ReadCloser, error) {
-			return io.NopCloser(bytes.NewReader(bodyBytes)), nil
-		}
+	if err := validateHTTPRequest(req); err != nil {
+		return nil, fmt.Errorf("retry pool: %w", err)
+	}
+	// 非幂等请求未携带幂等键时绕过重试，避免重复业务副作用。
+	if rp.config.MaxRetries == 0 || !isHTTPRetrySafe(req.Method, req.Header) {
+		return rp.pool.Do(req)
+	}
+	hasBody := req.Body != nil && req.Body != http.NoBody
+	if hasBody && req.GetBody == nil {
+		return nil, fmt.Errorf("retry pool: %w", ErrRequestBodyNotReplayable)
 	}
 
 	var lastErr error
-	var lastResp *http.Response
 	wait := rp.config.RetryWait
 
 	for attempt := 0; attempt <= rp.config.MaxRetries; attempt++ {
 		// 如果不是第一次尝试，等待并重置 Body
 		if attempt > 0 {
 			// 等待重试间隔，同时监听 context 取消
+			timer := time.NewTimer(wait)
 			select {
-			case <-time.After(wait):
+			case <-timer.C:
 			case <-req.Context().Done():
-				return nil, req.Context().Err()
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return nil, errors.Join(
+					lastErr,
+					fmt.Errorf("retry pool: backoff interrupted: %w", req.Context().Err()),
+				)
 			}
 			// 指数退避
-			wait *= 2
-			if wait > rp.config.MaxRetryWait {
+			if wait >= rp.config.MaxRetryWait-wait {
 				wait = rp.config.MaxRetryWait
+			} else {
+				wait *= 2
 			}
 			// 重置 Body 以支持重放
-			if bodyBytes != nil {
-				req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			if hasBody {
+				body, err := req.GetBody()
+				if err != nil {
+					return nil, errors.Join(
+						lastErr,
+						fmt.Errorf("retry pool: restore request body: %w", err),
+					)
+				}
+				req.Body = body
 			}
 		}
 
 		resp, err := rp.pool.Do(req)
+		if errors.Is(err, ErrPoolClosed) {
+			return nil, fmt.Errorf("retry pool: %w", err)
+		}
 
 		// 检查是否需要重试
 		if !rp.config.RetryCondition(resp, err) {
@@ -535,18 +787,20 @@ func (rp *RetryPool) Do(req *http.Request) (*http.Response, error) {
 		}
 
 		lastErr = err
+		if lastErr == nil && resp != nil {
+			lastErr = fmt.Errorf("retryable HTTP status: %s", resp.Status)
+		}
 
 		// 关闭响应体以释放连接（重试前必须清理）
 		if resp != nil && resp.Body != nil {
-			_, _ = io.Copy(io.Discard, resp.Body)
-			_ = resp.Body.Close()
+			// 有界排空避免异常响应体让重试路径无限读取；超出上限时放弃连接复用。
+			_, drainErr := io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
+			closeErr := resp.Body.Close()
+			lastErr = errors.Join(lastErr, drainErr, closeErr)
 		}
-		// 不保留 lastResp 引用：Body 已关闭，对调用者无用
-		lastResp = nil
 	}
 
 	// 所有重试均失败
-	_ = lastResp // lastResp 始终为 nil
 	return nil, fmt.Errorf("max retries exceeded: %w", lastErr)
 }
 
@@ -555,188 +809,111 @@ func (rp *RetryPool) Do(req *http.Request) (*http.Response, error) {
 // RateLimitedPool 带限流的连接池
 type RateLimitedPool struct {
 	pool    *Pool
-	limiter *rateLimiter
-}
-
-type rateLimiter struct {
-	tokens   chan struct{}
-	interval time.Duration
-	stop     chan struct{}
-	once     sync.Once
+	limiter *rate.Limiter
 }
 
 // NewRateLimitedPool 创建带限流的连接池
 // rps: 每秒请求数限制
-func NewRateLimitedPool(pool *Pool, rps int) *RateLimitedPool {
-	limiter := &rateLimiter{
-		tokens:   make(chan struct{}, rps),
-		interval: time.Second / time.Duration(rps),
-		stop:     make(chan struct{}),
+func NewRateLimitedPool(pool *Pool, rps int) (*RateLimitedPool, error) {
+	if pool == nil {
+		return nil, errors.New("httpx: rate limited pool requires a pool")
 	}
-
-	// 初始填充 token
-	for i := 0; i < rps; i++ {
-		limiter.tokens <- struct{}{}
+	if pool.closed.Load() {
+		return nil, fmt.Errorf("httpx: rate limited pool: %w", ErrPoolClosed)
 	}
-
-	// 定时补充 token
-	go func() {
-		ticker := time.NewTicker(limiter.interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				select {
-				case limiter.tokens <- struct{}{}:
-				default:
-				}
-			case <-limiter.stop:
-				return
-			}
-		}
-	}()
-
+	if rps <= 0 {
+		return nil, errors.New("httpx: requests per second must be positive")
+	}
 	return &RateLimitedPool{
 		pool:    pool,
-		limiter: limiter,
-	}
+		limiter: rate.NewLimiter(rate.Limit(rps), rps),
+	}, nil
 }
 
 // Do 执行带限流的请求
 func (rlp *RateLimitedPool) Do(req *http.Request) (*http.Response, error) {
-	// 获取 token
-	select {
-	case <-rlp.limiter.tokens:
-	case <-req.Context().Done():
-		return nil, req.Context().Err()
+	if err := validateHTTPRequest(req); err != nil {
+		return nil, fmt.Errorf("rate limited pool: %w", err)
 	}
-
+	if rlp.pool.closed.Load() {
+		return nil, fmt.Errorf("rate limited pool: %w", ErrPoolClosed)
+	}
+	if err := rlp.limiter.Wait(req.Context()); err != nil {
+		return nil, err
+	}
 	return rlp.pool.Do(req)
 }
 
-// Close 关闭限流池，停止 token 补充协程并关闭底层连接池。
+// Close 关闭底层连接池。
 // 多次调用是安全的。
-func (rlp *RateLimitedPool) Close() error {
-	rlp.limiter.once.Do(func() {
-		close(rlp.limiter.stop)
-	})
+func (rlp *RateLimitedPool) Close() {
 	rlp.pool.Close()
-	return nil
 }
 
-// ============== 断路器中间件 ==============
+// ============== 熔断中间件 ==============
 
-// CircuitBreakerConfig 断路器配置
-type CircuitBreakerConfig struct {
-	// FailureThreshold 失败阈值
-	FailureThreshold int
+var errRetryableHTTPStatus = errors.New("httpx: retryable HTTP status")
 
-	// SuccessThreshold 成功阈值（恢复所需）
-	SuccessThreshold int
-
-	// Timeout 开路超时
-	Timeout time.Duration
-}
-
-// CircuitBreakerState 断路器状态
-type CircuitBreakerState int
-
-const (
-	// CircuitClosed 关闭（正常）
-	CircuitClosed CircuitBreakerState = iota
-
-	// CircuitOpen 开路（拒绝请求）
-	CircuitOpen
-
-	// CircuitHalfOpen 半开（尝试恢复）
-	CircuitHalfOpen
-)
-
-// CircuitBreakerPool 带断路器的连接池
+// CircuitBreakerPool 组合连接池与通用熔断器。
 type CircuitBreakerPool struct {
-	pool   *Pool
-	config CircuitBreakerConfig
-
-	state       CircuitBreakerState
-	failures    int
-	successes   int
-	lastFailure time.Time
-
-	mu sync.Mutex
+	pool    *Pool
+	breaker *circuit.Breaker
 }
 
-// NewCircuitBreakerPool 创建带断路器的连接池
-func NewCircuitBreakerPool(pool *Pool, config CircuitBreakerConfig) *CircuitBreakerPool {
-	return &CircuitBreakerPool{
-		pool:   pool,
-		config: config,
-		state:  CircuitClosed,
+// NewCircuitBreakerPool 使用 util/circuit 的统一状态机创建熔断连接池。
+func NewCircuitBreakerPool(pool *Pool, opts ...circuit.Option) (*CircuitBreakerPool, error) {
+	if pool == nil {
+		return nil, errors.New("httpx: circuit breaker pool requires a pool")
 	}
+	if pool.closed.Load() {
+		return nil, fmt.Errorf("httpx: circuit breaker pool: %w", ErrPoolClosed)
+	}
+	breaker, err := circuit.New(opts...)
+	if err != nil {
+		return nil, fmt.Errorf("httpx: create circuit breaker: %w", err)
+	}
+	return &CircuitBreakerPool{pool: pool, breaker: breaker}, nil
 }
 
-// Do 执行带断路器的请求
+// Do 执行带熔断保护的请求；触发熔断的首个 5xx 响应仍原样返回调用方。
 func (cbp *CircuitBreakerPool) Do(req *http.Request) (*http.Response, error) {
-	cbp.mu.Lock()
-
-	// 检查断路器状态
-	switch cbp.state {
-	case CircuitOpen:
-		// 检查是否可以进入半开状态
-		if time.Since(cbp.lastFailure) > cbp.config.Timeout {
-			cbp.state = CircuitHalfOpen
-			cbp.successes = 0
-		} else {
-			cbp.mu.Unlock()
-			return nil, fmt.Errorf("circuit breaker is open")
-		}
+	if err := validateHTTPRequest(req); err != nil {
+		return nil, fmt.Errorf("circuit breaker pool: %w", err)
+	}
+	permit, err := cbp.breaker.Acquire()
+	if err != nil {
+		return nil, err
 	}
 
-	cbp.mu.Unlock()
-
-	// 执行请求
-	resp, err := cbp.pool.Do(req)
-
-	cbp.mu.Lock()
-	defer cbp.mu.Unlock()
-
-	if err != nil || (resp != nil && resp.StatusCode >= 500) {
-		// 失败
-		cbp.failures++
-		cbp.lastFailure = time.Now()
-
-		if cbp.state == CircuitHalfOpen {
-			cbp.state = CircuitOpen
-		} else if cbp.failures >= cbp.config.FailureThreshold {
-			cbp.state = CircuitOpen
-		}
-	} else {
-		// 成功
-		if cbp.state == CircuitHalfOpen {
-			cbp.successes++
-			if cbp.successes >= cbp.config.SuccessThreshold {
-				cbp.state = CircuitClosed
-				cbp.failures = 0
-			}
-		} else {
-			cbp.failures = 0
-		}
+	response, requestErr := cbp.pool.Do(req) //nolint:bodyclose // 成功响应体的所有权随返回值交给调用方。
+	resultErr := requestErr
+	if requestErr == nil && response != nil && response.StatusCode >= http.StatusInternalServerError {
+		resultErr = errRetryableHTTPStatus
 	}
-
-	return resp, err
+	completeErr := permit.Complete(resultErr)
+	if completeErr != nil {
+		if response != nil && response.Body != nil {
+			completeErr = errors.Join(completeErr, response.Body.Close())
+		}
+		return nil, errors.Join(requestErr, completeErr)
+	}
+	if requestErr != nil {
+		return nil, requestErr
+	}
+	if response == nil {
+		return nil, errors.New("httpx: pool returned an empty response")
+	}
+	return response, nil
 }
 
-// State 获取当前状态
-func (cbp *CircuitBreakerPool) State() CircuitBreakerState {
-	cbp.mu.Lock()
-	defer cbp.mu.Unlock()
-	return cbp.state
-}
+// State 返回当前熔断状态。
+func (cbp *CircuitBreakerPool) State() circuit.State { return cbp.breaker.State() }
 
-// Reset 重置断路器
-func (cbp *CircuitBreakerPool) Reset() {
-	cbp.mu.Lock()
-	defer cbp.mu.Unlock()
-	cbp.state = CircuitClosed
-	cbp.failures = 0
-	cbp.successes = 0
+// Reset 重置熔断器。
+func (cbp *CircuitBreakerPool) Reset() error { return cbp.breaker.Reset() }
+
+// Close 关闭熔断器与底层连接池，多次调用是安全的。
+func (cbp *CircuitBreakerPool) Close() {
+	cbp.breaker.Close()
+	cbp.pool.Close()
 }

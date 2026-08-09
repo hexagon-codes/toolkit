@@ -11,11 +11,14 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/hibiken/asynq v0.25.1
 	github.com/prometheus/client_golang v1.23.2
+	github.com/prometheus/client_model v0.6.2
+	github.com/prometheus/common v0.66.1
 	github.com/redis/go-redis/v9 v9.17.3
 	go.mongodb.org/mongo-driver v1.17.7
 	golang.org/x/crypto v0.47.0
 	golang.org/x/sync v0.21.0
 	golang.org/x/sys v0.40.0
+	golang.org/x/time v0.8.0
 )
 
 require (
@@ -36,8 +39,6 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/paulmach/orb v0.12.0 // indirect
 	github.com/pierrec/lz4/v4 v4.1.25 // indirect
-	github.com/prometheus/client_model v0.6.2 // indirect
-	github.com/prometheus/common v0.66.1 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect
 	github.com/robfig/cron/v3 v3.0.1 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
@@ -55,6 +56,5 @@ require (
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/text v0.39.0 // indirect
-	golang.org/x/time v0.8.0 // indirect
 	google.golang.org/protobuf v1.36.8 // indirect
 )

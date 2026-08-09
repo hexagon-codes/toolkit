@@ -9,8 +9,26 @@ import (
 	"time"
 )
 
+func newTestBreaker(t *testing.T, options ...Option) *Breaker {
+	t.Helper()
+	breaker, err := New(options...)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	return breaker
+}
+
+func newTestManager(t *testing.T, options ...Option) *BreakerManager {
+	t.Helper()
+	manager, err := NewBreakerManager(options...)
+	if err != nil {
+		t.Fatalf("NewBreakerManager() error = %v", err)
+	}
+	return manager
+}
+
 func TestBreaker_InitialState(t *testing.T) {
-	b := New()
+	b := newTestBreaker(t)
 
 	if b.State() != StateClosed {
 		t.Errorf("expected StateClosed, got %v", b.State())
@@ -18,7 +36,7 @@ func TestBreaker_InitialState(t *testing.T) {
 }
 
 func TestBreaker_OpenOnFailures(t *testing.T) {
-	b := New(WithThreshold(3))
+	b := newTestBreaker(t, WithThreshold(3))
 
 	// 模拟失败
 	for i := 0; i < 3; i++ {
@@ -33,7 +51,7 @@ func TestBreaker_OpenOnFailures(t *testing.T) {
 }
 
 func TestBreaker_RejectWhenOpen(t *testing.T) {
-	b := New(WithThreshold(1))
+	b := newTestBreaker(t, WithThreshold(1))
 
 	// 触发熔断
 	_, _ = b.Execute(func() (any, error) {
@@ -54,7 +72,7 @@ func TestBreaker_TransitionToHalfOpen(t *testing.T) {
 	now := time.Now()
 	currentTime := now
 
-	b := New(
+	b := newTestBreaker(t,
 		WithThreshold(1),
 		WithTimeout(100*time.Millisecond),
 		WithNow(func() time.Time { return currentTime }),
@@ -73,9 +91,12 @@ func TestBreaker_TransitionToHalfOpen(t *testing.T) {
 	currentTime = now.Add(200 * time.Millisecond)
 
 	// 应该允许请求（进入半开状态）
-	err := b.Allow()
+	permit, err := b.Acquire()
 	if err != nil {
 		t.Errorf("expected nil, got %v", err)
+	}
+	if permit == nil {
+		t.Fatal("Acquire() permit = nil")
 	}
 
 	if b.State() != StateHalfOpen {
@@ -87,7 +108,7 @@ func TestBreaker_RecoverFromHalfOpen(t *testing.T) {
 	now := time.Now()
 	currentTime := now
 
-	b := New(
+	b := newTestBreaker(t,
 		WithThreshold(1),
 		WithTimeout(100*time.Millisecond),
 		WithSuccessThreshold(2),
@@ -118,7 +139,7 @@ func TestBreaker_BackToOpenFromHalfOpen(t *testing.T) {
 	now := time.Now()
 	currentTime := now
 
-	b := New(
+	b := newTestBreaker(t,
 		WithThreshold(1),
 		WithTimeout(100*time.Millisecond),
 		WithNow(func() time.Time { return currentTime }),
@@ -143,7 +164,7 @@ func TestBreaker_BackToOpenFromHalfOpen(t *testing.T) {
 }
 
 func TestBreaker_SuccessResetFailures(t *testing.T) {
-	b := New(WithThreshold(3))
+	b := newTestBreaker(t, WithThreshold(3))
 
 	// 2 次失败
 	for i := 0; i < 2; i++ {
@@ -170,7 +191,7 @@ func TestBreaker_SuccessResetFailures(t *testing.T) {
 }
 
 func TestBreaker_ExecuteContext(t *testing.T) {
-	b := New()
+	b := newTestBreaker(t)
 
 	ctx := context.Background()
 	result, err := b.ExecuteContext(ctx, func(ctx context.Context) (any, error) {
@@ -186,7 +207,7 @@ func TestBreaker_ExecuteContext(t *testing.T) {
 }
 
 func TestBreaker_Reset(t *testing.T) {
-	b := New(WithThreshold(1))
+	b := newTestBreaker(t, WithThreshold(1))
 
 	// 触发熔断
 	_, _ = b.Execute(func() (any, error) {
@@ -198,7 +219,9 @@ func TestBreaker_Reset(t *testing.T) {
 	}
 
 	// 重置
-	b.Reset()
+	if err := b.Reset(); err != nil {
+		t.Fatalf("Reset() error = %v", err)
+	}
 
 	if b.State() != StateClosed {
 		t.Errorf("expected StateClosed after reset, got %v", b.State())
@@ -209,7 +232,7 @@ func TestBreaker_OnStateChange(t *testing.T) {
 	var changes []struct{ from, to State }
 	var mu sync.Mutex
 
-	b := New(
+	b := newTestBreaker(t,
 		WithThreshold(1),
 		WithOnStateChange(func(from, to State) {
 			mu.Lock()
@@ -237,8 +260,55 @@ func TestBreaker_OnStateChange(t *testing.T) {
 	}
 }
 
+func TestBreaker_CloseIsIdempotentAndRejectsNewWork(t *testing.T) {
+	breaker := newTestBreaker(t,
+		WithThreshold(1),
+		WithOnStateChange(func(_, _ State) {}),
+	)
+	permit, err := breaker.Acquire()
+	if err != nil {
+		t.Fatalf("Acquire() error = %v", err)
+	}
+	if completeErr := permit.Complete(errors.New("failed")); completeErr != nil {
+		t.Fatalf("Complete() error = %v", completeErr)
+	}
+	breaker.Close()
+	breaker.Close()
+
+	_, err = breaker.Execute(func() (any, error) { return nil, nil })
+	if !errors.Is(err, ErrBreakerClosed) {
+		t.Fatalf("expected ErrBreakerClosed, got %v", err)
+	}
+}
+
+func TestBreaker_CloseConcurrentWithTransitions(t *testing.T) {
+	breaker := newTestBreaker(t,
+		WithThreshold(1),
+		WithOnStateChange(func(_, _ State) {}),
+	)
+
+	var wg sync.WaitGroup
+	for range 100 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = breaker.Execute(func() (any, error) {
+				return nil, errors.New("failed")
+			})
+			_ = breaker.Reset()
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		breaker.Close()
+	}()
+	wg.Wait()
+	breaker.Close()
+}
+
 func TestBreaker_Stats(t *testing.T) {
-	b := New(WithThreshold(5))
+	b := newTestBreaker(t, WithThreshold(5))
 
 	// 3 次失败
 	for i := 0; i < 3; i++ {
@@ -260,7 +330,7 @@ func TestBreaker_HalfOpenMaxRequests(t *testing.T) {
 	now := time.Now()
 	currentTime := now
 
-	b := New(
+	b := newTestBreaker(t,
 		WithThreshold(1),
 		WithTimeout(100*time.Millisecond),
 		WithHalfOpenMaxRequests(2),
@@ -275,33 +345,38 @@ func TestBreaker_HalfOpenMaxRequests(t *testing.T) {
 	// 时间推进
 	currentTime = now.Add(200 * time.Millisecond)
 
-	// 前两个请求应该被允许（不调用 Success/Failure，保持在半开状态）
-	err1 := b.Allow()
+	// 前两个请求应该被允许（不提交结果，保持在半开状态）
+	first, err1 := b.Acquire()
 	if err1 != nil {
 		t.Errorf("first request should be allowed, got %v", err1)
 	}
 
-	err2 := b.Allow()
+	second, err2 := b.Acquire()
 	if err2 != nil {
 		t.Errorf("second request should be allowed, got %v", err2)
 	}
+	if first == nil || second == nil {
+		t.Fatal("Acquire() returned a nil permit")
+	}
 
 	// 第三个应该被拒绝（超过半开状态最大请求数）
-	err3 := b.Allow()
+	_, err3 := b.Acquire()
 	if err3 != ErrTooManyRequests {
 		t.Errorf("third request should be rejected, got %v", err3)
 	}
 }
 
-func TestBreaker_AllowAndSuccess(t *testing.T) {
-	b := New()
+func TestBreaker_AcquireAndSuccess(t *testing.T) {
+	b := newTestBreaker(t)
 
-	err := b.Allow()
+	permit, err := b.Acquire()
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 
-	b.Success()
+	if err := permit.Complete(nil); err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
 
 	stats := b.Stats()
 	if stats.Failures != 0 {
@@ -309,15 +384,17 @@ func TestBreaker_AllowAndSuccess(t *testing.T) {
 	}
 }
 
-func TestBreaker_AllowAndFailure(t *testing.T) {
-	b := New(WithThreshold(1))
+func TestBreaker_AcquireAndFailure(t *testing.T) {
+	b := newTestBreaker(t, WithThreshold(1))
 
-	err := b.Allow()
+	permit, err := b.Acquire()
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 
-	b.Failure()
+	if err := permit.Complete(errors.New("failed")); err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
 
 	if b.State() != StateOpen {
 		t.Errorf("expected StateOpen, got %v", b.State())
@@ -325,7 +402,7 @@ func TestBreaker_AllowAndFailure(t *testing.T) {
 }
 
 func TestBreaker_CustomIsFailure(t *testing.T) {
-	b := New(
+	b := newTestBreaker(t,
 		WithThreshold(1),
 		WithIsFailure(func(err error) bool {
 			// 只有特定错误才认为是失败
@@ -371,7 +448,10 @@ func TestState_String(t *testing.T) {
 }
 
 func TestNewAIBreaker(t *testing.T) {
-	b := NewAIBreaker(OpenAIConfig)
+	b, err := NewAIBreaker(OpenAIConfig())
+	if err != nil {
+		t.Fatalf("NewAIBreaker() error = %v", err)
+	}
 
 	if b.State() != StateClosed {
 		t.Errorf("expected StateClosed, got %v", b.State())
@@ -387,11 +467,27 @@ func TestNewAIBreaker(t *testing.T) {
 }
 
 func TestNewAIBreaker_WithExtra(t *testing.T) {
-	b := NewAIBreaker(OpenAIConfig, WithThreshold(10))
+	b, err := NewAIBreaker(OpenAIConfig(), WithThreshold(10))
+	if err != nil {
+		t.Fatalf("NewAIBreaker() error = %v", err)
+	}
 
 	// 额外选项应该覆盖预设
 	if b.config.Threshold != 10 {
 		t.Errorf("expected threshold 10, got %d", b.config.Threshold)
+	}
+}
+
+func TestPresetConfigsReturnIndependentSlices(t *testing.T) {
+	first := OpenAIConfig()
+	first[0] = WithThreshold(1)
+
+	b, err := NewAIBreaker(OpenAIConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.config.Threshold != 5 {
+		t.Fatalf("OpenAIConfig() threshold = %d, want 5", b.config.Threshold)
 	}
 }
 
@@ -464,12 +560,20 @@ func TestIsRateLimitError(t *testing.T) {
 }
 
 func TestBreakerManager_Get(t *testing.T) {
-	factory := func() *Breaker { return New(WithThreshold(3)) }
-	manager := NewBreakerManager(factory)
+	manager := newTestManager(t, WithThreshold(3))
 
-	b1 := manager.Get("service-a")
-	b2 := manager.Get("service-a")
-	b3 := manager.Get("service-b")
+	b1, err := manager.Get("service-a")
+	if err != nil {
+		t.Fatalf("Get(service-a) error = %v", err)
+	}
+	b2, err := manager.Get("service-a")
+	if err != nil {
+		t.Fatalf("Get(service-a) second error = %v", err)
+	}
+	b3, err := manager.Get("service-b")
+	if err != nil {
+		t.Fatalf("Get(service-b) error = %v", err)
+	}
 
 	if b1 != b2 {
 		t.Error("expected same breaker for same name")
@@ -480,8 +584,7 @@ func TestBreakerManager_Get(t *testing.T) {
 }
 
 func TestBreakerManager_Execute(t *testing.T) {
-	factory := func() *Breaker { return New(WithThreshold(1)) }
-	manager := NewBreakerManager(factory)
+	manager := newTestManager(t, WithThreshold(1))
 
 	// 触发 service-a 熔断
 	_, _ = manager.Execute("service-a", func() (any, error) {
@@ -509,8 +612,7 @@ func TestBreakerManager_Execute(t *testing.T) {
 }
 
 func TestBreakerManager_Reset(t *testing.T) {
-	factory := func() *Breaker { return New(WithThreshold(1)) }
-	manager := NewBreakerManager(factory)
+	manager := newTestManager(t, WithThreshold(1))
 
 	// 触发熔断
 	_, _ = manager.Execute("service", func() (any, error) {
@@ -518,7 +620,9 @@ func TestBreakerManager_Reset(t *testing.T) {
 	})
 
 	// 重置
-	manager.Reset("service")
+	if err := manager.Reset("service"); err != nil {
+		t.Fatalf("Reset() error = %v", err)
+	}
 
 	// 应该可以执行
 	result, err := manager.Execute("service", func() (any, error) {
@@ -533,8 +637,7 @@ func TestBreakerManager_Reset(t *testing.T) {
 }
 
 func TestBreakerManager_ResetAll(t *testing.T) {
-	factory := func() *Breaker { return New(WithThreshold(1)) }
-	manager := NewBreakerManager(factory)
+	manager := newTestManager(t, WithThreshold(1))
 
 	// 触发多个熔断
 	_, _ = manager.Execute("service-a", func() (any, error) {
@@ -545,7 +648,9 @@ func TestBreakerManager_ResetAll(t *testing.T) {
 	})
 
 	// 全部重置
-	manager.ResetAll()
+	if err := manager.ResetAll(); err != nil {
+		t.Fatalf("ResetAll() error = %v", err)
+	}
 
 	states := manager.States()
 	for name, state := range states {
@@ -556,12 +661,15 @@ func TestBreakerManager_ResetAll(t *testing.T) {
 }
 
 func TestBreakerManager_States(t *testing.T) {
-	factory := func() *Breaker { return New(WithThreshold(1)) }
-	manager := NewBreakerManager(factory)
+	manager := newTestManager(t, WithThreshold(1))
 
 	// 创建一些熔断器
-	manager.Get("service-a")
-	manager.Get("service-b")
+	if _, err := manager.Get("service-a"); err != nil {
+		t.Fatalf("Get(service-a) error = %v", err)
+	}
+	if _, err := manager.Get("service-b"); err != nil {
+		t.Fatalf("Get(service-b) error = %v", err)
+	}
 
 	// 触发一个熔断
 	_, _ = manager.Execute("service-a", func() (any, error) {
@@ -579,7 +687,7 @@ func TestBreakerManager_States(t *testing.T) {
 }
 
 func TestBreaker_Concurrent(t *testing.T) {
-	b := New(WithThreshold(100))
+	b := newTestBreaker(t, WithThreshold(100))
 
 	var wg sync.WaitGroup
 	var successCount atomic.Int32
@@ -608,5 +716,108 @@ func TestBreaker_Concurrent(t *testing.T) {
 	// 由于成功会重置失败计数，应该没有熔断
 	if b.State() != StateClosed {
 		t.Logf("State: %v, successes: %d, errors: %d", b.State(), successCount.Load(), errorCount.Load())
+	}
+}
+
+func TestNewRejectsInvalidConfig(t *testing.T) {
+	if _, err := New(WithThreshold(0)); err == nil {
+		t.Fatal("New() error = nil, want invalid threshold error")
+	}
+	if _, err := New(nil); err == nil {
+		t.Fatal("New(nil) error = nil, want invalid option error")
+	}
+}
+
+func TestHalfOpenSuccessThresholdCanExceedConcurrency(t *testing.T) {
+	now := time.Now()
+	breaker, err := New(
+		WithThreshold(1),
+		WithTimeout(time.Millisecond),
+		WithHalfOpenMaxRequests(1),
+		WithSuccessThreshold(2),
+		WithNow(func() time.Time { return now }),
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	permit, err := breaker.Acquire()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completeErr := permit.Complete(errors.New("failed")); completeErr != nil {
+		t.Fatal(completeErr)
+	}
+	now = now.Add(2 * time.Millisecond)
+
+	for attempt := 0; attempt < 2; attempt++ {
+		permit, err = breaker.Acquire()
+		if err != nil {
+			t.Fatalf("half-open Acquire() attempt %d error = %v", attempt+1, err)
+		}
+		if err := permit.Complete(nil); err != nil {
+			t.Fatalf("half-open Complete() attempt %d error = %v", attempt+1, err)
+		}
+	}
+	if state := breaker.State(); state != StateClosed {
+		t.Fatalf("State() = %s, want closed", state)
+	}
+}
+
+func TestPermitCompletionIsBoundToAdmittedRequest(t *testing.T) {
+	now := time.Now()
+	breaker, err := New(
+		WithThreshold(1),
+		WithTimeout(time.Millisecond),
+		WithHalfOpenMaxRequests(2),
+		WithSuccessThreshold(2),
+		WithNow(func() time.Time { return now }),
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	closedPermit, err := breaker.Acquire()
+	if err != nil {
+		t.Fatalf("Acquire() error = %v", err)
+	}
+	if completeErr := closedPermit.Complete(errors.New("failed")); completeErr != nil {
+		t.Fatalf("Complete() error = %v", completeErr)
+	}
+	now = now.Add(2 * time.Millisecond)
+
+	first, err := breaker.Acquire()
+	if err != nil {
+		t.Fatalf("first half-open Acquire() error = %v", err)
+	}
+	second, err := breaker.Acquire()
+	if err != nil {
+		t.Fatalf("second half-open Acquire() error = %v", err)
+	}
+	if err := first.Complete(errors.New("failed again")); err != nil {
+		t.Fatalf("first Complete() error = %v", err)
+	}
+	if err := second.Complete(nil); err != nil {
+		t.Fatalf("stale Complete() error = %v", err)
+	}
+	if breaker.State() != StateOpen {
+		t.Fatalf("State() = %s, want open", breaker.State())
+	}
+}
+
+func TestExecutePanicCompletesPermitAsFailure(t *testing.T) {
+	breaker := newTestBreaker(t, WithThreshold(1))
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("Execute() did not propagate panic")
+			}
+		}()
+		_, _ = breaker.Execute(func() (any, error) {
+			panic("failed")
+		})
+	}()
+	if breaker.State() != StateOpen {
+		t.Fatalf("State() = %s, want open", breaker.State())
 	}
 }

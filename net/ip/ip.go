@@ -1,10 +1,17 @@
 package ip
 
 import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
 )
+
+// ErrNilContext 表示网络调用收到 nil context。
+var ErrNilContext = errors.New("context must not be nil")
 
 // IsValid 验证 IP 地址是否有效
 func IsValid(ip string) bool {
@@ -49,18 +56,13 @@ func IsLoopback(ip string) bool {
 
 // IsPublic 判断是否为公网 IP
 //
-// 公网定义为：能被解析为合法 IP，且不属于任何内网/保留地址段。
-// 内网/保留判定复用 IsPrivateOrReservedIP，因此除 RFC1918/ULA、回环、未指定
-// 外，链路本地（169.254.0.0/16、fe80::/10，含云元数据端点 169.254.169.254）
-// 同样被判为非公网——这与早期实现相比补齐了链路本地一类，避免误把元数据端点
-// 当作公网放行（SSRF 隐患）。对仅含 RFC1918/ULA/回环/未指定的既有用例，
-// 判定结果保持不变，向后兼容。
+// 公网定义为：能被解析为合法 IP、属于全局单播，且不属于任何内网或保留地址段。
 func IsPublic(ip string) bool {
 	parsed := net.ParseIP(ip)
 	if parsed == nil {
 		return false
 	}
-	return !IsPrivateOrReservedIP(parsed)
+	return parsed.IsGlobalUnicast() && !IsPrivateOrReservedIP(parsed)
 }
 
 // IsPrivateOrReservedIP 判断（已解析的）net.IP 是否为内网或保留地址，用于 SSRF 防御。
@@ -77,7 +79,8 @@ func IsPrivateOrReservedIP(ip net.IP) bool {
 	if ip == nil {
 		return false
 	}
-	return ip.IsLoopback() ||
+	return !ip.IsGlobalUnicast() ||
+		ip.IsLoopback() ||
 		ip.IsPrivate() ||
 		ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() ||
@@ -109,25 +112,23 @@ func IsInRange(ip, start, end string) bool {
 		return false
 	}
 
-	// 转换为相同格式进行比较
-	ip16 := ipParsed.To16()
-	start16 := startParsed.To16()
-	end16 := endParsed.To16()
-
-	return bytes16Compare(ip16, start16) >= 0 && bytes16Compare(ip16, end16) <= 0
-}
-
-// bytes16Compare 比较两个 16 字节的 IP
-func bytes16Compare(a, b net.IP) int {
-	for i := 0; i < 16; i++ {
-		if a[i] < b[i] {
-			return -1
-		}
-		if a[i] > b[i] {
-			return 1
-		}
+	ipIsV4 := ipParsed.To4() != nil
+	startIsV4 := startParsed.To4() != nil
+	endIsV4 := endParsed.To4() != nil
+	if ipIsV4 != startIsV4 || ipIsV4 != endIsV4 {
+		return false
 	}
-	return 0
+
+	if ipIsV4 {
+		ipParsed = ipParsed.To4()
+		startParsed = startParsed.To4()
+		endParsed = endParsed.To4()
+	} else {
+		ipParsed = ipParsed.To16()
+		startParsed = startParsed.To16()
+		endParsed = endParsed.To16()
+	}
+	return bytes.Compare(ipParsed, startParsed) >= 0 && bytes.Compare(ipParsed, endParsed) <= 0
 }
 
 // GetLocalIPs 获取本机所有 IP 地址
@@ -151,25 +152,33 @@ func GetLocalIPs() ([]string, error) {
 }
 
 // GetLocalIP 获取本机首选 IP 地址
-func GetLocalIP() (string, error) {
-	conn, err := net.Dial("udp", "8.8.8.8:80")
+func GetLocalIP(ctx context.Context) (_ string, err error) {
+	if ctx == nil {
+		return "", ErrNilContext
+	}
+
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(ctx, "udp", "8.8.8.8:80")
 	if err != nil {
 		// 如果无法连接外网，尝试获取本地接口 IP
-		ips, err := GetLocalIPs()
-		if err != nil || len(ips) == 0 {
-			return "127.0.0.1", err
+		ips, localErr := GetLocalIPs()
+		if localErr != nil || len(ips) == 0 {
+			return "127.0.0.1", localErr
 		}
 		return ips[0], nil
 	}
-	defer conn.Close()
+	defer func() { err = errors.Join(err, conn.Close()) }()
 
-	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	localAddr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return "", fmt.Errorf("unexpected local address type %T", conn.LocalAddr())
+	}
 	return localAddr.IP.String(), nil
 }
 
 // GetOutboundIP 获取出站 IP（连接外网时使用的 IP）
-func GetOutboundIP() (string, error) {
-	return GetLocalIP()
+func GetOutboundIP(ctx context.Context) (string, error) {
+	return GetLocalIP(ctx)
 }
 
 // FromRequest 从 HTTP 请求中获取客户端 IP
@@ -178,6 +187,10 @@ func GetOutboundIP() (string, error) {
 // 直接暴露到公网时，攻击者可以伪造这些头绕过 IP 限制
 // 对于安全敏感场景，应使用 FromRequestDirect 或 FromRequestWithTrustedProxies
 func FromRequest(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+
 	// 按优先级检查代理头
 	headers := []string{
 		"X-Real-IP",
@@ -215,6 +228,10 @@ func FromRequest(r *http.Request) string {
 //
 // 对于在反向代理后部署的服务，应使用 FromRequestWithTrustedProxies。
 func FromRequestDirect(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
@@ -232,6 +249,10 @@ func FromRequestDirect(r *http.Request) string {
 //	// 信任来自 10.0.0.0/8 网段的代理
 //	ip := FromRequestWithTrustedProxies(r, []string{"10.0.0.0/8", "172.16.0.0/12"})
 func FromRequestWithTrustedProxies(r *http.Request, trustedProxies []string) string {
+	if r == nil {
+		return ""
+	}
+
 	remoteIP := FromRequestDirect(r)
 
 	// 检查 RemoteAddr 是否在可信代理列表中
@@ -327,7 +348,7 @@ func IPv4ToInt(ip string) uint32 {
 
 // IntToIPv4 将整数转换为 IPv4 地址
 func IntToIPv4(n uint32) string {
-	return net.IPv4(byte(n>>24), byte(n>>16), byte(n>>8), byte(n)).String()
+	return net.IPv4(byte(n>>24), byte(n>>16), byte(n>>8), byte(n)).String() // #nosec G115 -- 转换前已按八位分段，截断是编码步骤。
 }
 
 // Mask 对 IP 应用掩码
@@ -339,12 +360,16 @@ func Mask(ip string, mask int) string {
 
 	ip4 := parsed.To4()
 	if ip4 != nil {
-		// IPv4
+		if mask < 0 || mask > 32 {
+			return ""
+		}
 		masked := ip4.Mask(net.CIDRMask(mask, 32))
 		return masked.String()
 	}
 
-	// IPv6
+	if mask < 0 || mask > 128 {
+		return ""
+	}
 	masked := parsed.Mask(net.CIDRMask(mask, 128))
 	return masked.String()
 }
@@ -372,20 +397,27 @@ func GetMACAddress() (string, error) {
 }
 
 // ResolveHost 解析主机名为 IP 地址
-func ResolveHost(host string) ([]string, error) {
-	ips, err := net.LookupIP(host)
+func ResolveHost(ctx context.Context, host string) ([]string, error) {
+	if ctx == nil {
+		return nil, ErrNilContext
+	}
+
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
 	if err != nil {
 		return nil, err
 	}
 
 	result := make([]string, len(ips))
 	for i, ip := range ips {
-		result[i] = ip.String()
+		result[i] = ip.IP.String()
 	}
 	return result, nil
 }
 
 // ReverseLookup 反向 DNS 查询
-func ReverseLookup(ip string) ([]string, error) {
-	return net.LookupAddr(ip)
+func ReverseLookup(ctx context.Context, ip string) ([]string, error) {
+	if ctx == nil {
+		return nil, ErrNilContext
+	}
+	return net.DefaultResolver.LookupAddr(ctx, ip)
 }

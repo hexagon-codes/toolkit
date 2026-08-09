@@ -65,7 +65,7 @@ func TestWithDoneFunc_ProviderAgnostic(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := NewReaderWithOptions(strings.NewReader(tt.input), WithDoneFunc(tt.doneFn))
+			r := MustNewReaderWithOptions(strings.NewReader(tt.input), WithDoneFunc(tt.doneFn))
 
 			var got []*Event
 			err := r.Each(func(ev *Event) error {
@@ -125,7 +125,7 @@ func TestReadUntilDone(t *testing.T) {
 			if tt.doneFn != nil {
 				opts = append(opts, WithDoneFunc(tt.doneFn))
 			}
-			r := NewReaderWithOptions(strings.NewReader(tt.input), opts...)
+			r := MustNewReaderWithOptions(strings.NewReader(tt.input), opts...)
 
 			for i, s := range tt.steps {
 				ev, done, err := r.ReadUntilDone()
@@ -155,7 +155,7 @@ func TestReadUntilDone(t *testing.T) {
 // TestEach_HandlerError 验证 handler 返回错误时 Each 立即中止并原样返回该错误。
 func TestEach_HandlerError(t *testing.T) {
 	input := "data: a\n\ndata: b\n\ndata: c\n\n"
-	r := NewReaderWithOptions(strings.NewReader(input), WithDoneFunc(IsOpenAIDone))
+	r := MustNewReaderWithOptions(strings.NewReader(input), WithDoneFunc(IsOpenAIDone))
 
 	sentinel := errors.New("handler stop")
 	var seen int
@@ -177,7 +177,7 @@ func TestEach_HandlerError(t *testing.T) {
 // TestEach_NoDoneFunc_ReadsToEOF 验证未配置 done 谓词时 Each 退化为读到 EOF。
 func TestEach_NoDoneFunc_ReadsToEOF(t *testing.T) {
 	input := "data: a\n\ndata: b\n\ndata: c\n\n"
-	r := NewReaderWithOptions(strings.NewReader(input)) // 无 done 谓词
+	r := MustNewReaderWithOptions(strings.NewReader(input)) // 无 done 谓词
 
 	var got []string
 	if err := r.Each(func(ev *Event) error {
@@ -191,21 +191,11 @@ func TestEach_NoDoneFunc_ReadsToEOF(t *testing.T) {
 	}
 }
 
-// TestWithDoneFunc_NilEquivalent 验证 WithDoneFunc(nil) 等价于未配置谓词。
-func TestWithDoneFunc_NilEquivalent(t *testing.T) {
-	input := "data: [DONE]\n\ndata: after\n\n"
-	r := NewReaderWithOptions(strings.NewReader(input), WithDoneFunc(nil))
-
-	var got []string
-	if err := r.Each(func(ev *Event) error {
-		got = append(got, ev.Data)
-		return nil
-	}); err != nil {
-		t.Fatalf("意外错误: %v", err)
-	}
-	// nil 谓词不应触发结束，[DONE] 仅作为普通事件，after 也应被读到。
-	if strings.Join(got, ",") != "[DONE],after" {
-		t.Errorf("期望 nil 谓词不结束流，实际 %v", got)
+// TestWithDoneFunc_NilRejected 验证显式空谓词会在构造阶段失败。
+func TestWithDoneFunc_NilRejected(t *testing.T) {
+	reader, err := NewReaderWithOptions(strings.NewReader(""), WithDoneFunc(nil))
+	if reader != nil || !errors.Is(err, ErrInvalidReaderConfig) {
+		t.Fatalf("NewReaderWithOptions() = (%v, %v), want (nil, ErrInvalidReaderConfig)", reader, err)
 	}
 }
 
@@ -214,7 +204,7 @@ func TestWithDoneFunc_CombinedWithOtherOptions(t *testing.T) {
 	// 严格 data 前缀 + 总字节上限 + done 谓词三选项组合。
 	// "data:drop"（无空格）在严格模式下被忽略；命中 [DONE] 结束。
 	input := "data: keep\ndata:drop\n\ndata: [DONE]\n\n"
-	r := NewReaderWithOptions(
+	r := MustNewReaderWithOptions(
 		strings.NewReader(input),
 		WithStrictDataPrefix(),
 		WithMaxTotalBytes(1024),
@@ -247,7 +237,7 @@ func TestErrMaxBytesExceeded_Message(t *testing.T) {
 	}
 
 	// 错误身份不变：实际触发上限时仍可用 errors.Is 判定。
-	r := NewReaderWithOptions(strings.NewReader("data: hello\n\n"), WithMaxTotalBytes(1))
+	r := MustNewReaderWithOptions(strings.NewReader("data: hello\n\n"), WithMaxTotalBytes(1))
 	_, err := r.Read()
 	if !errors.Is(err, ErrMaxBytesExceeded) {
 		t.Fatalf("期望 errors.Is(err, ErrMaxBytesExceeded)，实际 %v", err)

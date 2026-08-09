@@ -49,7 +49,7 @@ func (dlm *DeadLetterManager) SendToDeadLetter(ctx context.Context, taskID strin
 	dlm.mu.RUnlock()
 
 	if manager == nil {
-		return fmt.Errorf("asynq manager not initialized")
+		return ErrManagerNotInitialized
 	}
 
 	// 构建死信载荷
@@ -67,7 +67,7 @@ func (dlm *DeadLetterManager) SendToDeadLetter(ctx context.Context, taskID strin
 	}
 
 	// 创建死信任务
-	task := asq.NewTask("dead_letter", data)
+	task := asq.NewTask(TaskTypeDeadLetter, data)
 
 	// 入队到死信队列
 	_, err = manager.Enqueue(ctx, task,
