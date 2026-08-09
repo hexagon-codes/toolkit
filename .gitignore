@@ -9,4 +9,7 @@ tmp/*
 # Go test artifacts
 coverage.out
 
+# Local Go example binaries
+multi
+
 .claude/
