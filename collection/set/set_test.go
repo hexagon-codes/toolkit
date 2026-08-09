@@ -532,8 +532,20 @@ func BenchmarkIntersection(b *testing.B) {
 
 // --- SyncSet 并发死锁测试 ---
 
+func TestSyncSetUsesStableLockOrderID(t *testing.T) {
+	first := NewSyncSet(1)
+	second := first.Clone()
+	if first.id == 0 || second.id == 0 || first.id == second.id {
+		t.Fatalf("SyncSet ids = (%d, %d), want distinct non-zero ids", first.id, second.id)
+	}
+	orderedFirst, orderedSecond := orderByID(second, first)
+	if orderedFirst != first || orderedSecond != second {
+		t.Fatal("orderByID() did not use the stable creation order")
+	}
+}
+
 // TestSyncSetConcurrentUnionNoDeadlock 测试 SyncSet.Union 在并发场景下不会死锁
-// 此测试验证了使用地址排序加锁顺序的修复是否有效
+// 此测试验证稳定编号加锁顺序不会产生循环等待。
 func TestSyncSetConcurrentUnionNoDeadlock(t *testing.T) {
 	a := NewSyncSet(1, 2, 3)
 	b := NewSyncSet(4, 5, 6)

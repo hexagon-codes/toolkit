@@ -385,7 +385,11 @@ func (h *priorityHeap[T]) Less(i, j int) bool { return h.less(h.items[i], h.item
 func (h *priorityHeap[T]) Swap(i, j int)      { h.items[i], h.items[j] = h.items[j], h.items[i] }
 
 func (h *priorityHeap[T]) Push(x any) {
-	h.items = append(h.items, x.(T))
+	item, ok := x.(T)
+	if !ok {
+		panic("queue: unexpected priority heap item type")
+	}
+	h.items = append(h.items, item)
 }
 
 func (h *priorityHeap[T]) Pop() any {
@@ -447,7 +451,10 @@ func (pq *PriorityQueue[T]) Pop() (T, bool) {
 		var zero T
 		return zero, false
 	}
-	item := heap.Pop(pq.heap).(T)
+	item, ok := heap.Pop(pq.heap).(T)
+	if !ok {
+		panic("queue: unexpected priority heap item type")
+	}
 	return item, true
 }
 
@@ -492,7 +499,11 @@ func (pq *PriorityQueue[T]) ToSlice() []T {
 
 	result := make([]T, 0, len(clone.items))
 	for clone.Len() > 0 {
-		result = append(result, heap.Pop(clone).(T))
+		item, ok := heap.Pop(clone).(T)
+		if !ok {
+			panic("queue: unexpected priority heap item type")
+		}
+		result = append(result, item)
 	}
 	return result
 }

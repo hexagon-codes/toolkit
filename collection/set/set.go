@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"unsafe"
+	"sync/atomic"
 )
 
 // Set 泛型 HashSet 实现
@@ -390,13 +390,18 @@ func Difference[T comparable](sets ...*Set[T]) *Set[T] {
 type SyncSet[T comparable] struct {
 	s  *Set[T]
 	mu sync.RWMutex
+	id uint64
+}
+
+var syncSetID atomic.Uint64
+
+func newSyncSetFromSet[T comparable](set *Set[T]) *SyncSet[T] {
+	return &SyncSet[T]{s: set, id: syncSetID.Add(1)}
 }
 
 // NewSyncSet 创建线程安全的 Set
 func NewSyncSet[T comparable](items ...T) *SyncSet[T] {
-	return &SyncSet[T]{
-		s: New(items...),
-	}
+	return newSyncSetFromSet(New(items...))
 }
 
 // Add 添加元素（线程安全）
@@ -478,9 +483,7 @@ func (ss *SyncSet[T]) Values() []T {
 func (ss *SyncSet[T]) Clone() *SyncSet[T] {
 	ss.mu.RLock()
 	defer ss.mu.RUnlock()
-	return &SyncSet[T]{
-		s: ss.s.Clone(),
-	}
+	return newSyncSetFromSet(ss.s.Clone())
 }
 
 // Pop 随机移除并返回一个元素（线程安全）
@@ -506,9 +509,7 @@ func (ss *SyncSet[T]) ForEach(fn func(T)) {
 func (ss *SyncSet[T]) Filter(predicate func(T) bool) *SyncSet[T] {
 	ss.mu.RLock()
 	defer ss.mu.RUnlock()
-	return &SyncSet[T]{
-		s: ss.s.Filter(predicate),
-	}
+	return newSyncSetFromSet(ss.s.Filter(predicate))
 }
 
 // Any 判断是否存在满足条件的元素（线程安全）
@@ -526,43 +527,27 @@ func (ss *SyncSet[T]) All(predicate func(T) bool) bool {
 }
 
 // Union 并集（线程安全）
-// 使用地址排序确保固定的加锁顺序，防止 ABBA 死锁
+// 使用稳定编号确保固定的加锁顺序，防止 ABBA 死锁。
 func (ss *SyncSet[T]) Union(other *SyncSet[T]) *SyncSet[T] {
-	// 按地址排序加锁，防止死锁
-	first, second := orderByAddr(ss, other)
-	first.mu.RLock()
-	second.mu.RLock()
-	defer first.mu.RUnlock()
-	defer second.mu.RUnlock()
-	return &SyncSet[T]{
-		s: ss.s.Union(other.s),
-	}
+	unlock := lockPairRead(ss, other)
+	defer unlock()
+	return newSyncSetFromSet(ss.s.Union(other.s))
 }
 
 // Intersection 交集（线程安全）
-// 使用地址排序确保固定的加锁顺序，防止 ABBA 死锁
+// 使用稳定编号确保固定的加锁顺序，防止 ABBA 死锁。
 func (ss *SyncSet[T]) Intersection(other *SyncSet[T]) *SyncSet[T] {
-	first, second := orderByAddr(ss, other)
-	first.mu.RLock()
-	second.mu.RLock()
-	defer first.mu.RUnlock()
-	defer second.mu.RUnlock()
-	return &SyncSet[T]{
-		s: ss.s.Intersection(other.s),
-	}
+	unlock := lockPairRead(ss, other)
+	defer unlock()
+	return newSyncSetFromSet(ss.s.Intersection(other.s))
 }
 
 // Difference 差集（线程安全）
-// 使用地址排序确保固定的加锁顺序，防止 ABBA 死锁
+// 使用稳定编号确保固定的加锁顺序，防止 ABBA 死锁。
 func (ss *SyncSet[T]) Difference(other *SyncSet[T]) *SyncSet[T] {
-	first, second := orderByAddr(ss, other)
-	first.mu.RLock()
-	second.mu.RLock()
-	defer first.mu.RUnlock()
-	defer second.mu.RUnlock()
-	return &SyncSet[T]{
-		s: ss.s.Difference(other.s),
-	}
+	unlock := lockPairRead(ss, other)
+	defer unlock()
+	return newSyncSetFromSet(ss.s.Difference(other.s))
 }
 
 // String 返回字符串表示（线程安全）
@@ -572,12 +557,24 @@ func (ss *SyncSet[T]) String() string {
 	return "Sync" + ss.s.String()
 }
 
-// orderByAddr 按地址排序两个 SyncSet，确保固定的加锁顺序
-// 用于防止多个 goroutine 同时操作两个 SyncSet 时发生 ABBA 死锁
-func orderByAddr[T comparable](a, b *SyncSet[T]) (*SyncSet[T], *SyncSet[T]) {
-	// 使用 uintptr 比较地址，确保一致的排序
-	if uintptr(unsafe.Pointer(a)) < uintptr(unsafe.Pointer(b)) {
+// orderByID 按不可变编号排序两个 SyncSet，确保固定的加锁顺序。
+func orderByID[T comparable](a, b *SyncSet[T]) (first, second *SyncSet[T]) {
+	if a == b || a.id < b.id {
 		return a, b
 	}
 	return b, a
+}
+
+func lockPairRead[T comparable](a, b *SyncSet[T]) func() {
+	if a == b {
+		a.mu.RLock()
+		return a.mu.RUnlock
+	}
+	first, second := orderByID(a, b)
+	first.mu.RLock()
+	second.mu.RLock()
+	return func() {
+		second.mu.RUnlock()
+		first.mu.RUnlock()
+	}
 }

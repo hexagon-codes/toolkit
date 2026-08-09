@@ -65,6 +65,7 @@ func TestList_Front(t *testing.T) {
 	front := l.Front()
 	if front == nil {
 		t.Fatal("Front should not be nil")
+		return
 	}
 	if front.Value != 1 {
 		t.Errorf("expected front value 1, got %d", front.Value)
@@ -85,6 +86,7 @@ func TestList_Back(t *testing.T) {
 	back := l.Back()
 	if back == nil {
 		t.Fatal("Back should not be nil")
+		return
 	}
 	if back.Value != 3 {
 		t.Errorf("expected back value 3, got %d", back.Value)
@@ -456,6 +458,7 @@ func TestList_Find(t *testing.T) {
 	n := l.Find(func(v int) bool { return v == 3 })
 	if n == nil {
 		t.Fatal("Find should return a node")
+		return
 	}
 	if n.Value != 3 {
 		t.Errorf("expected value 3, got %d", n.Value)
