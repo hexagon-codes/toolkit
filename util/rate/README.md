@@ -22,7 +22,7 @@ import "github.com/hexagon-codes/toolkit/util/rate"
 
 // 创建令牌桶限流器
 // 容量：10个令牌，速率：每秒生成5个令牌
-limiter := rate.NewTokenBucket(10, 5.0)
+limiter := rate.MustNewTokenBucket(10, 5.0)
 
 // 判断是否允许通过
 if limiter.Allow() {
@@ -44,7 +44,7 @@ handleRequest()
 ```go
 // 创建漏桶限流器
 // 容量：100个请求，速率：每100ms漏出1个请求
-limiter := rate.NewLeakyBucket(100, 100*time.Millisecond)
+limiter := rate.MustNewLeakyBucket(100, 100*time.Millisecond)
 
 if limiter.Allow() {
     handleRequest()
@@ -58,7 +58,7 @@ if limiter.Allow() {
 ```go
 // 创建滑动窗口限流器
 // 容量：每分钟最多1000个请求
-limiter := rate.NewSlidingWindow(1000, time.Minute)
+limiter := rate.MustNewSlidingWindow(1000, time.Minute)
 
 if limiter.Allow() {
     handleRequest()
@@ -87,7 +87,8 @@ type Limiter interface {
 // NewTokenBucket 创建令牌桶限流器
 // capacity: 桶容量（最大令牌数）
 // rate: 令牌生成速率（每秒生成多少个令牌）
-NewTokenBucket(capacity int, rate float64) *TokenBucket
+NewTokenBucket(capacity int, rate float64) (*TokenBucket, error)
+MustNewTokenBucket(capacity int, rate float64) *TokenBucket
 ```
 
 **特点**：
@@ -101,7 +102,8 @@ NewTokenBucket(capacity int, rate float64) *TokenBucket
 // NewLeakyBucket 创建漏桶限流器
 // capacity: 桶容量
 // rate: 漏水速率（例如：100ms 表示每100ms漏出一滴水）
-NewLeakyBucket(capacity int, rate time.Duration) *LeakyBucket
+NewLeakyBucket(capacity int, rate time.Duration) (*LeakyBucket, error)
+MustNewLeakyBucket(capacity int, rate time.Duration) *LeakyBucket
 ```
 
 **特点**：
@@ -115,7 +117,8 @@ NewLeakyBucket(capacity int, rate time.Duration) *LeakyBucket
 // NewSlidingWindow 创建滑动窗口限流器
 // capacity: 窗口内允许的最大请求数
 // window: 窗口大小（例如：1分钟）
-NewSlidingWindow(capacity int, window time.Duration) *SlidingWindow
+NewSlidingWindow(capacity int, window time.Duration) (*SlidingWindow, error)
+MustNewSlidingWindow(capacity int, window time.Duration) *SlidingWindow
 ```
 
 **特点**：
@@ -130,7 +133,7 @@ NewSlidingWindow(capacity int, window time.Duration) *SlidingWindow
 ```go
 func RateLimitMiddleware() gin.HandlerFunc {
     // 每秒最多100个请求
-    limiter := rate.NewTokenBucket(100, 100.0)
+    limiter := rate.MustNewTokenBucket(100, 100.0)
 
     return func(c *gin.Context) {
         if !limiter.Allow() {
@@ -166,7 +169,7 @@ func (u *UserRateLimiter) Allow(userID string) bool {
     limiter, ok := u.limiters[userID]
     if !ok {
         // 每个用户每分钟最多60个请求
-        limiter = rate.NewSlidingWindow(60, time.Minute)
+        limiter = rate.MustNewSlidingWindow(60, time.Minute)
         u.limiters[userID] = limiter
     }
 
@@ -199,7 +202,7 @@ func IPRateLimitMiddleware() gin.HandlerFunc {
         limiter, ok := ipLimiters[ip]
         if !ok {
             // 每个 IP 每秒最多10个请求
-            limiter = rate.NewTokenBucket(10, 10.0)
+            limiter = rate.MustNewTokenBucket(10, 10.0)
             ipLimiters[ip] = limiter
         }
         mu.Unlock()
@@ -225,7 +228,7 @@ type APIClient struct {
 func NewAPIClient() *APIClient {
     return &APIClient{
         // 第三方 API 限制：每秒最多5个请求
-        limiter: rate.NewTokenBucket(5, 5.0),
+        limiter: rate.MustNewTokenBucket(5, 5.0),
     }
 }
 
@@ -251,7 +254,7 @@ type DBWriter struct {
 func NewDBWriter() *DBWriter {
     return &DBWriter{
         // 限制数据库写入速率：每100ms一次
-        limiter: rate.NewLeakyBucket(10, 100*time.Millisecond),
+        limiter: rate.MustNewLeakyBucket(10, 100*time.Millisecond),
     }
 }
 
@@ -275,7 +278,7 @@ func SendSMS(phone, code string) error {
     limiter, ok := smsLimiters[phone]
     if !ok {
         // 每个手机号每小时最多发送5条
-        limiter = rate.NewSlidingWindow(5, time.Hour)
+        limiter = rate.MustNewSlidingWindow(5, time.Hour)
         smsLimiters[phone] = limiter
     }
     mu.Unlock()
@@ -299,7 +302,7 @@ type Crawler struct {
 func NewCrawler() *Crawler {
     return &Crawler{
         // 爬虫速率：每2秒一个请求
-        limiter: rate.NewLeakyBucket(1, 2*time.Second),
+        limiter: rate.MustNewLeakyBucket(1, 2*time.Second),
     }
 }
 
@@ -334,19 +337,19 @@ func (c *Crawler) Crawl(urls []string) {
 **令牌桶（推荐）**：
 ```go
 // ✅ 大多数场景的首选
-limiter := rate.NewTokenBucket(100, 10.0)
+limiter := rate.MustNewTokenBucket(100, 10.0)
 ```
 
 **漏桶**：
 ```go
 // ✅ 需要严格控制速率（如第三方 API 调用）
-limiter := rate.NewLeakyBucket(10, 100*time.Millisecond)
+limiter := rate.MustNewLeakyBucket(10, 100*time.Millisecond)
 ```
 
 **滑动窗口**：
 ```go
 // ✅ 需要精确的时间窗口统计（如"每分钟最多N个请求"）
-limiter := rate.NewSlidingWindow(1000, time.Minute)
+limiter := rate.MustNewSlidingWindow(1000, time.Minute)
 ```
 
 ## 参数配置示例
@@ -355,36 +358,36 @@ limiter := rate.NewSlidingWindow(1000, time.Minute)
 
 ```go
 // 高并发场景：允许突发，但长期限制在100 QPS
-limiter := rate.NewTokenBucket(1000, 100.0)
+limiter := rate.MustNewTokenBucket(1000, 100.0)
 
 // 低频 API：每秒最多5个请求
-limiter := rate.NewTokenBucket(5, 5.0)
+limiter := rate.MustNewTokenBucket(5, 5.0)
 
 // 支持短期突发：容量100，速率10
-limiter := rate.NewTokenBucket(100, 10.0)
+limiter := rate.MustNewTokenBucket(100, 10.0)
 ```
 
 ### 漏桶
 
 ```go
 // 严格控制：每100ms处理1个请求（10 QPS）
-limiter := rate.NewLeakyBucket(10, 100*time.Millisecond)
+limiter := rate.MustNewLeakyBucket(10, 100*time.Millisecond)
 
 // 慢速处理：每秒1个请求
-limiter := rate.NewLeakyBucket(5, time.Second)
+limiter := rate.MustNewLeakyBucket(5, time.Second)
 ```
 
 ### 滑动窗口
 
 ```go
 // 每分钟限制
-limiter := rate.NewSlidingWindow(1000, time.Minute)
+limiter := rate.MustNewSlidingWindow(1000, time.Minute)
 
 // 每小时限制
-limiter := rate.NewSlidingWindow(10000, time.Hour)
+limiter := rate.MustNewSlidingWindow(10000, time.Hour)
 
 // 每秒限制
-limiter := rate.NewSlidingWindow(100, time.Second)
+limiter := rate.MustNewSlidingWindow(100, time.Second)
 ```
 
 ## 并发安全
@@ -392,7 +395,7 @@ limiter := rate.NewSlidingWindow(100, time.Second)
 所有限流器都是并发安全的：
 
 ```go
-limiter := rate.NewTokenBucket(100, 10.0)
+limiter := rate.MustNewTokenBucket(100, 10.0)
 
 // 可以在多个 goroutine 中安全使用
 for i := 0; i < 10; i++ {

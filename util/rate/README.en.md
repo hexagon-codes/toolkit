@@ -22,7 +22,7 @@ import "github.com/hexagon-codes/toolkit/util/rate"
 
 // Create token bucket limiter
 // Capacity: 10 tokens, rate: 5 tokens per second
-limiter := rate.NewTokenBucket(10, 5.0)
+limiter := rate.MustNewTokenBucket(10, 5.0)
 
 // Check if request is allowed
 if limiter.Allow() {
@@ -44,7 +44,7 @@ handleRequest()
 ```go
 // Create leaky bucket limiter
 // Capacity: 100 requests, rate: 1 request per 100ms
-limiter := rate.NewLeakyBucket(100, 100*time.Millisecond)
+limiter := rate.MustNewLeakyBucket(100, 100*time.Millisecond)
 
 if limiter.Allow() {
     handleRequest()
@@ -58,7 +58,7 @@ if limiter.Allow() {
 ```go
 // Create sliding window limiter
 // Capacity: max 1000 requests per minute
-limiter := rate.NewSlidingWindow(1000, time.Minute)
+limiter := rate.MustNewSlidingWindow(1000, time.Minute)
 
 if limiter.Allow() {
     handleRequest()
@@ -87,7 +87,8 @@ type Limiter interface {
 // NewTokenBucket creates a token bucket limiter
 // capacity: bucket capacity (max tokens)
 // rate: token generation rate (tokens per second)
-NewTokenBucket(capacity int, rate float64) *TokenBucket
+NewTokenBucket(capacity int, rate float64) (*TokenBucket, error)
+MustNewTokenBucket(capacity int, rate float64) *TokenBucket
 ```
 
 **Characteristics**:
@@ -101,7 +102,8 @@ NewTokenBucket(capacity int, rate float64) *TokenBucket
 // NewLeakyBucket creates a leaky bucket limiter
 // capacity: bucket capacity
 // rate: leak rate (e.g., 100ms means one request leaks per 100ms)
-NewLeakyBucket(capacity int, rate time.Duration) *LeakyBucket
+NewLeakyBucket(capacity int, rate time.Duration) (*LeakyBucket, error)
+MustNewLeakyBucket(capacity int, rate time.Duration) *LeakyBucket
 ```
 
 **Characteristics**:
@@ -115,7 +117,8 @@ NewLeakyBucket(capacity int, rate time.Duration) *LeakyBucket
 // NewSlidingWindow creates a sliding window limiter
 // capacity: max requests allowed within the window
 // window: window size (e.g., 1 minute)
-NewSlidingWindow(capacity int, window time.Duration) *SlidingWindow
+NewSlidingWindow(capacity int, window time.Duration) (*SlidingWindow, error)
+MustNewSlidingWindow(capacity int, window time.Duration) *SlidingWindow
 ```
 
 **Characteristics**:
@@ -130,7 +133,7 @@ NewSlidingWindow(capacity int, window time.Duration) *SlidingWindow
 ```go
 func RateLimitMiddleware() gin.HandlerFunc {
     // Max 100 requests per second
-    limiter := rate.NewTokenBucket(100, 100.0)
+    limiter := rate.MustNewTokenBucket(100, 100.0)
 
     return func(c *gin.Context) {
         if !limiter.Allow() {
@@ -166,7 +169,7 @@ func (u *UserRateLimiter) Allow(userID string) bool {
     limiter, ok := u.limiters[userID]
     if !ok {
         // Each user: max 60 requests per minute
-        limiter = rate.NewSlidingWindow(60, time.Minute)
+        limiter = rate.MustNewSlidingWindow(60, time.Minute)
         u.limiters[userID] = limiter
     }
 
@@ -199,7 +202,7 @@ func IPRateLimitMiddleware() gin.HandlerFunc {
         limiter, ok := ipLimiters[ip]
         if !ok {
             // Each IP: max 10 requests per second
-            limiter = rate.NewTokenBucket(10, 10.0)
+            limiter = rate.MustNewTokenBucket(10, 10.0)
             ipLimiters[ip] = limiter
         }
         mu.Unlock()
@@ -225,7 +228,7 @@ type APIClient struct {
 func NewAPIClient() *APIClient {
     return &APIClient{
         // Third-party API limit: max 5 requests per second
-        limiter: rate.NewTokenBucket(5, 5.0),
+        limiter: rate.MustNewTokenBucket(5, 5.0),
     }
 }
 
@@ -251,7 +254,7 @@ type DBWriter struct {
 func NewDBWriter() *DBWriter {
     return &DBWriter{
         // Limit DB write rate: one write per 100ms
-        limiter: rate.NewLeakyBucket(10, 100*time.Millisecond),
+        limiter: rate.MustNewLeakyBucket(10, 100*time.Millisecond),
     }
 }
 
@@ -275,7 +278,7 @@ func SendSMS(phone, code string) error {
     limiter, ok := smsLimiters[phone]
     if !ok {
         // Each phone number: max 5 SMS per hour
-        limiter = rate.NewSlidingWindow(5, time.Hour)
+        limiter = rate.MustNewSlidingWindow(5, time.Hour)
         smsLimiters[phone] = limiter
     }
     mu.Unlock()
@@ -299,7 +302,7 @@ type Crawler struct {
 func NewCrawler() *Crawler {
     return &Crawler{
         // Crawler rate: one request every 2 seconds
-        limiter: rate.NewLeakyBucket(1, 2*time.Second),
+        limiter: rate.MustNewLeakyBucket(1, 2*time.Second),
     }
 }
 
@@ -334,19 +337,19 @@ func (c *Crawler) Crawl(urls []string) {
 **Token Bucket (Recommended)**:
 ```go
 // ✅ First choice for most scenarios
-limiter := rate.NewTokenBucket(100, 10.0)
+limiter := rate.MustNewTokenBucket(100, 10.0)
 ```
 
 **Leaky Bucket**:
 ```go
 // ✅ Need strict rate control (e.g., third-party API calls)
-limiter := rate.NewLeakyBucket(10, 100*time.Millisecond)
+limiter := rate.MustNewLeakyBucket(10, 100*time.Millisecond)
 ```
 
 **Sliding Window**:
 ```go
 // ✅ Need precise time window statistics (e.g., "max N requests per minute")
-limiter := rate.NewSlidingWindow(1000, time.Minute)
+limiter := rate.MustNewSlidingWindow(1000, time.Minute)
 ```
 
 ## Parameter Configuration Examples
@@ -355,36 +358,36 @@ limiter := rate.NewSlidingWindow(1000, time.Minute)
 
 ```go
 // High-concurrency: allow burst, but limit to 100 QPS long-term
-limiter := rate.NewTokenBucket(1000, 100.0)
+limiter := rate.MustNewTokenBucket(1000, 100.0)
 
 // Low-frequency API: max 5 requests per second
-limiter := rate.NewTokenBucket(5, 5.0)
+limiter := rate.MustNewTokenBucket(5, 5.0)
 
 // Supports short burst: capacity 100, rate 10
-limiter := rate.NewTokenBucket(100, 10.0)
+limiter := rate.MustNewTokenBucket(100, 10.0)
 ```
 
 ### Leaky Bucket
 
 ```go
 // Strict control: process 1 request per 100ms (10 QPS)
-limiter := rate.NewLeakyBucket(10, 100*time.Millisecond)
+limiter := rate.MustNewLeakyBucket(10, 100*time.Millisecond)
 
 // Slow processing: 1 request per second
-limiter := rate.NewLeakyBucket(5, time.Second)
+limiter := rate.MustNewLeakyBucket(5, time.Second)
 ```
 
 ### Sliding Window
 
 ```go
 // Per-minute limit
-limiter := rate.NewSlidingWindow(1000, time.Minute)
+limiter := rate.MustNewSlidingWindow(1000, time.Minute)
 
 // Per-hour limit
-limiter := rate.NewSlidingWindow(10000, time.Hour)
+limiter := rate.MustNewSlidingWindow(10000, time.Hour)
 
 // Per-second limit
-limiter := rate.NewSlidingWindow(100, time.Second)
+limiter := rate.MustNewSlidingWindow(100, time.Second)
 ```
 
 ## Concurrency Safety
@@ -392,7 +395,7 @@ limiter := rate.NewSlidingWindow(100, time.Second)
 All limiters are concurrency-safe:
 
 ```go
-limiter := rate.NewTokenBucket(100, 10.0)
+limiter := rate.MustNewTokenBucket(100, 10.0)
 
 // Safe to use from multiple goroutines
 for i := 0; i < 10; i++ {

@@ -8,7 +8,7 @@ import (
 
 func TestTokenBucket_Allow(t *testing.T) {
 	// Create a bucket with capacity 5 and rate 10/s
-	tb := NewTokenBucket(5, 10)
+	tb := mustTokenBucket(t, 5, 10)
 
 	// Should allow first 5 requests
 	for i := 0; i < 5; i++ {
@@ -33,7 +33,7 @@ func TestTokenBucket_Allow(t *testing.T) {
 
 func TestTokenBucket_Wait(t *testing.T) {
 	// Create a bucket with capacity 1 and rate 10/s
-	tb := NewTokenBucket(1, 10)
+	tb := mustTokenBucket(t, 1, 10)
 
 	// First request should not wait
 	waitTime := tb.Wait()
@@ -49,7 +49,8 @@ func TestTokenBucket_Wait(t *testing.T) {
 }
 
 func TestTokenBucket_Concurrent(t *testing.T) {
-	tb := NewTokenBucket(100, 1000)
+	// 极低补充速率将断言限定为初始容量，不受 race 模式执行耗时影响。
+	tb := mustTokenBucket(t, 100, 1e-9)
 
 	var wg sync.WaitGroup
 	allowed := 0
@@ -69,15 +70,14 @@ func TestTokenBucket_Concurrent(t *testing.T) {
 
 	wg.Wait()
 
-	// Should have allowed around 100 (initial capacity)
-	if allowed > 110 || allowed < 90 {
-		t.Errorf("Allowed %d requests, expected around 100", allowed)
+	if allowed != 100 {
+		t.Errorf("allowed %d requests, want exactly 100", allowed)
 	}
 }
 
 func TestLeakyBucket_Allow(t *testing.T) {
 	// Create a bucket with capacity 5 and leak rate 50ms
-	lb := NewLeakyBucket(5, 50*time.Millisecond)
+	lb := mustLeakyBucket(t, 5, 50*time.Millisecond)
 
 	// Should allow first 5 requests
 	for i := 0; i < 5; i++ {
@@ -101,7 +101,7 @@ func TestLeakyBucket_Allow(t *testing.T) {
 }
 
 func TestLeakyBucket_Wait(t *testing.T) {
-	lb := NewLeakyBucket(1, 50*time.Millisecond)
+	lb := mustLeakyBucket(t, 1, 50*time.Millisecond)
 
 	// First request should not wait
 	waitTime := lb.Wait()
@@ -117,7 +117,7 @@ func TestLeakyBucket_Wait(t *testing.T) {
 }
 
 func TestLeakyBucket_Concurrent(t *testing.T) {
-	lb := NewLeakyBucket(50, 10*time.Millisecond)
+	lb := mustLeakyBucket(t, 50, 10*time.Millisecond)
 
 	var wg sync.WaitGroup
 	allowed := 0
@@ -145,7 +145,7 @@ func TestLeakyBucket_Concurrent(t *testing.T) {
 
 func TestSlidingWindow_Allow(t *testing.T) {
 	// Create window with capacity 5 and window 200ms
-	sw := NewSlidingWindow(5, 200*time.Millisecond)
+	sw := mustSlidingWindow(t, 5, 200*time.Millisecond)
 
 	// Should allow first 5 requests
 	for i := 0; i < 5; i++ {
@@ -169,7 +169,7 @@ func TestSlidingWindow_Allow(t *testing.T) {
 }
 
 func TestSlidingWindow_Wait(t *testing.T) {
-	sw := NewSlidingWindow(1, 100*time.Millisecond)
+	sw := mustSlidingWindow(t, 1, 100*time.Millisecond)
 
 	// First request should not wait
 	waitTime := sw.Wait()
@@ -188,7 +188,7 @@ func TestSlidingWindow_Wait(t *testing.T) {
 }
 
 func TestSlidingWindow_Concurrent(t *testing.T) {
-	sw := NewSlidingWindow(50, time.Second)
+	sw := mustSlidingWindow(t, 50, time.Second)
 
 	var wg sync.WaitGroup
 	allowed := 0

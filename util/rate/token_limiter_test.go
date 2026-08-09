@@ -7,7 +7,7 @@ import (
 )
 
 func TestTokenRateLimiter_Allow(t *testing.T) {
-	limiter := NewTokenRateLimiter(100, 10) // 100 TPM, 10 RPM
+	limiter := mustTokenRateLimiter(t, 100, 10) // 100 TPM, 10 RPM
 
 	// 应该允许前几个请求
 	for i := 0; i < 5; i++ {
@@ -18,7 +18,7 @@ func TestTokenRateLimiter_Allow(t *testing.T) {
 }
 
 func TestTokenRateLimiter_AllowN(t *testing.T) {
-	limiter := NewTokenRateLimiter(100, 10) // 100 TPM, 10 RPM
+	limiter := mustTokenRateLimiter(t, 100, 10) // 100 TPM, 10 RPM
 
 	// 请求 50 个 token
 	if !limiter.AllowN(50) {
@@ -37,7 +37,7 @@ func TestTokenRateLimiter_AllowN(t *testing.T) {
 }
 
 func TestTokenRateLimiter_WaitN(t *testing.T) {
-	limiter := NewTokenRateLimiter(100, 100) // 100 TPM, 100 RPM
+	limiter := mustTokenRateLimiter(t, 100, 100) // 100 TPM, 100 RPM
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -50,7 +50,7 @@ func TestTokenRateLimiter_WaitN(t *testing.T) {
 }
 
 func TestTokenRateLimiter_WaitN_Timeout(t *testing.T) {
-	limiter := NewTokenRateLimiter(10, 10) // 很低的限制
+	limiter := mustTokenRateLimiter(t, 10, 10) // 很低的限制
 
 	// 先消耗所有 token
 	limiter.AllowN(10)
@@ -66,7 +66,7 @@ func TestTokenRateLimiter_WaitN_Timeout(t *testing.T) {
 }
 
 func TestTokenRateLimiter_Stats(t *testing.T) {
-	limiter := NewTokenRateLimiter(100, 10)
+	limiter := mustTokenRateLimiter(t, 100, 10)
 
 	stats := limiter.Stats()
 	if stats.TokensPerMinute != 100 {
@@ -78,7 +78,7 @@ func TestTokenRateLimiter_Stats(t *testing.T) {
 }
 
 func TestTokenBucketV2_AllowN(t *testing.T) {
-	bucket := NewTokenBucketV2(100, 10) // 100 容量，每秒 10 个
+	bucket := mustTokenBucketV2(t, 100, 10) // 100 容量，每秒 10 个
 
 	// 应该允许 50 个
 	if !bucket.AllowN(50) {
@@ -97,7 +97,7 @@ func TestTokenBucketV2_AllowN(t *testing.T) {
 }
 
 func TestTokenBucketV2_WaitN(t *testing.T) {
-	bucket := NewTokenBucketV2(10, 100) // 10 容量，每秒 100 个
+	bucket := mustTokenBucketV2(t, 10, 100) // 10 容量，每秒 100 个
 
 	ctx := context.Background()
 
@@ -120,7 +120,7 @@ func TestTokenBucketV2_WaitN(t *testing.T) {
 }
 
 func TestTokenBucketV2_Available(t *testing.T) {
-	bucket := NewTokenBucketV2(100, 10)
+	bucket := mustTokenBucketV2(t, 100, 10)
 
 	available := bucket.Available()
 	if available != 100 {
@@ -148,11 +148,11 @@ func TestNewOpenAIGPT4Limiter(t *testing.T) {
 
 func TestMultiDimensionLimiter(t *testing.T) {
 	// 用户级限制
-	userLimiter := NewTokenBucketV2(100, 10)
+	userLimiter := mustTokenBucketV2(t, 100, 10)
 	// 全局限制
-	globalLimiter := NewTokenBucketV2(1000, 100)
+	globalLimiter := mustTokenBucketV2(t, 1000, 100)
 
-	multi := NewMultiDimensionLimiter(userLimiter, globalLimiter)
+	multi := mustMultiDimensionLimiter(t, userLimiter, globalLimiter)
 
 	// 应该允许
 	if !multi.AllowN(50) {

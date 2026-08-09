@@ -1,6 +1,8 @@
 package rate
 
 import (
+	"fmt"
+	"math"
 	"sync"
 	"time"
 )
@@ -25,13 +27,30 @@ type TokenBucket struct {
 // NewTokenBucket 创建令牌桶限流器
 // capacity: 桶容量（最大令牌数）
 // rate: 令牌生成速率（每秒生成多少个令牌）
-func NewTokenBucket(capacity int, rate float64) *TokenBucket {
+func NewTokenBucket(capacity int, rate float64) (*TokenBucket, error) {
+	if capacity <= 0 {
+		return nil, fmt.Errorf("%w: %d", ErrInvalidCapacity, capacity)
+	}
+	if rate <= 0 || math.IsNaN(rate) || math.IsInf(rate, 0) {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidRate, rate)
+	}
+
 	return &TokenBucket{
 		capacity: float64(capacity),
 		tokens:   float64(capacity),
 		rate:     rate,
 		lastTime: time.Now(),
+	}, nil
+}
+
+// MustNewTokenBucket 创建令牌桶；配置无效时 panic。
+// 仅适用于参数由常量或已完成校验的配置提供的场景。
+func MustNewTokenBucket(capacity int, rate float64) *TokenBucket {
+	limiter, err := NewTokenBucket(capacity, rate)
+	if err != nil {
+		panic(err)
 	}
+	return limiter
 }
 
 // Allow 判断是否允许通过
@@ -106,14 +125,30 @@ type LeakyBucket struct {
 // NewLeakyBucket 创建漏桶限流器
 // capacity: 桶容量
 // rate: 漏水速率（例如：100ms 表示每100ms漏出一滴水）
-// 当 rate <= 0 时不进行限流，每次请求都放行
-func NewLeakyBucket(capacity int, rate time.Duration) *LeakyBucket {
+func NewLeakyBucket(capacity int, rate time.Duration) (*LeakyBucket, error) {
+	if capacity <= 0 {
+		return nil, fmt.Errorf("%w: %d", ErrInvalidCapacity, capacity)
+	}
+	if rate <= 0 {
+		return nil, fmt.Errorf("%w: %s", ErrInvalidRate, rate)
+	}
+
 	return &LeakyBucket{
 		capacity:     capacity,
 		rate:         rate,
 		water:        0,
 		lastLeakTime: time.Now(),
+	}, nil
+}
+
+// MustNewLeakyBucket 创建漏桶；配置无效时 panic。
+// 仅适用于参数由常量或已完成校验的配置提供的场景。
+func MustNewLeakyBucket(capacity int, rate time.Duration) *LeakyBucket {
+	limiter, err := NewLeakyBucket(capacity, rate)
+	if err != nil {
+		panic(err)
 	}
+	return limiter
 }
 
 // Allow 判断是否允许通过
@@ -160,13 +195,6 @@ func (lb *LeakyBucket) Wait() time.Duration {
 func (lb *LeakyBucket) leak() {
 	now := time.Now()
 
-	// 速率非正时不限流：每次都把桶完全漏空
-	if lb.rate <= 0 {
-		lb.water = 0
-		lb.lastLeakTime = now
-		return
-	}
-
 	elapsed := now.Sub(lb.lastLeakTime)
 
 	// 计算漏出的水量
@@ -192,12 +220,29 @@ type SlidingWindow struct {
 // NewSlidingWindow 创建滑动窗口限流器
 // capacity: 窗口内允许的最大请求数
 // window: 窗口大小（例如：1分钟）
-func NewSlidingWindow(capacity int, window time.Duration) *SlidingWindow {
+func NewSlidingWindow(capacity int, window time.Duration) (*SlidingWindow, error) {
+	if capacity <= 0 {
+		return nil, fmt.Errorf("%w: %d", ErrInvalidCapacity, capacity)
+	}
+	if window <= 0 {
+		return nil, fmt.Errorf("%w: %s", ErrInvalidWindow, window)
+	}
+
 	return &SlidingWindow{
 		capacity: capacity,
 		window:   window,
 		requests: make([]time.Time, 0, capacity),
+	}, nil
+}
+
+// MustNewSlidingWindow 创建滑动窗口；配置无效时 panic。
+// 仅适用于参数由常量或已完成校验的配置提供的场景。
+func MustNewSlidingWindow(capacity int, window time.Duration) *SlidingWindow {
+	limiter, err := NewSlidingWindow(capacity, window)
+	if err != nil {
+		panic(err)
 	}
+	return limiter
 }
 
 // Allow 判断是否允许通过

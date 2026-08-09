@@ -2,13 +2,14 @@ package rate
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
 
 // Coverage for previously-uncovered SlidingWindow accessors and helpers.
 func TestSlidingWindow_AccessorsAndRecord(t *testing.T) {
-	sw := NewSlidingWindow(3, time.Minute)
+	sw := mustSlidingWindow(t, 3, time.Minute)
 
 	if sw.Capacity() != 3 {
 		t.Errorf("Capacity = %d, want 3", sw.Capacity())
@@ -52,15 +53,13 @@ func TestSlidingWindow_AccessorsAndRecord(t *testing.T) {
 	}
 }
 
-// Record's anti-unbounded-growth path: with capacity>=50 the trim branch makes
-// a slice whose len<=cap, so it is safe. (capacity<50 hits a known makeslice
-// panic at limiter.go:300 — see audit report; not exercised here to keep green.)
+// Record 的有界增长路径：容量不小于 50 时，裁剪分支创建的切片长度不会超过容量。
 func TestSlidingWindow_RecordBoundsMemory(t *testing.T) {
-	sw := NewSlidingWindow(60, time.Hour) // capacity>=50 keeps trim slice len<=cap
+	sw := mustSlidingWindow(t, 60, time.Hour) // 容量不小于 50 时裁剪长度不会超过容量。
 	for i := 0; i < 250; i++ {
 		sw.Record()
 	}
-	// maxSize = max(60*2,100)=120; once >=120 it removes oldest half then appends.
+	// 最大长度为 120；达到上限后先删除最旧的一半再追加。
 	if sw.Count() > 200 {
 		t.Errorf("Count = %d, expected bounded well under 250 (memory cap)", sw.Count())
 	}
@@ -71,7 +70,7 @@ func TestSlidingWindow_RecordBoundsMemory(t *testing.T) {
 
 // Coverage for TokenRateLimiter public API + presets.
 func TestTokenRateLimiter_API(t *testing.T) {
-	l := NewTokenRateLimiter(1000, 100) // 1000 TPM, 100 RPM
+	l := mustTokenRateLimiter(t, 1000, 100) // 1000 TPM, 100 RPM
 
 	if l.Available() <= 0 {
 		t.Errorf("Available = %d, want >0 at start", l.Available())
@@ -83,17 +82,13 @@ func TestTokenRateLimiter_API(t *testing.T) {
 		t.Errorf("AllowN(10) should succeed with full bucket")
 	}
 
-	// TryAllowN does not consume; ConsumeN does.
+	// AllowN 必须在一次原子操作中完成检查与消费。
 	before := l.Available()
-	if !l.TryAllowN(5) {
-		t.Errorf("TryAllowN(5) should be true")
+	if !l.AllowN(5) {
+		t.Errorf("AllowN(5) should be true")
 	}
-	if l.Available() != before {
-		t.Errorf("TryAllowN must not consume: before=%d after=%d", before, l.Available())
-	}
-	l.ConsumeN(5)
-	if l.Available() > before {
-		t.Errorf("ConsumeN(5) should not increase availability")
+	if l.Available() >= before {
+		t.Errorf("AllowN(5) should consume availability: before=%d after=%d", before, l.Available())
 	}
 
 	// Stats sanity
@@ -102,13 +97,10 @@ func TestTokenRateLimiter_API(t *testing.T) {
 		t.Errorf("Stats TPM/RPM = %d/%d, want 1000/100", st.TokensPerMinute, st.RequestsPerMinute)
 	}
 
-	// Reserve returns 0 when capacity available, >0 when not.
-	l2 := NewTokenRateLimiter(10, 10)
-	if w := l2.Reserve(5); w != 0 {
-		t.Errorf("Reserve(5) with full bucket = %v, want 0", w)
-	}
-	if w := l2.Reserve(1000); w <= 0 {
-		t.Errorf("Reserve(1000) over capacity = %v, want >0", w)
+	// 永远无法满足的请求应立即失败，不能永久等待。
+	l2 := mustTokenRateLimiter(t, 10, 10)
+	if err := l2.WaitN(context.Background(), 1000); !errors.Is(err, ErrInsufficientTokens) {
+		t.Errorf("WaitN over capacity = %v, want ErrInsufficientTokens", err)
 	}
 
 	// WaitN succeeds immediately when tokens available.
@@ -134,32 +126,29 @@ func TestTokenRateLimiter_API(t *testing.T) {
 	}
 }
 
-// TokenBucketV2 Reserve/Available/Wait coverage.
-func TestTokenBucketV2_ReserveAvailable(t *testing.T) {
-	tb := NewTokenBucketV2(5, 5) // 5 cap, 5/s
+// TokenBucketV2 的 Available 与 Wait 覆盖。
+func TestTokenBucketV2_AvailableAndWait(t *testing.T) {
+	tb := mustTokenBucketV2(t, 5, 5) // 5 cap, 5/s
 	if tb.Available() != 5 {
 		t.Errorf("Available = %d, want 5", tb.Available())
 	}
-	if w := tb.Reserve(); w != 0 {
-		t.Errorf("Reserve() with tokens = %v, want 0", w)
+	if !tb.AllowN(5) {
+		t.Fatal("AllowN(5) should consume the initial capacity")
 	}
-	if w := tb.ReserveN(100); w <= 0 {
-		t.Errorf("ReserveN(100) over cap = %v, want >0", w)
-	}
-	// Wait for 1 token: with refill rate 5/s should return quickly.
+	// 等待一个令牌；补充速率为每秒 5 个时应快速返回。
 	d := tb.Wait()
 	if d > 2*time.Second {
 		t.Errorf("Wait took too long: %v", d)
 	}
 }
 
-// MultiDimensionLimiter: both dimensions must allow.
+// MultiDimensionLimiter 要求所有维度都允许请求。
 func TestMultiDimensionLimiter_TightestBinds(t *testing.T) {
-	small := NewTokenRateLimiter(3, 3) // tight
-	big := NewTokenRateLimiter(1000, 1000)
-	m := NewMultiDimensionLimiter(small, big)
+	small := mustTokenRateLimiter(t, 3, 3) // 最严格的维度。
+	big := mustTokenRateLimiter(t, 1000, 1000)
+	m := mustMultiDimensionLimiter(t, small, big)
 
-	// First couple allowed (limited by small=3 RPM/TPM).
+	// 前几个请求由较小的每分钟请求数和令牌数限制。
 	allowed := 0
 	for i := 0; i < 10; i++ {
 		if m.Allow() {

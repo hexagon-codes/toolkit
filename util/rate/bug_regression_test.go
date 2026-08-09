@@ -2,6 +2,7 @@
 package rate
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -13,7 +14,7 @@ import (
 func TestBug1_SlidingWindowRecord_SmallCapacityNoPanic(t *testing.T) {
 	// Window large enough that cleanup never expires entries during the test,
 	// so Record's trim branch is forced once len reaches maxSize (=100 here).
-	sw := NewSlidingWindow(3, time.Hour)
+	sw := mustSlidingWindow(t, 3, time.Hour)
 	for i := 0; i < 500; i++ {
 		sw.Record()
 	}
@@ -23,13 +24,11 @@ func TestBug1_SlidingWindowRecord_SmallCapacityNoPanic(t *testing.T) {
 	}
 }
 
-// Bug4: NewLeakyBucket with a non-positive rate must not cause an integer
-// divide-by-zero panic in Allow/leak. A zero rate is treated as no throttle.
-func TestBug4_LeakyBucket_ZeroRateNoDivideByZero(t *testing.T) {
-	lb := NewLeakyBucket(2, 0)
-	for i := 0; i < 10; i++ {
-		if !lb.Allow() {
-			t.Fatalf("Allow() = false at i=%d, want true (zero rate = no throttle)", i)
+// 非正漏水间隔必须在构造阶段被拒绝，不能进入除零或忙等路径。
+func TestLeakyBucketRejectsNonPositiveRate(t *testing.T) {
+	for _, interval := range []time.Duration{0, -time.Second} {
+		if limiter, err := NewLeakyBucket(2, interval); !errors.Is(err, ErrInvalidRate) || limiter != nil {
+			t.Fatalf("NewLeakyBucket(%s) = (%v, %v), want nil ErrInvalidRate", interval, limiter, err)
 		}
 	}
 }
