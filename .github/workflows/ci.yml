@@ -12,10 +12,20 @@ permissions:
 
 jobs:
   test:
-    name: Test
-    # ubuntu-24.04 hosted runners currently disable the namespace features that
-    # bubblewrap/unshare need. Keep sandbox-bearing tests on the known-good image.
-    runs-on: ubuntu-22.04
+    name: Test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ubuntu-24.04 托管运行器目前禁用了 bubblewrap/unshare 所需的命名空间能力，
+          # Linux 沙箱测试固定在已验证可用的镜像上。
+          - name: Linux
+            os: ubuntu-22.04
+          - name: macOS
+            os: macos-14
+          - name: Windows
+            os: windows-2022
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
@@ -23,6 +33,7 @@ jobs:
           # 浮动到 1.25 线最新补丁: stdlib 安全修复(govulncheck)自动吸收, 勿钉死具体补丁号
           go-version: '1.25.x'
       - name: Install Linux sandbox dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y bubblewrap util-linux
@@ -31,9 +42,14 @@ jobs:
         run: go build ./...
       - name: Vet
         run: go vet ./...
+      - name: Test
+        if: runner.os != 'Linux'
+        run: go test -count=1 ./...
       - name: Test (race + coverage)
+        if: runner.os == 'Linux'
         run: go test -race -coverprofile=coverage.out ./...
       - name: Upload coverage
+        if: runner.os == 'Linux'
         uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4.6.0
         with:
           file: ./coverage.out
@@ -65,7 +81,18 @@ jobs:
         with:
           version: v2.12.2          # 固定版本保证可复现; v8 action 支持 golangci-lint v2 (.golangci.yml 为 version "2")
           args: --timeout=5m
-          only-new-issues: true     # 既有问题不阻断, 仅对新增引入的问题门禁 (大型既有代码库渐进采纳 lint 的标准做法)
+
+  integration:
+    name: Integration (MySQL + Redis)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.25.x'
+      - name: Run isolated integration tests
+        run: ./scripts/verify-integrations.sh
 
   vuln:
     name: Vulnerability Scan
