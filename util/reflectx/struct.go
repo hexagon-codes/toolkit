@@ -47,7 +47,7 @@ func StructToMap(v any) map[string]any {
 //	// map[string]any{"name": "Alice", "age": 20}
 func StructToMapWithTag(v any, tagName string) map[string]any {
 	rv := reflect.ValueOf(v)
-	if rv.Kind() == reflect.Ptr {
+	if rv.Kind() == reflect.Pointer {
 		rv = rv.Elem()
 	}
 	if rv.Kind() != reflect.Struct {
@@ -114,7 +114,7 @@ func MapToStruct(m map[string]any, v any) error {
 //   - error: 转换错误
 func MapToStructWithTag(m map[string]any, v any, tagName string) error {
 	rv := reflect.ValueOf(v)
-	if rv.Kind() != reflect.Ptr || rv.IsNil() {
+	if rv.Kind() != reflect.Pointer || rv.IsNil() {
 		return fmt.Errorf("v must be a non-nil pointer to struct")
 	}
 	rv = rv.Elem()
@@ -209,7 +209,7 @@ func setFieldValue(field reflect.Value, value any) error {
 //	// "Alice", true
 func GetField(v any, name string) (any, bool) {
 	rv := reflect.ValueOf(v)
-	if rv.Kind() == reflect.Ptr {
+	if rv.Kind() == reflect.Pointer {
 		rv = rv.Elem()
 	}
 	if rv.Kind() != reflect.Struct {
@@ -263,7 +263,7 @@ func GetFieldValue[T any](v any, name string) (T, bool) {
 //	err := reflectx.SetField(user, "Age", 21)
 func SetField(v any, name string, value any) error {
 	rv := reflect.ValueOf(v)
-	if rv.Kind() != reflect.Ptr || rv.IsNil() {
+	if rv.Kind() != reflect.Pointer || rv.IsNil() {
 		return fmt.Errorf("v must be a non-nil pointer to struct")
 	}
 	rv = rv.Elem()
@@ -292,7 +292,7 @@ func SetField(v any, name string, value any) error {
 //   - bool: 是否有该字段
 func HasField(v any, name string) bool {
 	rv := reflect.ValueOf(v)
-	if rv.Kind() == reflect.Ptr {
+	if rv.Kind() == reflect.Pointer {
 		rv = rv.Elem()
 	}
 	if rv.Kind() != reflect.Struct {
@@ -310,7 +310,7 @@ func HasField(v any, name string) bool {
 //   - []string: 字段名列表
 func FieldNames(v any) []string {
 	rv := reflect.ValueOf(v)
-	if rv.Kind() == reflect.Ptr {
+	if rv.Kind() == reflect.Pointer {
 		rv = rv.Elem()
 	}
 	if rv.Kind() != reflect.Struct {
@@ -338,7 +338,7 @@ func FieldNames(v any) []string {
 //   - map[string]string: 字段名到 tag 值的映射
 func FieldTags(v any, tagName string) map[string]string {
 	rv := reflect.ValueOf(v)
-	if rv.Kind() == reflect.Ptr {
+	if rv.Kind() == reflect.Pointer {
 		rv = rv.Elem()
 	}
 	if rv.Kind() != reflect.Struct {

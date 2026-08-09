@@ -714,15 +714,22 @@ func TestDeepCopy_CircularReference(t *testing.T) {
 	// 验证拷贝成功
 	if copied == nil {
 		t.Fatal("DeepCopy returned nil")
+		return
 	}
 	if copied.Value != 1 {
 		t.Errorf("expected Value=1, got %d", copied.Value)
 	}
-	if copied.Next == nil || copied.Next.Value != 2 {
-		t.Error("Next node not copied correctly")
+	if copied.Next == nil {
+		t.Fatal("Next node not copied")
 	}
-	if copied.Next.Next == nil || copied.Next.Next.Value != 3 {
-		t.Error("Next.Next node not copied correctly")
+	if copied.Next.Value != 2 {
+		t.Error("Next node copied with wrong value")
+	}
+	if copied.Next.Next == nil {
+		t.Fatal("Next.Next node not copied")
+	}
+	if copied.Next.Next.Value != 3 {
+		t.Error("Next.Next node copied with wrong value")
 	}
 
 	// 验证是独立副本（修改原始不影响拷贝）
@@ -749,6 +756,7 @@ func TestDeepCopy_SelfReference(t *testing.T) {
 	// 验证拷贝成功
 	if copied == nil {
 		t.Fatal("DeepCopy returned nil")
+		return
 	}
 	if copied.Value != 42 {
 		t.Errorf("expected Value=42, got %d", copied.Value)

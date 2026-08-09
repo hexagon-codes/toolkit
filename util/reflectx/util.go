@@ -49,7 +49,7 @@ func IsNil(v any) bool {
 	}
 	rv := reflect.ValueOf(v)
 	switch rv.Kind() {
-	case reflect.Ptr, reflect.Interface, reflect.Slice, reflect.Map, reflect.Chan, reflect.Func:
+	case reflect.Pointer, reflect.Interface, reflect.Slice, reflect.Map, reflect.Chan, reflect.Func:
 		return rv.IsNil()
 	}
 	return false
@@ -73,7 +73,7 @@ func TypeName(v any) string {
 		return "nil"
 	}
 	t := reflect.TypeOf(v)
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		return "*" + t.Elem().Name()
 	}
 	return t.Name()
@@ -123,7 +123,7 @@ func IsPtr(v any) bool {
 	if v == nil {
 		return false
 	}
-	return reflect.TypeOf(v).Kind() == reflect.Ptr
+	return reflect.TypeOf(v).Kind() == reflect.Pointer
 }
 
 // IsStruct 检查值是否为结构体
@@ -138,7 +138,7 @@ func IsStruct(v any) bool {
 		return false
 	}
 	t := reflect.TypeOf(v)
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	return t.Kind() == reflect.Struct
@@ -212,7 +212,7 @@ func Indirect(v any) any {
 		return nil
 	}
 	rv := reflect.ValueOf(v)
-	for rv.Kind() == reflect.Ptr {
+	for rv.Kind() == reflect.Pointer {
 		if rv.IsNil() {
 			return nil
 		}
@@ -238,7 +238,7 @@ func New(v any) any {
 		return nil
 	}
 	t := reflect.TypeOf(v)
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	return reflect.New(t).Interface()

@@ -39,7 +39,12 @@ func DeepCopy[T any](src T) T {
 		var zero T
 		return zero
 	}
-	return result.Interface().(T)
+	copied, ok := result.Interface().(T)
+	if !ok {
+		var zero T
+		return zero
+	}
+	return copied
 }
 
 // deepCopyValue 递归深拷贝 reflect.Value
@@ -50,7 +55,7 @@ func deepCopyValue(src reflect.Value, visited map[uintptr]reflect.Value) reflect
 	}
 
 	switch src.Kind() {
-	case reflect.Ptr:
+	case reflect.Pointer:
 		return deepCopyPtr(src, visited)
 	case reflect.Interface:
 		return deepCopyInterface(src, visited)
@@ -182,5 +187,10 @@ func Clone[T any](src T) T {
 	}
 	dst := reflect.New(reflect.TypeOf(src)).Elem()
 	dst.Set(reflect.ValueOf(src))
-	return dst.Interface().(T)
+	cloned, ok := dst.Interface().(T)
+	if !ok {
+		var zero T
+		return zero
+	}
+	return cloned
 }
