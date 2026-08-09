@@ -3,6 +3,7 @@ package file
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -200,9 +201,9 @@ func TestDir(t *testing.T) {
 }
 
 func TestReadWrite(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "test_readwrite")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
+	tmpDir, mkdirErr := os.MkdirTemp("", "test_readwrite")
+	if mkdirErr != nil {
+		t.Fatalf("failed to create temp dir: %v", mkdirErr)
 	}
 	defer os.RemoveAll(tmpDir)
 
@@ -226,9 +227,9 @@ func TestReadWrite(t *testing.T) {
 }
 
 func TestReadWriteString(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "test_readwritestring")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
+	tmpDir, mkdirErr := os.MkdirTemp("", "test_readwritestring")
+	if mkdirErr != nil {
+		t.Fatalf("failed to create temp dir: %v", mkdirErr)
 	}
 	defer os.RemoveAll(tmpDir)
 
@@ -252,9 +253,9 @@ func TestReadWriteString(t *testing.T) {
 }
 
 func TestAppend(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "test_append")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
+	tmpDir, mkdirErr := os.MkdirTemp("", "test_append")
+	if mkdirErr != nil {
+		t.Fatalf("failed to create temp dir: %v", mkdirErr)
 	}
 	defer os.RemoveAll(tmpDir)
 
@@ -282,9 +283,9 @@ func TestAppend(t *testing.T) {
 }
 
 func TestCopy(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "test_copy")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
+	tmpDir, mkdirErr := os.MkdirTemp("", "test_copy")
+	if mkdirErr != nil {
+		t.Fatalf("failed to create temp dir: %v", mkdirErr)
 	}
 	defer os.RemoveAll(tmpDir)
 
@@ -314,9 +315,9 @@ func TestCopy(t *testing.T) {
 }
 
 func TestMove(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "test_move")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
+	tmpDir, mkdirErr := os.MkdirTemp("", "test_move")
+	if mkdirErr != nil {
+		t.Fatalf("failed to create temp dir: %v", mkdirErr)
 	}
 	defer os.RemoveAll(tmpDir)
 
@@ -368,10 +369,62 @@ func TestMkdirAll(t *testing.T) {
 	}
 }
 
-func TestIsEmpty(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "test_isempty")
+func TestDefaultPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows 不提供 POSIX 权限位语义")
+	}
+
+	dir := filepath.Join(t.TempDir(), "private", "nested")
+	if err := MkdirAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	for name, write := range map[string]func(string) error{
+		"bytes":  func(path string) error { return Write(path, []byte("data")) },
+		"string": func(path string) error { return WriteString(path, "data") },
+		"append": func(path string) error { return Append(path, []byte("data")) },
+	} {
+		path := filepath.Join(dir, name)
+		if err := write(path); err != nil {
+			t.Fatalf("%s 写入失败: %v", name, err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Errorf("%s 权限 = %04o, 期望 0600", name, got)
+		}
+	}
+
+	source := filepath.Join(dir, "source")
+	if err := os.WriteFile(source, []byte("data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(dir, "destination")
+	if err := Copy(source, destination); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(destination)
 	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Errorf("复制目标权限 = %04o, 期望 0700", got)
+	}
+
+	dirInfo, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := dirInfo.Mode().Perm(); got&0o027 != 0 {
+		t.Errorf("目录权限 = %04o，包含组写入或其他用户权限", got)
+	}
+}
+
+func TestIsEmpty(t *testing.T) {
+	tmpDir, mkdirErr := os.MkdirTemp("", "test_isempty")
+	if mkdirErr != nil {
+		t.Fatalf("failed to create temp dir: %v", mkdirErr)
 	}
 	defer os.RemoveAll(tmpDir)
 
@@ -391,8 +444,8 @@ func TestIsEmpty(t *testing.T) {
 
 	// Create non-empty file
 	nonEmptyPath := filepath.Join(tmpDir, "nonempty.txt")
-	if err := WriteString(nonEmptyPath, "content"); err != nil {
-		t.Fatalf("WriteString failed: %v", err)
+	if writeErr := WriteString(nonEmptyPath, "content"); writeErr != nil {
+		t.Fatalf("WriteString failed: %v", writeErr)
 	}
 
 	isEmpty, err = IsEmpty(nonEmptyPath)

@@ -7,6 +7,8 @@ A convenient toolkit that simplifies file operations, encapsulating common file 
 ## Features
 
 - ✅ File/directory existence and attribute checks
+- ✅ Atomic file replacement (file sync, same-directory rename, parent-directory sync)
+- ✅ Private defaults (`0600` files and `0750` directories)
 - ✅ File reading and writing (supports strings and bytes)
 - ✅ File append operations
 - ✅ File copy and move
@@ -53,13 +55,13 @@ fmt.Println(content)
 // Read as byte array
 data, err := file.Read("/path/to/file.bin")
 
-// Write string to file
+// Atomically write a string with 0600 permissions
 err = file.WriteString("/path/to/output.txt", "Hello, World!")
 
-// Write bytes to file
+// Atomically write bytes with 0600 permissions
 err = file.Write("/path/to/output.bin", []byte{0x01, 0x02})
 
-// Append content to file
+// Append directly without atomic-replacement or crash-durability guarantees
 err = file.AppendString("/path/to/log.txt", "New log entry\n")
 ```
 
@@ -85,7 +87,7 @@ dir := file.Dir("/path/to/file.txt")  // "/path/to"
 ### File Operations
 
 ```go
-// Copy file
+// Atomically copy a regular file without following a destination symlink
 err := file.Copy("/path/to/source.txt", "/path/to/dest.txt")
 
 // Move file
@@ -163,13 +165,13 @@ ReadString(path string) (string, error)
 ### Write Functions
 
 ```go
-// Write writes byte array to file
+// Write atomically replaces a file with 0600 permissions
 Write(path string, data []byte) error
 
-// WriteString writes string to file
+// WriteString atomically replaces string content with 0600 permissions
 WriteString(path, content string) error
 
-// Append appends byte array to file
+// Append directly appends bytes with a default 0600 creation mode
 Append(path string, data []byte) error
 
 // AppendString appends string to file
@@ -201,7 +203,7 @@ Dir(path string) string
 ### Operation Functions
 
 ```go
-// Copy copies a file
+// Copy atomically copies a regular file and replaces a destination symlink
 Copy(src, dst string) error
 
 // Move moves a file

@@ -7,6 +7,8 @@
 ## 特性
 
 - ✅ 文件/目录判断和属性获取
+- ✅ 原子文件替换（文件 Sync、同目录 rename、父目录 Sync）
+- ✅ 默认私有权限（文件 `0600`、目录 `0750`）
 - ✅ 文件读写（支持字符串和字节）
 - ✅ 文件追加操作
 - ✅ 文件复制和移动
@@ -53,13 +55,13 @@ fmt.Println(content)
 // 读取为字节数组
 data, err := file.Read("/path/to/file.bin")
 
-// 写入字符串到文件
+// 以 0600 权限原子写入字符串
 err = file.WriteString("/path/to/output.txt", "Hello, World!")
 
-// 写入字节到文件
+// 以 0600 权限原子写入字节
 err = file.Write("/path/to/output.bin", []byte{0x01, 0x02})
 
-// 追加内容到文件
+// 直接追加内容（不提供原子替换或崩溃持久性保证）
 err = file.AppendString("/path/to/log.txt", "New log entry\n")
 ```
 
@@ -85,7 +87,7 @@ dir := file.Dir("/path/to/file.txt")  // "/path/to"
 ### 文件操作
 
 ```go
-// 复制文件
+// 原子复制普通文件，不跟随目标符号链接
 err := file.Copy("/path/to/source.txt", "/path/to/dest.txt")
 
 // 移动文件
@@ -163,13 +165,13 @@ ReadString(path string) (string, error)
 ### 写入函数
 
 ```go
-// Write 写入文件内容（字节数组）
+// Write 以 0600 权限原子替换文件内容（字节数组）
 Write(path string, data []byte) error
 
-// WriteString 写入字符串到文件
+// WriteString 以 0600 权限原子替换字符串内容
 WriteString(path, content string) error
 
-// Append 追加内容到文件（字节数组）
+// Append 以 0600 默认权限直接追加内容（字节数组）
 Append(path string, data []byte) error
 
 // AppendString 追加字符串到文件
@@ -201,7 +203,7 @@ Dir(path string) string
 ### 操作函数
 
 ```go
-// Copy 复制文件
+// Copy 原子复制普通文件并替换目标符号链接
 Copy(src, dst string) error
 
 // Move 移动文件
