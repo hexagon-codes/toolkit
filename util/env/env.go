@@ -1,3 +1,4 @@
+// Package env 提供环境变量的类型化访问能力。
 package env
 
 import (
@@ -44,7 +45,10 @@ func GetInt(key string) int {
 	if val == "" {
 		return 0
 	}
-	i, _ := strconv.Atoi(val)
+	i, err := strconv.Atoi(val)
+	if err != nil {
+		return 0
+	}
 	return i
 }
 
@@ -67,7 +71,10 @@ func GetInt64(key string) int64 {
 	if val == "" {
 		return 0
 	}
-	i, _ := strconv.ParseInt(val, 10, 64)
+	i, err := strconv.ParseInt(val, 10, 64)
+	if err != nil {
+		return 0
+	}
 	return i
 }
 
@@ -90,7 +97,10 @@ func GetFloat64(key string) float64 {
 	if val == "" {
 		return 0
 	}
-	f, _ := strconv.ParseFloat(val, 64)
+	f, err := strconv.ParseFloat(val, 64)
+	if err != nil {
+		return 0
+	}
 	return f
 }
 
@@ -132,7 +142,10 @@ func GetDuration(key string) time.Duration {
 	if val == "" {
 		return 0
 	}
-	d, _ := time.ParseDuration(val)
+	d, err := time.ParseDuration(val)
+	if err != nil {
+		return 0
+	}
 	return d
 }
 

@@ -1,3 +1,4 @@
+// Package slice 提供泛型切片处理工具。
 package slice
 
 import "math/rand/v2"
@@ -98,7 +99,7 @@ func Shuffle[T any](slice []T) []T {
 
 	// 使用 math/rand/v2（Go 1.22+），自动使用加密安全的随机种子
 	for i := len(result) - 1; i > 0; i-- {
-		j := rand.IntN(i + 1)
+		j := rand.IntN(i + 1) // #nosec G404 -- 洗牌随机性不用于密钥、令牌或其他安全用途。
 		result[i], result[j] = result[j], result[i]
 	}
 
@@ -233,13 +234,13 @@ func Max[T int | int64 | int32 | float32 | float64](slice []T) T {
 		return zero
 	}
 
-	max := slice[0]
+	maximum := slice[0]
 	for _, v := range slice[1:] {
-		if v > max {
-			max = v
+		if v > maximum {
+			maximum = v
 		}
 	}
-	return max
+	return maximum
 }
 
 // Min 获取最小值
@@ -249,13 +250,13 @@ func Min[T int | int64 | int32 | float32 | float64](slice []T) T {
 		return zero
 	}
 
-	min := slice[0]
+	minimum := slice[0]
 	for _, v := range slice[1:] {
-		if v < min {
-			min = v
+		if v < minimum {
+			minimum = v
 		}
 	}
-	return min
+	return minimum
 }
 
 // GroupBy 分组

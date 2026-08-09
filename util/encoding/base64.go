@@ -1,3 +1,4 @@
+// Package encoding 提供常用文本与二进制编码工具。
 package encoding
 
 import (

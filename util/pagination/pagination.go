@@ -1,3 +1,4 @@
+// Package pagination 提供偏移量和页码分页工具。
 package pagination
 
 // Pagination 分页信息

@@ -1,3 +1,4 @@
+// Package config 提供配置加载与合并工具。
 package config
 
 import (
@@ -581,7 +582,7 @@ func (c *Config) UnmarshalKey(key string, v any) error {
 // BindEnv 绑定环境变量到结构体字段
 func BindEnv(v any, prefix string) error {
 	val := reflect.ValueOf(v)
-	if val.Kind() != reflect.Ptr || val.Elem().Kind() != reflect.Struct {
+	if val.Kind() != reflect.Pointer || val.Elem().Kind() != reflect.Struct {
 		return ErrInvalidType
 	}
 

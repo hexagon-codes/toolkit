@@ -1,3 +1,4 @@
+// Package json 提供 encoding/json 的便捷封装。
 package json
 
 import (
@@ -14,7 +15,10 @@ import (
 //
 // 建议：在生产代码中优先使用 MarshalE 以正确处理错误。
 func Marshal(v any) string {
-	data, _ := json.Marshal(v)
+	data, err := json.Marshal(v)
+	if err != nil {
+		return ""
+	}
 	return string(data)
 }
 
@@ -40,7 +44,10 @@ func MustMarshal(v any) string {
 
 // MarshalIndent JSON序列化（美化输出）
 func MarshalIndent(v any) string {
-	data, _ := json.MarshalIndent(v, "", "  ")
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return ""
+	}
 	return string(data)
 }
 

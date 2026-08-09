@@ -27,7 +27,7 @@ func NanoIDCustom(alphabet string, size int) string {
 	if size <= 0 {
 		size = DefaultSize
 	}
-	if len(alphabet) == 0 {
+	if alphabet == "" {
 		alphabet = DefaultAlphabet
 	}
 

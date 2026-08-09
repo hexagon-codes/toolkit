@@ -173,7 +173,9 @@ func SnowflakeID() int64 {
 	if defaultSnowflake == nil {
 		initMu.Unlock()
 		// 默认使用 worker ID 1
-		InitSnowflake(1)
+		if err := InitSnowflake(1); err != nil {
+			panic(err)
+		}
 	} else {
 		initMu.Unlock()
 	}
