@@ -45,9 +45,9 @@ json, _ := conv.MapToJson(m)
 ```go
 import "github.com/hexagon-codes/toolkit/lang/stringx"
 
-// 零拷贝转换
+// 安全转换（结果不共享可变底层内存）
 str := stringx.BytesToString([]byte("hello"))
-bytes := stringx.String2Bytes("world")
+bytes := stringx.StringToBytes("world")
 
 // 大小写转换
 stringx.CamelCase("hello_world")     // "helloWorld"
@@ -240,24 +240,44 @@ import "github.com/hexagon-codes/toolkit/lang/errorx"
 
 // MultiError 收集多个错误
 me := errorx.NewMultiError()
-me.Append(err1).Append(err2)
+me.Append(err1, err2)
 if err := me.ErrorOrNil(); err != nil {
     return err
 }
 
-// 并行执行
-me := errorx.Go(
+// 使用默认上限并行执行
+err := errorx.Go(
     func() error { return task1() },
     func() error { return task2() },
     func() error { return task3() },
 )
+if err != nil {
+    return err
+}
 
 // 限制并发数
-me := errorx.GoWithLimit(5,
+err = errorx.GoWithLimit(5,
     func() error { return process(item1) },
     func() error { return process(item2) },
     // ... 更多任务
 )
+if err != nil {
+    return err
+}
+
+// 安全启动 goroutine，并等待唯一一次完成结果
+if err := <-errorx.SafeGo(func() { runTask() }); err != nil {
+    return err
+}
+
+// Result 在失败时计算替代值；回调本身也会被校验
+fallback, err := errorx.Err[int](loadErr).UnwrapOrElse(func(err error) int {
+    log.Printf("load failed: %v", err)
+    return 0
+})
+if err != nil {
+    return err
+}
 
 // 遍历错误链
 errorx.Walk(err, func(e error) bool {
@@ -378,9 +398,17 @@ contextx.IsCanceled(ctx)            // 是否取消
 contextx.IsDone(ctx)                // 是否完成
 contextx.Remaining(ctx)             // 剩余时间
 
-// 运行控制
-contextx.Run(ctx, func() error { ... })
-contextx.RunTimeout(5*time.Second, func() error { ... })
+// 运行控制：任务通过传入的 context 协作响应取消
+if err := contextx.Run(ctx, func(taskCtx context.Context) error {
+    return runTask(taskCtx)
+}); err != nil {
+    return err
+}
+if err := contextx.RunTimeout(ctx, 5*time.Second, func(taskCtx context.Context) error {
+    return runTask(taskCtx)
+}); err != nil {
+    return err
+}
 
 // Detach - 脱离父 context 取消控制，保留值
 detached := contextx.Detach(ctx)
@@ -391,9 +419,37 @@ wg.Go(func(ctx context.Context) error { ... })
 wg.Wait()
 
 // 协程池
-pool := contextx.NewPool(ctx, 10)
+pool, err := contextx.NewPool(ctx, 10)
+if err != nil {
+    return err
+}
+defer pool.Close()
 pool.Go(func(ctx context.Context) error { ... })
-pool.Wait()
+if err := pool.Wait(); err != nil {
+    return err
+}
+```
+
+### 多层缓存
+
+```go
+import "github.com/hexagon-codes/toolkit/cache/multi"
+
+cache, err := multi.NewCache([]multi.LayerConfig{
+    {Layer: localCache, TTL: 10 * time.Minute, Name: "local"},
+    {Layer: redisCache, TTL: 60 * time.Minute, Name: "redis"},
+})
+if err != nil {
+    return err
+}
+
+builtCache, err := multi.NewBuilder().
+    WithLocal(localCache, 10*time.Minute).
+    WithRedis(redisCache, 60*time.Minute).
+    Build()
+if err != nil {
+    return err
+}
 ```
 
 ### AES 加密
@@ -452,14 +508,17 @@ import "github.com/hexagon-codes/toolkit/net/httpx"
 
 // 简单请求
 resp, _ := httpx.Get("https://api.example.com/users")
-resp, _ := httpx.Post("https://api.example.com/users", body)
+resp, _ = httpx.Post("https://api.example.com/users", body)
 
 // 链式调用
-client := httpx.NewClient(
+client, err := httpx.NewClient(
     httpx.WithTimeout(10*time.Second),
     httpx.WithRetry(3, time.Second),
 )
-resp, _ := client.R().
+if err != nil {
+    log.Fatal(err)
+}
+resp, _ = client.R().
     SetHeader("Authorization", "Bearer token").
     SetQuery("page", "1").
     Get("/api/users")
@@ -469,10 +528,13 @@ var users []User
 resp.JSON(&users)
 
 // SSRF 防护（阻止访问内网地址，支持 IPv6 白名单）
-client := httpx.NewClient(
+secureClient, err := httpx.NewClient(
     httpx.WithSSRFProtection("api.trusted.com", "[::1]:8080"),
 )
-resp, err := client.R().Get(userProvidedURL)
+if err != nil {
+    log.Fatal(err)
+}
+resp, err = secureClient.R().Get(userProvidedURL)
 if errors.Is(err, httpx.ErrSSRFBlocked) {
     // 请求被拦截
 }
@@ -484,15 +546,16 @@ if errors.Is(err, httpx.ErrSSRFBlocked) {
 import "github.com/hexagon-codes/toolkit/net/httpx"
 
 // 创建连接池
-pool := httpx.NewPool(httpx.PoolConfig{
-    MaxIdleConns:    100,
-    MaxConnsPerHost: 10,
-    IdleConnTimeout: 90 * time.Second,
-})
+poolConfig := httpx.DefaultPoolConfig()
+poolConfig.MaxConnsPerHost = 20
+pool, err := httpx.NewPool(poolConfig)
+if err != nil {
+    log.Fatal(err)
+}
 defer pool.Close()
 
 // 执行请求
-req, _ := http.NewRequest("GET", "https://api.example.com", nil)
+req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.example.com", http.NoBody)
 resp, _ := pool.Do(req)
 
 // 查看统计信息
@@ -501,17 +564,32 @@ fmt.Printf("总请求: %d, 活跃: %d, 错误: %d\n",
     stats.TotalRequests, stats.ActiveRequests, stats.ErrorCount)
 
 // 全局连接池
-httpx.SetGlobalPool(pool)
+if err := httpx.SetGlobalPool(pool); err != nil {
+    log.Fatal(err)
+}
 p := httpx.GlobalPool()
 
-// 主机级连接池（自动按主机分配独立连接池）
-hostPool := httpx.NewHostPool()
+// 有界主机级连接池（自动按主机分配独立连接池）
+hostPoolConfig := httpx.DefaultHostPoolConfig()
+hostPoolConfig.MaxHosts = 128
+hostPool, err := httpx.NewHostPool(hostPoolConfig)
+if err != nil {
+    log.Fatal(err)
+}
 defer hostPool.Close()
-hostPool.SetHostConfig("api.example.com", httpx.PoolConfig{MaxConnsPerHost: 20})
+hostConfig := httpx.DefaultPoolConfig()
+hostConfig.MaxConnsPerHost = 20
+if err := hostPool.SetHostConfig("api.example.com", hostConfig); err != nil {
+    log.Fatal(err)
+}
 resp, _ = hostPool.Do(req)
+// 移除主机时关闭对应连接池并释放容量
+if err := hostPool.RemoveHost("api.example.com"); err != nil {
+    log.Fatal(err)
+}
 
-// 带重试的连接池（自动缓存 Body 支持重放）
-retryPool := httpx.NewRetryPool(pool, httpx.RetryConfig{
+// 带重试的连接池（带 Body 的请求必须提供 GetBody）
+retryPool, err := httpx.NewRetryPool(pool, httpx.RetryConfig{
     MaxRetries:   3,
     RetryWait:    100 * time.Millisecond,
     MaxRetryWait: 5 * time.Second,
@@ -519,17 +597,21 @@ retryPool := httpx.NewRetryPool(pool, httpx.RetryConfig{
         return err != nil || resp.StatusCode >= 500
     },
 })
+if err != nil {
+    log.Fatal(err)
+}
 
-// 带限流的连接池（实现 io.Closer，通过 sync.Once 保证幂等关闭）
-rateLimitedPool := httpx.NewRateLimitedPool(pool, 100)  // 100 QPS
+// 带限流的连接池
+rateLimitedPool, err := httpx.NewRateLimitedPool(pool, 100)  // 100 QPS
 defer rateLimitedPool.Close()
 
-// 带断路器的连接池
-cbPool := httpx.NewCircuitBreakerPool(pool, httpx.CircuitBreakerConfig{
-    FailureThreshold: 5,
-    SuccessThreshold: 2,
-    Timeout:          30 * time.Second,
-})
+// 带熔断器的连接池，复用 util/circuit 状态机
+cbPool, err := httpx.NewCircuitBreakerPool(
+    pool,
+    circuit.WithThreshold(5),
+    circuit.WithSuccessThreshold(2),
+    circuit.WithTimeout(30*time.Second),
+)
 ```
 
 ### AI 客户端预设
@@ -581,11 +663,17 @@ content, _ := stream.CollectOpenAIContent()
 import "github.com/hexagon-codes/toolkit/net/sse"
 
 // 客户端 - 接收 SSE 事件
-client := sse.NewClient("https://api.example.com/events",
+client, err := sse.NewClient("https://api.example.com/events",
     sse.WithTimeout(30*time.Second),
     sse.WithLastEventID("last-id"),
 )
-stream, _ := client.Connect(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+stream, err := client.Connect(ctx)
+if err != nil {
+    log.Fatal(err)
+}
 defer stream.Close()
 
 for event := range stream.Events() {
@@ -596,16 +684,24 @@ for event := range stream.Events() {
 
 // 服务端 - 发送 SSE 事件
 func handler(w http.ResponseWriter, r *http.Request) {
-    writer := sse.NewWriter(w)
+    writer, err := sse.NewWriter(w)
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusInternalServerError)
+        return
+    }
     defer writer.Close()
 
     for {
-        writer.Write(&sse.Event{
+        if err := writer.Write(&sse.Event{
             ID:    "1",
             Event: "message",
             Data:  "Hello, World!",
-        })
-        writer.WriteJSON(myData)
+        }); err != nil {
+            return
+        }
+        if err := writer.WriteJSON(myData); err != nil {
+            return
+        }
         time.Sleep(time.Second)
     }
 }
@@ -623,7 +719,7 @@ sse.ReadOpenAIStream(resp.Body, func(chunk ChatCompletion) error {
 import "github.com/hexagon-codes/toolkit/util/circuit"
 
 // 基本使用
-breaker := circuit.New(
+breaker, err := circuit.New(
     circuit.WithThreshold(5),           // 5次失败后熔断
     circuit.WithTimeout(30*time.Second), // 熔断持续30秒
     circuit.WithHalfOpenMaxRequests(3), // 半开状态最多3个探测请求
@@ -635,23 +731,21 @@ result, err := breaker.Execute(func() (any, error) {
 })
 
 // AI API 专用熔断器（内置预设配置）
-openaiBreaker := circuit.NewAIBreaker(circuit.OpenAIConfig)
-claudeBreaker := circuit.NewAIBreaker(circuit.ClaudeConfig)
-geminiBreaker := circuit.NewAIBreaker(circuit.GeminiConfig)
+openaiBreaker, err := circuit.NewAIBreaker(circuit.OpenAIConfig())
+claudeBreaker, err := circuit.NewAIBreaker(circuit.ClaudeConfig())
+geminiBreaker, err := circuit.NewAIBreaker(circuit.GeminiConfig())
 
 // 预设风格
-aggressiveBreaker := circuit.NewAIBreaker(circuit.AggressiveConfig)       // 快速熔断
-conservativeBreaker := circuit.NewAIBreaker(circuit.ConservativeConfig)   // 慢速熔断
+aggressiveBreaker, err := circuit.NewAIBreaker(circuit.AggressiveConfig())       // 快速熔断
+conservativeBreaker, err := circuit.NewAIBreaker(circuit.ConservativeConfig())   // 慢速熔断
 
 // 自定义错误判断
-breaker = circuit.New(
+breaker, err = circuit.New(
     circuit.WithIsFailure(circuit.IsRateLimitOrServerError),  // 仅 429/5xx 触发
 )
 
 // 多熔断器管理（按名称隔离）
-manager := circuit.NewBreakerManager(func() *circuit.Breaker {
-    return circuit.NewAIBreaker(circuit.OpenAIConfig)
-})
+manager, err := circuit.NewBreakerManager(circuit.OpenAIConfig()...)
 result, err = manager.Execute("gpt-4", func() (any, error) {
     return callGPT4()
 })
@@ -672,51 +766,88 @@ breaker.OnStateChange(func(from, to circuit.State) {
 import "github.com/hexagon-codes/toolkit/event"
 
 // 创建事件总线
-bus := event.New()
-defer bus.Close()
+bus, err := event.New()
+if err != nil {
+    log.Fatal(err)
+}
+defer func() {
+    if err := bus.Shutdown(ctx); err != nil {
+        log.Print(err)
+    }
+}()
 
 // 订阅指定类型事件
-unsub := bus.Subscribe("agent.start", func(e event.Event) {
+unsub, err := bus.Subscribe("agent.start", func(e event.Event) {
     fmt.Printf("Agent 启动: %v (来源: %s)\n", e.Payload, e.Source)
 })
+if err != nil {
+    log.Fatal(err)
+}
 defer unsub()  // 取消订阅
 
 // 订阅所有事件（全局订阅）
-unsubAll := bus.SubscribeAll(func(e event.Event) {
+unsubAll, err := bus.SubscribeAll(func(e event.Event) {
     fmt.Printf("[%s] %v\n", e.Type, e.Payload)
 })
+if err != nil {
+    log.Fatal(err)
+}
 defer unsubAll()
 
 // 发布事件
-bus.Publish(event.Event{
+if err := bus.Publish(event.Event{
     Type:    "agent.start",
     Payload: "my-agent",
     Source:  "scheduler",
-})
+}); err != nil {
+    log.Fatal(err)
+}
+
+// 同步发布在当前 goroutine 中执行处理器，完成后返回
+if err := bus.PublishSync(event.Event{Type: "agent.ready"}); err != nil {
+    log.Fatal(err)
+}
 
 // 预定义事件类型常量
-bus.Publish(event.Event{Type: event.EventLLMRequest,  Payload: req})
-bus.Publish(event.Event{Type: event.EventLLMResponse, Payload: resp})
-bus.Publish(event.Event{Type: event.EventToolCall,    Payload: toolName})
-bus.Publish(event.Event{Type: event.EventCostUpdate,  Payload: cost})
-bus.Publish(event.Event{Type: event.EventAgentError,  Payload: err})
+for _, evt := range []event.Event{
+    {Type: event.EventLLMRequest, Payload: req},
+    {Type: event.EventLLMResponse, Payload: resp},
+    {Type: event.EventToolCall, Payload: toolName},
+    {Type: event.EventCostUpdate, Payload: cost},
+    {Type: event.EventAgentError, Payload: callErr},
+} {
+    if err := bus.Publish(evt); err != nil {
+        log.Fatal(err)
+    }
+}
 
 // 配置选项
-bus = event.New(
+configuredBus, err := event.New(
     event.WithMaxGoroutines(512),              // 限制并发 goroutine 数
     event.WithPanicHandler(func(e event.Event, v any) {
         log.Printf("handler panic: %v", v)     // 捕获 handler panic
     }),
 )
+if err != nil {
+    log.Fatal(err)
+}
+configuredBus.Close() // 仅启动关闭流程，不等待正在执行的处理器
+if err := configuredBus.Shutdown(ctx); err != nil {
+    log.Print(err)
+}
 
 // 订阅数量统计
-count := bus.SubscriberCount("agent.start")
+count := bus.Len()
 ```
 
 ### IP 工具
 
 ```go
-import "github.com/hexagon-codes/toolkit/net/ip"
+import (
+    "context"
+
+    "github.com/hexagon-codes/toolkit/net/ip"
+)
 
 ip.IsValid("192.168.1.1")           // true
 ip.IsPrivate("192.168.1.1")         // true
@@ -727,7 +858,7 @@ ip.IsInCIDR("192.168.1.100", "192.168.1.0/24")  // true
 clientIP := ip.FromRequest(r)
 
 // 本机 IP
-localIP, _ := ip.GetLocalIP()
+localIP, _ := ip.GetLocalIP(context.Background())
 ```
 
 ### 日志
@@ -749,6 +880,28 @@ logger.Init(&logger.Config{
 // 带字段
 log := logger.With("service", "user-api")
 log.Info("started", "port", 8080)
+```
+
+### OpenTelemetry
+
+```go
+import "github.com/hexagon-codes/toolkit/infra/otel"
+
+tracer := otel.NewTracer(otel.WithServiceName("agent-service"))
+exporter, err := otel.NewOTLPExporter("http://localhost:4318")
+if err != nil {
+    return err
+}
+
+// SetExporter 接管 exporter 所有权；替换时会关闭旧 exporter
+if err := tracer.SetExporter(ctx, exporter); err != nil {
+    return err
+}
+defer func() {
+    if err := tracer.Shutdown(ctx); err != nil {
+        log.Print(err)
+    }
+}()
 ```
 
 ### 环境变量
@@ -1245,15 +1398,14 @@ crypto (加密) → util (工具) → collection (数据结构) → lang (零依
 
 ### 3. 安全优先
 
-- AES-CBC/CTR 标记为 Deprecated，推荐 GCM
+- AES-GCM 提供带认证的加密能力
 - HMAC 验证使用恒定时间比较
-- PKCS7 填充验证防止时序攻击
 - HTTP 客户端内置 SSRF 防护
 - 签名验证支持时间戳过期和 nonce 防重放
 
 ### 4. 性能优化
 
-- 零拷贝字符串操作（unsafe）
+- 字符串与字节切片使用安全、无别名转换
 - 对象池和缓存复用
 - 最小化反射使用
 - Singleflight 防止缓存击穿

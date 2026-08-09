@@ -45,9 +45,9 @@ json, _ := conv.MapToJson(m)
 ```go
 import "github.com/hexagon-codes/toolkit/lang/stringx"
 
-// Zero-copy conversion
+// Safe conversion without mutable storage aliasing
 str := stringx.BytesToString([]byte("hello"))
-bytes := stringx.String2Bytes("world")
+bytes := stringx.StringToBytes("world")
 
 // Case conversion
 stringx.CamelCase("hello_world")     // "helloWorld"
@@ -240,24 +240,44 @@ import "github.com/hexagon-codes/toolkit/lang/errorx"
 
 // MultiError collects multiple errors
 me := errorx.NewMultiError()
-me.Append(err1).Append(err2)
+me.Append(err1, err2)
 if err := me.ErrorOrNil(); err != nil {
     return err
 }
 
-// Parallel execution
-me := errorx.Go(
+// Parallel execution with the default limit
+err := errorx.Go(
     func() error { return task1() },
     func() error { return task2() },
     func() error { return task3() },
 )
+if err != nil {
+    return err
+}
 
 // Limit concurrency
-me := errorx.GoWithLimit(5,
+err = errorx.GoWithLimit(5,
     func() error { return process(item1) },
     func() error { return process(item2) },
     // ... more tasks
 )
+if err != nil {
+    return err
+}
+
+// Start a goroutine safely and wait for its single completion result
+if err := <-errorx.SafeGo(func() { runTask() }); err != nil {
+    return err
+}
+
+// Compute a fallback value for a failed Result; the callback is also validated
+fallback, err := errorx.Err[int](loadErr).UnwrapOrElse(func(err error) int {
+    log.Printf("load failed: %v", err)
+    return 0
+})
+if err != nil {
+    return err
+}
 
 // Walk the error chain
 errorx.Walk(err, func(e error) bool {
@@ -378,9 +398,17 @@ contextx.IsCanceled(ctx)            // whether canceled
 contextx.IsDone(ctx)                // whether done
 contextx.Remaining(ctx)             // remaining time
 
-// Execution control
-contextx.Run(ctx, func() error { ... })
-contextx.RunTimeout(5*time.Second, func() error { ... })
+// Execution control: tasks cooperate with cancellation through their context
+if err := contextx.Run(ctx, func(taskCtx context.Context) error {
+    return runTask(taskCtx)
+}); err != nil {
+    return err
+}
+if err := contextx.RunTimeout(ctx, 5*time.Second, func(taskCtx context.Context) error {
+    return runTask(taskCtx)
+}); err != nil {
+    return err
+}
 
 // Detach - detach from parent context cancellation, retain values
 detached := contextx.Detach(ctx)
@@ -391,9 +419,37 @@ wg.Go(func(ctx context.Context) error { ... })
 wg.Wait()
 
 // Goroutine pool
-pool := contextx.NewPool(ctx, 10)
+pool, err := contextx.NewPool(ctx, 10)
+if err != nil {
+    return err
+}
+defer pool.Close()
 pool.Go(func(ctx context.Context) error { ... })
-pool.Wait()
+if err := pool.Wait(); err != nil {
+    return err
+}
+```
+
+### Multi-Layer Cache
+
+```go
+import "github.com/hexagon-codes/toolkit/cache/multi"
+
+cache, err := multi.NewCache([]multi.LayerConfig{
+    {Layer: localCache, TTL: 10 * time.Minute, Name: "local"},
+    {Layer: redisCache, TTL: 60 * time.Minute, Name: "redis"},
+})
+if err != nil {
+    return err
+}
+
+builtCache, err := multi.NewBuilder().
+    WithLocal(localCache, 10*time.Minute).
+    WithRedis(redisCache, 60*time.Minute).
+    Build()
+if err != nil {
+    return err
+}
 ```
 
 ### AES Encryption
@@ -452,14 +508,17 @@ import "github.com/hexagon-codes/toolkit/net/httpx"
 
 // Simple requests
 resp, _ := httpx.Get("https://api.example.com/users")
-resp, _ := httpx.Post("https://api.example.com/users", body)
+resp, _ = httpx.Post("https://api.example.com/users", body)
 
 // Fluent API
-client := httpx.NewClient(
+client, err := httpx.NewClient(
     httpx.WithTimeout(10*time.Second),
     httpx.WithRetry(3, time.Second),
 )
-resp, _ := client.R().
+if err != nil {
+    log.Fatal(err)
+}
+resp, _ = client.R().
     SetHeader("Authorization", "Bearer token").
     SetQuery("page", "1").
     Get("/api/users")
@@ -469,10 +528,13 @@ var users []User
 resp.JSON(&users)
 
 // SSRF protection (blocks internal network access, supports IPv6 whitelist)
-client := httpx.NewClient(
+secureClient, err := httpx.NewClient(
     httpx.WithSSRFProtection("api.trusted.com", "[::1]:8080"),
 )
-resp, err := client.R().Get(userProvidedURL)
+if err != nil {
+    log.Fatal(err)
+}
+resp, err = secureClient.R().Get(userProvidedURL)
 if errors.Is(err, httpx.ErrSSRFBlocked) {
     // request was blocked
 }
@@ -484,15 +546,16 @@ if errors.Is(err, httpx.ErrSSRFBlocked) {
 import "github.com/hexagon-codes/toolkit/net/httpx"
 
 // Create connection pool
-pool := httpx.NewPool(httpx.PoolConfig{
-    MaxIdleConns:    100,
-    MaxConnsPerHost: 10,
-    IdleConnTimeout: 90 * time.Second,
-})
+poolConfig := httpx.DefaultPoolConfig()
+poolConfig.MaxConnsPerHost = 20
+pool, err := httpx.NewPool(poolConfig)
+if err != nil {
+    log.Fatal(err)
+}
 defer pool.Close()
 
 // Execute request
-req, _ := http.NewRequest("GET", "https://api.example.com", nil)
+req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.example.com", http.NoBody)
 resp, _ := pool.Do(req)
 
 // View statistics
@@ -501,17 +564,32 @@ fmt.Printf("Total: %d, Active: %d, Errors: %d\n",
     stats.TotalRequests, stats.ActiveRequests, stats.ErrorCount)
 
 // Global connection pool
-httpx.SetGlobalPool(pool)
+if err := httpx.SetGlobalPool(pool); err != nil {
+    log.Fatal(err)
+}
 p := httpx.GlobalPool()
 
-// Host-level connection pool (automatically assigns dedicated pools per host)
-hostPool := httpx.NewHostPool()
+// Bounded host-level connection pool (automatically assigns dedicated pools per host)
+hostPoolConfig := httpx.DefaultHostPoolConfig()
+hostPoolConfig.MaxHosts = 128
+hostPool, err := httpx.NewHostPool(hostPoolConfig)
+if err != nil {
+    log.Fatal(err)
+}
 defer hostPool.Close()
-hostPool.SetHostConfig("api.example.com", httpx.PoolConfig{MaxConnsPerHost: 20})
+hostConfig := httpx.DefaultPoolConfig()
+hostConfig.MaxConnsPerHost = 20
+if err := hostPool.SetHostConfig("api.example.com", hostConfig); err != nil {
+    log.Fatal(err)
+}
 resp, _ = hostPool.Do(req)
+// Removing a host closes its pool and releases its capacity slot
+if err := hostPool.RemoveHost("api.example.com"); err != nil {
+    log.Fatal(err)
+}
 
-// Retry pool (automatically caches body for replay)
-retryPool := httpx.NewRetryPool(pool, httpx.RetryConfig{
+// Retry pool (requests with a body must provide GetBody)
+retryPool, err := httpx.NewRetryPool(pool, httpx.RetryConfig{
     MaxRetries:   3,
     RetryWait:    100 * time.Millisecond,
     MaxRetryWait: 5 * time.Second,
@@ -519,17 +597,21 @@ retryPool := httpx.NewRetryPool(pool, httpx.RetryConfig{
         return err != nil || resp.StatusCode >= 500
     },
 })
+if err != nil {
+    log.Fatal(err)
+}
 
-// Rate-limited connection pool (implements io.Closer, idempotent via sync.Once)
-rateLimitedPool := httpx.NewRateLimitedPool(pool, 100)  // 100 QPS
+// Rate-limited connection pool
+rateLimitedPool, err := httpx.NewRateLimitedPool(pool, 100)  // 100 QPS
 defer rateLimitedPool.Close()
 
-// Circuit breaker connection pool
-cbPool := httpx.NewCircuitBreakerPool(pool, httpx.CircuitBreakerConfig{
-    FailureThreshold: 5,
-    SuccessThreshold: 2,
-    Timeout:          30 * time.Second,
-})
+// Circuit breaker connection pool using the shared util/circuit state machine
+cbPool, err := httpx.NewCircuitBreakerPool(
+    pool,
+    circuit.WithThreshold(5),
+    circuit.WithSuccessThreshold(2),
+    circuit.WithTimeout(30*time.Second),
+)
 ```
 
 ### AI Client Presets
@@ -581,11 +663,17 @@ content, _ := stream.CollectOpenAIContent()
 import "github.com/hexagon-codes/toolkit/net/sse"
 
 // Client - receive SSE events
-client := sse.NewClient("https://api.example.com/events",
+client, err := sse.NewClient("https://api.example.com/events",
     sse.WithTimeout(30*time.Second),
     sse.WithLastEventID("last-id"),
 )
-stream, _ := client.Connect(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+stream, err := client.Connect(ctx)
+if err != nil {
+    log.Fatal(err)
+}
 defer stream.Close()
 
 for event := range stream.Events() {
@@ -596,16 +684,24 @@ for event := range stream.Events() {
 
 // Server - send SSE events
 func handler(w http.ResponseWriter, r *http.Request) {
-    writer := sse.NewWriter(w)
+    writer, err := sse.NewWriter(w)
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusInternalServerError)
+        return
+    }
     defer writer.Close()
 
     for {
-        writer.Write(&sse.Event{
+        if err := writer.Write(&sse.Event{
             ID:    "1",
             Event: "message",
             Data:  "Hello, World!",
-        })
-        writer.WriteJSON(myData)
+        }); err != nil {
+            return
+        }
+        if err := writer.WriteJSON(myData); err != nil {
+            return
+        }
         time.Sleep(time.Second)
     }
 }
@@ -623,7 +719,7 @@ sse.ReadOpenAIStream(resp.Body, func(chunk ChatCompletion) error {
 import "github.com/hexagon-codes/toolkit/util/circuit"
 
 // Basic usage
-breaker := circuit.New(
+breaker, err := circuit.New(
     circuit.WithThreshold(5),           // open circuit after 5 failures
     circuit.WithTimeout(30*time.Second), // circuit stays open for 30 seconds
     circuit.WithHalfOpenMaxRequests(3), // at most 3 probe requests in half-open state
@@ -635,23 +731,21 @@ result, err := breaker.Execute(func() (any, error) {
 })
 
 // AI API dedicated circuit breakers (with built-in preset configurations)
-openaiBreaker := circuit.NewAIBreaker(circuit.OpenAIConfig)
-claudeBreaker := circuit.NewAIBreaker(circuit.ClaudeConfig)
-geminiBreaker := circuit.NewAIBreaker(circuit.GeminiConfig)
+openaiBreaker, err := circuit.NewAIBreaker(circuit.OpenAIConfig())
+claudeBreaker, err := circuit.NewAIBreaker(circuit.ClaudeConfig())
+geminiBreaker, err := circuit.NewAIBreaker(circuit.GeminiConfig())
 
 // Preset styles
-aggressiveBreaker := circuit.NewAIBreaker(circuit.AggressiveConfig)       // fast trip
-conservativeBreaker := circuit.NewAIBreaker(circuit.ConservativeConfig)   // slow trip
+aggressiveBreaker, err := circuit.NewAIBreaker(circuit.AggressiveConfig())       // fast trip
+conservativeBreaker, err := circuit.NewAIBreaker(circuit.ConservativeConfig())   // slow trip
 
 // Custom failure predicate
-breaker = circuit.New(
+breaker, err = circuit.New(
     circuit.WithIsFailure(circuit.IsRateLimitOrServerError),  // only 429/5xx triggers
 )
 
 // Multi-breaker manager (isolated by name)
-manager := circuit.NewBreakerManager(func() *circuit.Breaker {
-    return circuit.NewAIBreaker(circuit.OpenAIConfig)
-})
+manager, err := circuit.NewBreakerManager(circuit.OpenAIConfig()...)
 result, err = manager.Execute("gpt-4", func() (any, error) {
     return callGPT4()
 })
@@ -672,51 +766,88 @@ breaker.OnStateChange(func(from, to circuit.State) {
 import "github.com/hexagon-codes/toolkit/event"
 
 // Create event bus
-bus := event.New()
-defer bus.Close()
+bus, err := event.New()
+if err != nil {
+    log.Fatal(err)
+}
+defer func() {
+    if err := bus.Shutdown(ctx); err != nil {
+        log.Print(err)
+    }
+}()
 
 // Subscribe to a specific event type
-unsub := bus.Subscribe("agent.start", func(e event.Event) {
+unsub, err := bus.Subscribe("agent.start", func(e event.Event) {
     fmt.Printf("Agent started: %v (source: %s)\n", e.Payload, e.Source)
 })
+if err != nil {
+    log.Fatal(err)
+}
 defer unsub()  // unsubscribe
 
 // Subscribe to all events (global subscription)
-unsubAll := bus.SubscribeAll(func(e event.Event) {
+unsubAll, err := bus.SubscribeAll(func(e event.Event) {
     fmt.Printf("[%s] %v\n", e.Type, e.Payload)
 })
+if err != nil {
+    log.Fatal(err)
+}
 defer unsubAll()
 
 // Publish event
-bus.Publish(event.Event{
+if err := bus.Publish(event.Event{
     Type:    "agent.start",
     Payload: "my-agent",
     Source:  "scheduler",
-})
+}); err != nil {
+    log.Fatal(err)
+}
+
+// Synchronous publication runs handlers in the current goroutine and then returns
+if err := bus.PublishSync(event.Event{Type: "agent.ready"}); err != nil {
+    log.Fatal(err)
+}
 
 // Predefined event type constants
-bus.Publish(event.Event{Type: event.EventLLMRequest,  Payload: req})
-bus.Publish(event.Event{Type: event.EventLLMResponse, Payload: resp})
-bus.Publish(event.Event{Type: event.EventToolCall,    Payload: toolName})
-bus.Publish(event.Event{Type: event.EventCostUpdate,  Payload: cost})
-bus.Publish(event.Event{Type: event.EventAgentError,  Payload: err})
+for _, evt := range []event.Event{
+    {Type: event.EventLLMRequest, Payload: req},
+    {Type: event.EventLLMResponse, Payload: resp},
+    {Type: event.EventToolCall, Payload: toolName},
+    {Type: event.EventCostUpdate, Payload: cost},
+    {Type: event.EventAgentError, Payload: callErr},
+} {
+    if err := bus.Publish(evt); err != nil {
+        log.Fatal(err)
+    }
+}
 
 // Configuration options
-bus = event.New(
+configuredBus, err := event.New(
     event.WithMaxGoroutines(512),              // limit concurrent goroutines
     event.WithPanicHandler(func(e event.Event, v any) {
         log.Printf("handler panic: %v", v)     // catch handler panics
     }),
 )
+if err != nil {
+    log.Fatal(err)
+}
+configuredBus.Close() // Initiates shutdown without waiting for active handlers
+if err := configuredBus.Shutdown(ctx); err != nil {
+    log.Print(err)
+}
 
 // Subscriber count
-count := bus.SubscriberCount("agent.start")
+count := bus.Len()
 ```
 
 ### IP Utilities
 
 ```go
-import "github.com/hexagon-codes/toolkit/net/ip"
+import (
+    "context"
+
+    "github.com/hexagon-codes/toolkit/net/ip"
+)
 
 ip.IsValid("192.168.1.1")           // true
 ip.IsPrivate("192.168.1.1")         // true
@@ -727,7 +858,7 @@ ip.IsInCIDR("192.168.1.100", "192.168.1.0/24")  // true
 clientIP := ip.FromRequest(r)
 
 // Local IP
-localIP, _ := ip.GetLocalIP()
+localIP, _ := ip.GetLocalIP(context.Background())
 ```
 
 ### Logging
@@ -749,6 +880,28 @@ logger.Init(&logger.Config{
 // With fields
 log := logger.With("service", "user-api")
 log.Info("started", "port", 8080)
+```
+
+### OpenTelemetry
+
+```go
+import "github.com/hexagon-codes/toolkit/infra/otel"
+
+tracer := otel.NewTracer(otel.WithServiceName("agent-service"))
+exporter, err := otel.NewOTLPExporter("http://localhost:4318")
+if err != nil {
+    return err
+}
+
+// SetExporter takes ownership of exporter and shuts down the previous exporter on replacement
+if err := tracer.SetExporter(ctx, exporter); err != nil {
+    return err
+}
+defer func() {
+    if err := tracer.Shutdown(ctx); err != nil {
+        log.Print(err)
+    }
+}()
 ```
 
 ### Environment Variables
@@ -1245,15 +1398,14 @@ crypto (crypto) → util (utilities) → collection (data structs) → lang (zer
 
 ### 3. Security-First
 
-- AES-CBC/CTR marked as Deprecated; GCM recommended
+- AES-GCM provides authenticated encryption
 - HMAC verification uses constant-time comparison
-- PKCS7 padding validation prevents timing attacks
 - HTTP client has built-in SSRF protection
 - Signature verification supports timestamp expiry and nonce replay prevention
 
 ### 4. Performance Optimization
 
-- Zero-copy string operations (unsafe)
+- String and byte-slice conversions are safe and non-aliasing
 - Object pooling and cache reuse
 - Minimize reflection usage
 - Singleflight prevents cache breakdown
