@@ -2,8 +2,27 @@ package rsa
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 )
+
+func mustPrivateKeyPEM(t *testing.T, keyPair *KeyPair) string {
+	t.Helper()
+	encoded, err := keyPair.PrivateKeyToPEM()
+	if err != nil {
+		t.Fatalf("PrivateKeyToPEM failed: %v", err)
+	}
+	return encoded
+}
+
+func mustPublicKeyPEM(t *testing.T, keyPair *KeyPair) string {
+	t.Helper()
+	encoded, err := keyPair.PublicKeyToPEM()
+	if err != nil {
+		t.Fatalf("PublicKeyToPEM failed: %v", err)
+	}
+	return encoded
+}
 
 func TestGenerateKeyPair(t *testing.T) {
 	kp, err := GenerateKeyPair(2048)
@@ -29,12 +48,12 @@ func TestGenerateKeyPairInvalidSize(t *testing.T) {
 func TestKeyPairToPEM(t *testing.T) {
 	kp, _ := GenerateKeyPair(2048)
 
-	privatePEM := kp.PrivateKeyToPEM()
+	privatePEM := mustPrivateKeyPEM(t, kp)
 	if privatePEM == "" {
 		t.Error("private PEM is empty")
 	}
 
-	publicPEM := kp.PublicKeyToPEM()
+	publicPEM := mustPublicKeyPEM(t, kp)
 	if publicPEM == "" {
 		t.Error("public PEM is empty")
 	}
@@ -72,7 +91,7 @@ func TestParsePrivateKey(t *testing.T) {
 	kp, _ := GenerateKeyPair(2048)
 
 	// PKCS1 format
-	pem := kp.PrivateKeyToPEM()
+	pem := mustPrivateKeyPEM(t, kp)
 	parsed, err := ParsePrivateKey(pem)
 	if err != nil {
 		t.Fatalf("ParsePrivateKey (PKCS1) failed: %v", err)
@@ -96,7 +115,7 @@ func TestParsePublicKey(t *testing.T) {
 	kp, _ := GenerateKeyPair(2048)
 
 	// PKCS1 format
-	pem := kp.PublicKeyToPEM()
+	pem := mustPublicKeyPEM(t, kp)
 	parsed, err := ParsePublicKey(pem)
 	if err != nil {
 		t.Fatalf("ParsePublicKey (PKCS1) failed: %v", err)
@@ -151,8 +170,8 @@ func TestEncryptDecryptOAEPString(t *testing.T) {
 	kp, _ := GenerateKeyPair(2048)
 	plaintext := "Hello, World!"
 
-	publicPEM := kp.PublicKeyToPEM()
-	privatePEM := kp.PrivateKeyToPEM()
+	publicPEM := mustPublicKeyPEM(t, kp)
+	privatePEM := mustPrivateKeyPEM(t, kp)
 
 	ciphertext, err := EncryptOAEPString(plaintext, publicPEM)
 	if err != nil {
@@ -162,47 +181,6 @@ func TestEncryptDecryptOAEPString(t *testing.T) {
 	decrypted, err := DecryptOAEPString(ciphertext, privatePEM)
 	if err != nil {
 		t.Fatalf("DecryptOAEPString failed: %v", err)
-	}
-
-	if decrypted != plaintext {
-		t.Error("decrypted text doesn't match original")
-	}
-}
-
-func TestEncryptDecryptPKCS1v15(t *testing.T) {
-	kp, _ := GenerateKeyPair(2048)
-	plaintext := []byte("Hello, World!")
-
-	ciphertext, err := EncryptPKCS1v15(plaintext, kp.PublicKey)
-	if err != nil {
-		t.Fatalf("EncryptPKCS1v15 failed: %v", err)
-	}
-
-	decrypted, err := DecryptPKCS1v15(ciphertext, kp.PrivateKey)
-	if err != nil {
-		t.Fatalf("DecryptPKCS1v15 failed: %v", err)
-	}
-
-	if !bytes.Equal(plaintext, decrypted) {
-		t.Error("decrypted text doesn't match original")
-	}
-}
-
-func TestEncryptDecryptPKCS1v15String(t *testing.T) {
-	kp, _ := GenerateKeyPair(2048)
-	plaintext := "Hello, World!"
-
-	publicPEM := kp.PublicKeyToPEM()
-	privatePEM := kp.PrivateKeyToPEM()
-
-	ciphertext, err := EncryptPKCS1v15String(plaintext, publicPEM)
-	if err != nil {
-		t.Fatalf("EncryptPKCS1v15String failed: %v", err)
-	}
-
-	decrypted, err := DecryptPKCS1v15String(ciphertext, privatePEM)
-	if err != nil {
-		t.Fatalf("DecryptPKCS1v15String failed: %v", err)
 	}
 
 	if decrypted != plaintext {
@@ -240,27 +218,12 @@ func TestSignVerifyPSS_InvalidSignature(t *testing.T) {
 	}
 }
 
-func TestSignVerifyPKCS1v15(t *testing.T) {
-	kp, _ := GenerateKeyPair(2048)
-	message := []byte("Hello, World!")
-
-	signature, err := SignPKCS1v15(message, kp.PrivateKey)
-	if err != nil {
-		t.Fatalf("SignPKCS1v15 failed: %v", err)
-	}
-
-	err = VerifyPKCS1v15(message, signature, kp.PublicKey)
-	if err != nil {
-		t.Fatalf("VerifyPKCS1v15 failed: %v", err)
-	}
-}
-
 func TestSignVerifyString(t *testing.T) {
 	kp, _ := GenerateKeyPair(2048)
 	message := "Hello, World!"
 
-	privatePEM := kp.PrivateKeyToPEM()
-	publicPEM := kp.PublicKeyToPEM()
+	privatePEM := mustPrivateKeyPEM(t, kp)
+	publicPEM := mustPublicKeyPEM(t, kp)
 
 	signature, err := SignString(message, privatePEM)
 	if err != nil {
@@ -276,8 +239,8 @@ func TestSignVerifyString(t *testing.T) {
 func TestSignVerifyString_TamperedMessage(t *testing.T) {
 	kp, _ := GenerateKeyPair(2048)
 
-	privatePEM := kp.PrivateKeyToPEM()
-	publicPEM := kp.PublicKeyToPEM()
+	privatePEM := mustPrivateKeyPEM(t, kp)
+	publicPEM := mustPublicKeyPEM(t, kp)
 
 	signature, _ := SignString("Hello, World!", privatePEM)
 
@@ -323,7 +286,7 @@ func TestDecryptInvalidCiphertext(t *testing.T) {
 	kp, _ := GenerateKeyPair(2048)
 
 	_, err := DecryptOAEP([]byte("invalid ciphertext"), kp.PrivateKey)
-	if err != ErrDecryptionFailed {
+	if !errors.Is(err, ErrDecryptionFailed) {
 		t.Error("expected ErrDecryptionFailed for invalid ciphertext")
 	}
 }

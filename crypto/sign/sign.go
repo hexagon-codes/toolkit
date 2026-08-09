@@ -1,12 +1,15 @@
 package sign
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/base64"
 	"encoding/hex"
 	"hash"
+	"math"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -116,9 +119,13 @@ func VerifyHMACSHA512String(message, key, signatureHex string) bool {
 type HMACHash int
 
 const (
+	// SHA256 选择 SHA-256 作为 HMAC 哈希算法。
 	SHA256 HMACHash = iota
+	// SHA512 选择 SHA-512 作为 HMAC 哈希算法。
 	SHA512
+	// SHA384 选择 SHA-384 作为 HMAC 哈希算法。
 	SHA384
+	// SHA224 选择 SHA-224 作为 HMAC 哈希算法。
 	SHA224
 )
 
@@ -135,7 +142,7 @@ func HMAC(message, key []byte, hashType HMACHash) []byte {
 	case SHA224:
 		h = sha256.New224
 	default:
-		h = sha256.New
+		return nil
 	}
 
 	mac := hmac.New(h, key)
@@ -151,6 +158,9 @@ func HMACHex(message, key []byte, hashType HMACHash) string {
 // VerifyHMAC 验证 HMAC 签名
 func VerifyHMAC(message, key, signature []byte, hashType HMACHash) bool {
 	expected := HMAC(message, key, hashType)
+	if expected == nil {
+		return false
+	}
 	return hmac.Equal(expected, signature)
 }
 
@@ -165,7 +175,7 @@ type TimestampSigner struct {
 // NewTimestampSigner 创建时间戳签名器
 func NewTimestampSigner(key []byte) *TimestampSigner {
 	return &TimestampSigner{
-		key:      key,
+		key:      bytes.Clone(key),
 		hashType: SHA256,
 	}
 }
@@ -173,7 +183,7 @@ func NewTimestampSigner(key []byte) *TimestampSigner {
 // NewTimestampSignerWithHash 创建指定哈希算法的时间戳签名器
 func NewTimestampSignerWithHash(key []byte, hashType HMACHash) *TimestampSigner {
 	return &TimestampSigner{
-		key:      key,
+		key:      bytes.Clone(key),
 		hashType: hashType,
 	}
 }
@@ -189,6 +199,9 @@ func (s *TimestampSigner) Sign(message string, timestamp int64) string {
 // 推荐使用 VerifyWithExpiry 进行时间戳验证
 func (s *TimestampSigner) Verify(message string, timestamp int64, signature string) bool {
 	expected := s.Sign(message, timestamp)
+	if expected == "" {
+		return false
+	}
 	return hmac.Equal([]byte(expected), []byte(signature))
 }
 
@@ -200,15 +213,7 @@ func (s *TimestampSigner) Verify(message string, timestamp int64, signature stri
 //   - 拒绝来自未来的时间戳（防止绕过过期检查）
 //   - 仅允许过去 maxAge 秒内的签名
 func (s *TimestampSigner) VerifyWithExpiry(message string, timestamp int64, signature string, maxAge int64) bool {
-	now := time.Now().Unix()
-
-	// 严格检查：拒绝来自未来的时间戳（允许 1 秒的时钟偏差）
-	if timestamp > now+1 {
-		return false
-	}
-
-	// 检查时间戳是否过期（仅检查过去）
-	if now-timestamp > maxAge {
+	if !timestampWithinAge(timestamp, maxAge, time.Now().Unix()) {
 		return false
 	}
 
@@ -294,19 +299,22 @@ func (s *APISigner) Verify(params map[string]string, timestamp int64, nonce, sig
 //   - 拒绝来自未来的时间戳（防止绕过过期检查）
 //   - 仅允许过去 maxAge 秒内的签名
 func (s *APISigner) VerifyWithExpiry(params map[string]string, timestamp int64, nonce, signature string, maxAge int64) bool {
-	now := time.Now().Unix()
-
-	// 严格检查：拒绝来自未来的时间戳（允许 1 秒的时钟偏差）
-	if timestamp > now+1 {
-		return false
-	}
-
-	// 检查时间戳是否过期（仅检查过去）
-	if now-timestamp > maxAge {
+	if !timestampWithinAge(timestamp, maxAge, time.Now().Unix()) {
 		return false
 	}
 
 	return s.Verify(params, timestamp, nonce, signature)
+}
+
+// timestampWithinAge 使用不发生整数溢出的顺序比较校验时间窗口。
+func timestampWithinAge(timestamp, maxAge, now int64) bool {
+	if timestamp < 0 || maxAge <= 0 {
+		return false
+	}
+	if timestamp > now {
+		return timestamp-now <= 1
+	}
+	return now-timestamp <= maxAge
 }
 
 // NonceChecker nonce 检查器接口（用于防止重放攻击）
@@ -323,6 +331,12 @@ type NonceChecker interface {
 //   - nonceChecker: nonce 检查器（需要调用方实现，通常使用 Redis SET NX）
 //   - maxAge: 签名的最大有效期（秒）
 func (s *APISigner) VerifyWithNonceCheck(params map[string]string, timestamp int64, nonce, signature string, maxAge int64, nonceChecker NonceChecker) bool {
+	if nonce == "" || nonceCheckerIsNil(nonceChecker) {
+		return false
+	}
+	if timestamp < 0 || maxAge <= 0 || maxAge > math.MaxInt64-timestamp {
+		return false
+	}
 	// 先验证签名和时间戳
 	if !s.VerifyWithExpiry(params, timestamp, nonce, signature, maxAge) {
 		return false
@@ -331,6 +345,19 @@ func (s *APISigner) VerifyWithNonceCheck(params map[string]string, timestamp int
 	// 检查 nonce 唯一性
 	expireAt := timestamp + maxAge
 	return nonceChecker.Check(nonce, expireAt)
+}
+
+func nonceCheckerIsNil(checker NonceChecker) bool {
+	if checker == nil {
+		return true
+	}
+	value := reflect.ValueOf(checker)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 // canonicalSignString 构造无歧义的签名串。

@@ -4,18 +4,20 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 )
 
 var (
-	ErrInvalidKeySize    = errors.New("aes: invalid key size, must be 16, 24, or 32 bytes")
-	ErrInvalidBlockSize  = errors.New("aes: invalid block size")
+	// ErrInvalidKeySize 表示 AES 密钥长度不是 16、24 或 32 字节。
+	ErrInvalidKeySize = errors.New("aes: invalid key size, must be 16, 24, or 32 bytes")
+	// ErrInvalidCiphertext 表示密文长度不足。
 	ErrInvalidCiphertext = errors.New("aes: ciphertext too short")
-	ErrInvalidPadding    = errors.New("aes: invalid padding")
+	// ErrAuthenticationFailed 表示密文认证失败。
+	ErrAuthenticationFailed = errors.New("aes: authentication failed")
 )
 
 // --- GCM 模式（推荐，带认证） ---
@@ -26,7 +28,7 @@ var (
 func EncryptGCM(plaintext, key []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return nil, ErrInvalidKeySize
+		return nil, fmt.Errorf("%w: %w", ErrInvalidKeySize, err)
 	}
 
 	gcm, err := cipher.NewGCM(block)
@@ -47,7 +49,7 @@ func EncryptGCM(plaintext, key []byte) ([]byte, error) {
 func DecryptGCM(ciphertext, key []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return nil, ErrInvalidKeySize
+		return nil, fmt.Errorf("%w: %w", ErrInvalidKeySize, err)
 	}
 
 	gcm, err := cipher.NewGCM(block)
@@ -56,14 +58,14 @@ func DecryptGCM(ciphertext, key []byte) ([]byte, error) {
 	}
 
 	nonceSize := gcm.NonceSize()
-	if len(ciphertext) < nonceSize {
+	if len(ciphertext) < nonceSize+gcm.Overhead() {
 		return nil, ErrInvalidCiphertext
 	}
 
 	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
 	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrAuthenticationFailed, err)
 	}
 
 	return plaintext, nil
@@ -89,143 +91,6 @@ func DecryptGCMString(ciphertext, key string) (string, error) {
 		return "", err
 	}
 	return string(plaintext), nil
-}
-
-// --- CBC 模式（不推荐使用） ---
-
-// EncryptCBC 使用 AES-CBC 加密
-// key: 16/24/32 字节
-// 返回: iv + ciphertext
-//
-// Deprecated: CBC 模式不提供消息认证，易受填充预言攻击（Padding Oracle Attack）。
-// 强烈推荐使用 EncryptGCM 替代。仅当需要与旧系统兼容时才使用此函数。
-// 如果必须使用 CBC，请确保在应用层添加 HMAC 消息认证。
-func EncryptCBC(plaintext, key []byte) ([]byte, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, ErrInvalidKeySize
-	}
-
-	// PKCS7 填充
-	plaintext = pkcs7Pad(plaintext, block.BlockSize())
-
-	ciphertext := make([]byte, aes.BlockSize+len(plaintext))
-	iv := ciphertext[:aes.BlockSize]
-	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
-		return nil, err
-	}
-
-	mode := cipher.NewCBCEncrypter(block, iv)
-	mode.CryptBlocks(ciphertext[aes.BlockSize:], plaintext)
-
-	return ciphertext, nil
-}
-
-// DecryptCBC 使用 AES-CBC 解密
-//
-// Deprecated: CBC 模式不提供消息认证，易受填充预言攻击。
-// 推荐使用 DecryptGCM 替代。
-func DecryptCBC(ciphertext, key []byte) ([]byte, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, ErrInvalidKeySize
-	}
-
-	if len(ciphertext) < aes.BlockSize {
-		return nil, ErrInvalidCiphertext
-	}
-
-	iv := ciphertext[:aes.BlockSize]
-	ciphertext = ciphertext[aes.BlockSize:]
-
-	if len(ciphertext)%aes.BlockSize != 0 {
-		return nil, ErrInvalidBlockSize
-	}
-
-	mode := cipher.NewCBCDecrypter(block, iv)
-	plaintext := make([]byte, len(ciphertext))
-	mode.CryptBlocks(plaintext, ciphertext)
-
-	// PKCS7 去填充
-	plaintext, err = pkcs7Unpad(plaintext)
-	if err != nil {
-		return nil, err
-	}
-
-	return plaintext, nil
-}
-
-// EncryptCBCString 加密字符串，返回 Base64
-//
-// Deprecated: 使用 EncryptGCMString 替代。
-func EncryptCBCString(plaintext, key string) (string, error) {
-	ciphertext, err := EncryptCBC([]byte(plaintext), []byte(key))
-	if err != nil {
-		return "", err
-	}
-	return base64.StdEncoding.EncodeToString(ciphertext), nil
-}
-
-// DecryptCBCString 解密 Base64 字符串
-//
-// Deprecated: 使用 DecryptGCMString 替代。
-func DecryptCBCString(ciphertext, key string) (string, error) {
-	data, err := base64.StdEncoding.DecodeString(ciphertext)
-	if err != nil {
-		return "", err
-	}
-	plaintext, err := DecryptCBC(data, []byte(key))
-	if err != nil {
-		return "", err
-	}
-	return string(plaintext), nil
-}
-
-// --- CTR 模式（流加密，不推荐使用） ---
-
-// EncryptCTR 使用 AES-CTR 加密
-//
-// Deprecated: CTR 模式不提供消息认证，可能遭受位翻转攻击（Bit-flipping Attack）。
-// 推荐使用 EncryptGCM 替代，除非有特殊的兼容性需求。
-func EncryptCTR(plaintext, key []byte) ([]byte, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, ErrInvalidKeySize
-	}
-
-	ciphertext := make([]byte, aes.BlockSize+len(plaintext))
-	iv := ciphertext[:aes.BlockSize]
-	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
-		return nil, err
-	}
-
-	stream := cipher.NewCTR(block, iv)
-	stream.XORKeyStream(ciphertext[aes.BlockSize:], plaintext)
-
-	return ciphertext, nil
-}
-
-// DecryptCTR 使用 AES-CTR 解密
-//
-// Deprecated: 使用 DecryptGCM 替代。
-func DecryptCTR(ciphertext, key []byte) ([]byte, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, ErrInvalidKeySize
-	}
-
-	if len(ciphertext) < aes.BlockSize {
-		return nil, ErrInvalidCiphertext
-	}
-
-	iv := ciphertext[:aes.BlockSize]
-	ciphertext = ciphertext[aes.BlockSize:]
-
-	plaintext := make([]byte, len(ciphertext))
-	stream := cipher.NewCTR(block, iv)
-	stream.XORKeyStream(plaintext, ciphertext)
-
-	return plaintext, nil
 }
 
 // --- 工具函数 ---
@@ -278,36 +143,4 @@ func ClearBytes(b []byte) {
 	for i := range b {
 		b[i] = 0
 	}
-}
-
-// --- PKCS7 填充 ---
-
-func pkcs7Pad(data []byte, blockSize int) []byte {
-	padding := blockSize - len(data)%blockSize
-	padText := make([]byte, padding)
-	for i := range padText {
-		padText[i] = byte(padding)
-	}
-	return append(data, padText...)
-}
-
-func pkcs7Unpad(data []byte) ([]byte, error) {
-	if len(data) == 0 {
-		return nil, ErrInvalidPadding
-	}
-	padding := int(data[len(data)-1])
-	if padding > len(data) || padding == 0 {
-		return nil, ErrInvalidPadding
-	}
-
-	// 使用恒定时间比较防止时序攻击
-	valid := 1
-	for i := len(data) - padding; i < len(data); i++ {
-		valid &= subtle.ConstantTimeByteEq(data[i], byte(padding))
-	}
-
-	if valid == 0 {
-		return nil, ErrInvalidPadding
-	}
-	return data[:len(data)-padding], nil
 }

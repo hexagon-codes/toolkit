@@ -1,30 +1,5 @@
-// Package hash 提供哈希工具函数
+// Package hash 提供 SHA-256、SHA-512 和 bcrypt 能力。
 //
-// 包括 MD5、SHA256 和 HMAC 实现。
-//
-// 基本用法:
-//
-//	md5 := hash.MD5("hello")
-//	sha256 := hash.SHA256("hello")
-//	hmac := hash.HMAC("message", "secret")
-//
-// 文件哈希:
-//
-//	md5, err := hash.MD5File("/path/to/file")
-//
-// --- English ---
-//
-// Package hash provides hash utilities.
-//
-// Includes MD5, SHA256, and HMAC implementations.
-//
-// Basic usage:
-//
-//	md5 := hash.MD5("hello")
-//	sha256 := hash.SHA256("hello")
-//	hmac := hash.HMAC("message", "secret")
-//
-// For files:
-//
-//	md5, err := hash.MD5File("/path/to/file")
+// SHA 系列适合内容摘要，不适合直接存储密码；密码应使用 BcryptHash，验证时
+// 使用 BcryptCheck。需要消息认证或签名时应使用专门的 HMAC 或签名组件。
 package hash

@@ -1,8 +1,6 @@
 package hash
 
 import (
-	"crypto/md5"
-	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/hex"
@@ -10,34 +8,6 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 )
-
-// MD5 计算 MD5 哈希
-// 警告: MD5 已被破解，不应用于密码哈希或安全敏感场景
-// 仅用于校验和、缓存键、非安全用途的指纹等场景
-func MD5(data string) string {
-	hash := md5.Sum([]byte(data))
-	return hex.EncodeToString(hash[:])
-}
-
-// MD5Bytes 计算字节数组的 MD5 哈希
-func MD5Bytes(data []byte) string {
-	hash := md5.Sum(data)
-	return hex.EncodeToString(hash[:])
-}
-
-// SHA1 计算 SHA1 哈希
-// 警告: SHA1 已被破解，不应用于密码哈希或安全敏感场景
-// 推荐使用 SHA256 或更强的哈希算法
-func SHA1(data string) string {
-	hash := sha1.Sum([]byte(data))
-	return hex.EncodeToString(hash[:])
-}
-
-// SHA1Bytes 计算字节数组的 SHA1 哈希
-func SHA1Bytes(data []byte) string {
-	hash := sha1.Sum(data)
-	return hex.EncodeToString(hash[:])
-}
 
 // SHA256 计算 SHA256 哈希
 func SHA256(data string) string {
@@ -64,8 +34,7 @@ func SHA512Bytes(data []byte) string {
 }
 
 // BcryptHash 使用 bcrypt 加密密码
-// 注意: bcrypt 有 72 字节的密码长度限制，超出部分会被截断
-// 对于超长密码，考虑先进行 SHA256 哈希后再使用 bcrypt
+// bcrypt 拒绝超过 72 字节的密码，调用方应限制输入长度。
 func BcryptHash(password string) (string, error) {
 	return BcryptHashWithCost(password, bcrypt.DefaultCost)
 }

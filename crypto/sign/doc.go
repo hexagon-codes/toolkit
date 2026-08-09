@@ -1,28 +1,12 @@
-// Package sign 提供数字签名工具
+// Package sign 提供基于 SHA-2 的 HMAC 签名、时间戳签名和 API 请求签名工具。
 //
-// 支持 HMAC、RSA 和 ECDSA 签名算法。
+// HMAC 签名：
 //
-// HMAC 签名:
+//	signature := sign.HMACSHA256(message, secret)
+//	valid := sign.VerifyHMACSHA256(message, secret, signature)
 //
-//	signature := sign.HMAC(message, secret)
-//	valid := sign.VerifyHMAC(message, signature, secret)
+// 指定 SHA-2 算法：
 //
-// 指定算法:
-//
-//	signature := sign.HMAC(message, secret, sign.WithAlgorithm(sign.SHA256))
-//
-// --- English ---
-//
-// Package sign provides digital signature utilities.
-//
-// Supports HMAC, RSA, and ECDSA signatures.
-//
-// HMAC signing:
-//
-//	signature := sign.HMAC(message, secret)
-//	valid := sign.VerifyHMAC(message, signature, secret)
-//
-// With algorithm options:
-//
-//	signature := sign.HMAC(message, secret, sign.WithAlgorithm(sign.SHA256))
+//	signature := sign.HMAC(message, secret, sign.SHA512)
+//	valid := sign.VerifyHMAC(message, secret, signature, sign.SHA512)
 package sign
