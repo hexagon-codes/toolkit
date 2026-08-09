@@ -10,6 +10,6 @@ tmp/*
 coverage.out
 
 # Local Go example binaries
-multi
+/multi
 
 .claude/
