@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -370,6 +372,8 @@ func TestFromContextDefault(t *testing.T) {
 }
 
 func TestContextHandler(t *testing.T) {
+	type traceIDKey struct{}
+
 	var buf bytes.Buffer
 
 	baseHandler := slog.NewJSONHandler(&buf, &slog.HandlerOptions{
@@ -378,7 +382,7 @@ func TestContextHandler(t *testing.T) {
 
 	// Create context handler that extracts trace_id
 	handler := NewContextHandler(baseHandler, func(ctx context.Context) []slog.Attr {
-		if traceID := ctx.Value("trace_id"); traceID != nil {
+		if traceID := ctx.Value(traceIDKey{}); traceID != nil {
 			return []slog.Attr{slog.String("trace_id", traceID.(string))}
 		}
 		return nil
@@ -387,7 +391,7 @@ func TestContextHandler(t *testing.T) {
 	logger := slog.New(handler)
 
 	// Log with context containing trace_id
-	ctx := context.WithValue(context.Background(), "trace_id", "abc123")
+	ctx := context.WithValue(context.Background(), traceIDKey{}, "abc123")
 	logger.InfoContext(ctx, "test message")
 
 	var logEntry map[string]any
@@ -824,6 +828,27 @@ func TestFileWriterDirectoryCreation(t *testing.T) {
 	_, err = writer.Write([]byte("nested log"))
 	if err != nil {
 		t.Errorf("Write failed: %v", err)
+	}
+	if closer, ok := writer.(io.Closer); ok {
+		if err := closer.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if runtime.GOOS != "windows" {
+		fileInfo, err := os.Stat(logPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := fileInfo.Mode().Perm(); got != 0o600 {
+			t.Errorf("日志文件权限 = %04o, 期望 0600", got)
+		}
+		dirInfo, err := os.Stat(filepath.Dir(logPath))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := dirInfo.Mode().Perm(); got&0o027 != 0 {
+			t.Errorf("日志目录权限 = %04o，包含组写入或其他用户权限", got)
+		}
 	}
 }
 

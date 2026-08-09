@@ -165,7 +165,10 @@ func Default() *Logger {
 	// 使用 once 确保只初始化一次默认 logger
 	once.Do(func() {
 		if defaultLoggerPtr.Load() == nil {
-			l, _ := New(DefaultConfig())
+			l, err := New(DefaultConfig())
+			if err != nil {
+				panic(err)
+			}
 			defaultLoggerPtr.Store(l)
 			slog.SetDefault(l.slog)
 		}
