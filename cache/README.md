@@ -78,10 +78,11 @@ func main() {
     redisCache := redis.NewStableCache(rdb)
 
     // 2. 组合为多层缓存（Builder 模式）
-    cache := multi.NewBuilder().
+    cache, err := multi.NewBuilder().
         WithLocal(localCache, 10*time.Minute).
         WithRedis(redisCache, 60*time.Minute).
         Build()
+    if err != nil { panic(err) }
 
     // 3. 使用（自动处理三层：local -> redis -> db）
     var user User
@@ -140,15 +141,15 @@ func main() {
         },
     )
     if err == local.ErrNotFound {
-        fmt.Println("用户不存在")
+        fmt.Println("User not found")
         return
     }
     if err != nil {
-        fmt.Println("错误:", err)
+        fmt.Println("Error:", err)
         return
     }
 
-    fmt.Printf("用户: %+v\n", user)
+    fmt.Printf("User: %+v\n", user)
 }
 
 func findUserByID(context.Context, int) (User, error) {
@@ -263,7 +264,7 @@ WithNegativeTTL(30*time.Second)
 
 // 自定义错误处理
 WithOnError(func(ctx context.Context, op, key string, err error) {
-    log.Printf("缓存错误: op=%s key=%s err=%v", op, key, err)
+    log.Printf("Cache error: op=%s key=%s err=%v", op, key, err)
 })
 
 // 自定义 NotFound 判断（例如集成 GORM）

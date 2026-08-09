@@ -70,13 +70,16 @@ func main() {
 	)
 
 	// 3. 创建多层缓存（Builder 模式）
-	cache := multi.NewBuilder().
+	cache, err := multi.NewBuilder().
 		WithLocal(localCache, 10*time.Minute).
 		WithRedis(redisCache, 60*time.Minute).
 		WithOnError(func(ctx context.Context, layer, op, key string, err error) {
 			log.Printf("[错误] layer=%s op=%s key=%s err=%v", layer, op, key, err)
 		}).
 		Build()
+	if err != nil {
+		log.Fatalf("create multi-layer cache: %v", err)
+	}
 
 	fmt.Printf("多层缓存已创建，共 %d 层\n\n", cache.LayerCount())
 
@@ -172,17 +175,21 @@ func main() {
 func demonstrateLocalOnly(localCache *local.Cache) {
 	fmt.Println("=== 演示：只使用本地缓存 ===")
 
-	// 创建单层缓存
-	cache := multi.NewBuilder().
-		WithLocal(localCache, 10*time.Minute).
-		Build()
+	// 使用直接构造函数创建单层缓存
+	cache, err := multi.NewCache([]multi.LayerConfig{
+		{Layer: localCache, TTL: 10 * time.Minute, Name: "local"},
+	})
+	if err != nil {
+		log.Printf("create local cache: %v", err)
+		return
+	}
 
 	ctx := context.Background()
 	loadCount := 0
 
 	fmt.Println("--- 首次查询 ---")
 	var user User
-	err := cache.GetOrLoad(ctx, "user:123", &user, func(ctx context.Context) (any, error) {
+	err = cache.GetOrLoad(ctx, "user:123", &user, func(ctx context.Context) (any, error) {
 		loadCount++
 		fmt.Printf("  [DB] 查询数据库 (第 %d 次)\n", loadCount)
 		if u, ok := db[123]; ok {

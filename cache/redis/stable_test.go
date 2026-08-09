@@ -363,7 +363,7 @@ func TestPackUnpack(t *testing.T) {
 
 	// NotFound case
 	packed = packNotFound()
-	found, unpacked, err = unpack(packed)
+	found, _, err = unpack(packed)
 	if err != nil {
 		t.Fatalf("unpack failed: %v", err)
 	}

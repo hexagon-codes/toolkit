@@ -10,19 +10,19 @@ import (
 )
 
 var (
-	// 负缓存命中（表示"确实不存在"），用于防穿透。
+	// ErrNotFound 表示负缓存命中（数据确实不存在），用于防穿透。
 	ErrNotFound = errors.New("cache: not found")
 
-	// 调用方传入的 dest 不合法（必须是非 nil 指针）
+	// ErrInvalidDest 表示调用方传入的 dest 不是非 nil 指针。
 	ErrInvalidDest = errors.New("cache: dest must be a non-nil pointer")
 
-	// key 不能为空
+	// ErrInvalidKey 表示缓存 key 为空。
 	ErrInvalidKey = errors.New("cache: key is empty")
 
-	// loader 不能为空
+	// ErrInvalidLoader 表示 loader 为空。
 	ErrInvalidLoader = errors.New("cache: loader is nil")
 
-	// 缓存内容损坏（例如 value 被其他系统写坏）
+	// ErrCorrupt 表示缓存内容损坏，例如 value 被其他系统写坏。
 	ErrCorrupt = errors.New("cache: corrupt payload")
 )
 
@@ -45,9 +45,13 @@ type Codec interface {
 	Unmarshal(data []byte, v any) error
 }
 
+// JSONCodec 使用 encoding/json 编解码缓存值。
 type JSONCodec struct{}
 
-func (JSONCodec) Marshal(v any) ([]byte, error)   { return json.Marshal(v) }
+// Marshal 将值编码为 JSON。
+func (JSONCodec) Marshal(v any) ([]byte, error) { return json.Marshal(v) }
+
+// Unmarshal 将 JSON 解码到目标值。
 func (JSONCodec) Unmarshal(b []byte, v any) error { return json.Unmarshal(b, v) }
 
 const (
@@ -56,10 +60,12 @@ const (
 	// StableCacheTTL 稳定 Key TTL（单条记录查询）
 	StableCacheTTL = 60 * time.Minute
 
-	// 不稳定 Key TTL（聚合/JOIN/列表查询）
-	UnstableCacheTTLShort  = 5 * time.Minute  // JOIN 查询
-	UnstableCacheTTLMedium = 10 * time.Minute // 聚合查询
-	UnstableCacheTTLLong   = 15 * time.Minute // 不常变的聚合
+	// UnstableCacheTTLShort 是 JOIN 查询等短周期不稳定 key 的 TTL。
+	UnstableCacheTTLShort = 5 * time.Minute
+	// UnstableCacheTTLMedium 是聚合查询等中周期不稳定 key 的 TTL。
+	UnstableCacheTTLMedium = 10 * time.Minute
+	// UnstableCacheTTLLong 是低频变化聚合查询的 TTL。
+	UnstableCacheTTLLong = 15 * time.Minute
 )
 
 // Options 控制缓存行为（Redis/Local 共用）
@@ -98,6 +104,7 @@ type Options struct {
 	Now func() time.Time
 }
 
+// Option 配置 Redis 缓存行为。
 type Option func(*Options)
 
 func defaultOptions() Options {
@@ -150,18 +157,22 @@ func ApplyOptions(opts ...Option) Options {
 
 // -------- Option helpers --------
 
+// WithPrefix 设置所有缓存 key 的前缀。
 func WithPrefix(prefix string) Option {
 	return func(o *Options) { o.Prefix = prefix }
 }
 
+// WithCodec 设置缓存值编解码器。
 func WithCodec(codec Codec) Option {
 	return func(o *Options) { o.Codec = codec }
 }
 
+// WithJitter 设置 TTL 的随机抖动比例。
 func WithJitter(j float64) Option {
 	return func(o *Options) { o.Jitter = j }
 }
 
+// WithNegativeTTL 设置负缓存的 TTL。
 func WithNegativeTTL(ttl time.Duration) Option {
 	return func(o *Options) { o.NegativeTTL = ttl }
 }
@@ -172,6 +183,7 @@ func WithMaxTTL(ttl time.Duration) Option {
 	return func(o *Options) { o.MaxTTL = ttl }
 }
 
+// WithRedisTimeout 设置 Redis 读写操作的超时。
 func WithRedisTimeout(readTimeout, writeTimeout time.Duration) Option {
 	return func(o *Options) {
 		o.ReadTimeout = readTimeout
@@ -179,14 +191,17 @@ func WithRedisTimeout(readTimeout, writeTimeout time.Duration) Option {
 	}
 }
 
+// WithIsNotFound 设置识别未找到错误的函数。
 func WithIsNotFound(fn func(err error) bool) Option {
 	return func(o *Options) { o.IsNotFound = fn }
 }
 
+// WithOnError 设置缓存内部错误回调。
 func WithOnError(fn func(ctx context.Context, op string, key string, err error)) Option {
 	return func(o *Options) { o.OnError = fn }
 }
 
+// WithNow 设置缓存使用的时钟函数。
 func WithNow(now func() time.Time) Option {
 	return func(o *Options) { o.Now = now }
 }
@@ -196,13 +211,13 @@ func ensureDestPtr(dest any) error {
 		return ErrInvalidDest
 	}
 	v := reflect.ValueOf(dest)
-	if v.Kind() != reflect.Ptr || v.IsNil() {
+	if v.Kind() != reflect.Pointer || v.IsNil() {
 		return ErrInvalidDest
 	}
 	return nil
 }
 
-// WithTimeout：如果 parent 的 deadline 已经更紧，就不再额外包一层更短超时（导出供外部使用）
+// WithTimeout 创建超时 context；若 parent 的 deadline 更早，则直接复用 parent。
 func WithTimeout(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
 	if d <= 0 {
 		return parent, func() {}
@@ -242,8 +257,8 @@ func jitterTTL(ttl time.Duration, jitter float64) time.Duration {
 		return ttl
 	}
 	// delta in [0, maxDelta]
-	// 使用 math/rand/v2，在 Go 1.22+ 是线程安全的
-	delta := time.Duration(rand.Int64N(int64(maxDelta) + 1))
+	// 包级随机函数并发安全；此处只用于缓存过期抖动，不承担安全随机职责。
+	delta := time.Duration(rand.Int64N(int64(maxDelta) + 1)) // #nosec G404 -- 缓存过期抖动不用于安全随机数。
 	return ttl + delta
 }
 

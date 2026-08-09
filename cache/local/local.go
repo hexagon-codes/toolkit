@@ -14,19 +14,19 @@ import (
 )
 
 var (
-	// 负缓存命中（表示"确实不存在"），用于防穿透。
+	// ErrNotFound 表示负缓存命中（数据确实不存在），用于防穿透。
 	ErrNotFound = errors.New("cache: not found")
 
-	// 调用方传入的 dest 不合法（必须是非 nil 指针）
+	// ErrInvalidDest 表示调用方传入的 dest 不是非 nil 指针。
 	ErrInvalidDest = errors.New("cache: dest must be a non-nil pointer")
 
-	// key 不能为空
+	// ErrInvalidKey 表示缓存 key 为空。
 	ErrInvalidKey = errors.New("cache: key is empty")
 
-	// loader 不能为空
+	// ErrInvalidLoader 表示 loader 为空。
 	ErrInvalidLoader = errors.New("cache: loader is nil")
 
-	// 缓存内容损坏（例如 value 被其他系统写坏）
+	// ErrCorrupt 表示缓存内容损坏，例如 value 被其他系统写坏。
 	ErrCorrupt = errors.New("cache: corrupt payload")
 )
 
@@ -36,9 +36,13 @@ type Codec interface {
 	Unmarshal(data []byte, v any) error
 }
 
+// JSONCodec 使用 encoding/json 编解码缓存值。
 type JSONCodec struct{}
 
-func (JSONCodec) Marshal(v any) ([]byte, error)   { return json.Marshal(v) }
+// Marshal 将值编码为 JSON。
+func (JSONCodec) Marshal(v any) ([]byte, error) { return json.Marshal(v) }
+
+// Unmarshal 将 JSON 解码到目标值。
 func (JSONCodec) Unmarshal(b []byte, v any) error { return json.Unmarshal(b, v) }
 
 const (
@@ -70,6 +74,7 @@ type Options struct {
 	Now func() time.Time
 }
 
+// Option 配置本地缓存行为。
 type Option func(*Options)
 
 func defaultOptions() Options {
@@ -112,30 +117,37 @@ func applyOptions(opts ...Option) Options {
 	return o
 }
 
+// WithPrefix 设置所有缓存 key 的前缀。
 func WithPrefix(prefix string) Option {
 	return func(o *Options) { o.Prefix = prefix }
 }
 
+// WithCodec 设置缓存值编解码器。
 func WithCodec(codec Codec) Option {
 	return func(o *Options) { o.Codec = codec }
 }
 
+// WithJitter 设置 TTL 的随机抖动比例。
 func WithJitter(j float64) Option {
 	return func(o *Options) { o.Jitter = j }
 }
 
+// WithNegativeTTL 设置负缓存的 TTL。
 func WithNegativeTTL(ttl time.Duration) Option {
 	return func(o *Options) { o.NegativeTTL = ttl }
 }
 
+// WithIsNotFound 设置识别未找到错误的函数。
 func WithIsNotFound(fn func(err error) bool) Option {
 	return func(o *Options) { o.IsNotFound = fn }
 }
 
+// WithOnError 设置缓存内部错误回调。
 func WithOnError(fn func(ctx context.Context, op string, key string, err error)) Option {
 	return func(o *Options) { o.OnError = fn }
 }
 
+// WithNow 设置缓存使用的时钟函数。
 func WithNow(now func() time.Time) Option {
 	return func(o *Options) { o.Now = now }
 }
@@ -157,9 +169,8 @@ func jitterTTL(ttl time.Duration, jitter float64) time.Duration {
 		return ttl
 	}
 
-	// 使用 math/rand/v2 全局函数生成随机数（线程安全）
-	// 注意：rand.New() 创建的实例不是线程安全的，必须使用包级函数
-	delta := time.Duration(rand.Int64N(int64(maxDelta) + 1))
+	// 包级随机函数并发安全；此处只用于缓存过期抖动，不承担安全随机职责。
+	delta := time.Duration(rand.Int64N(int64(maxDelta) + 1)) // #nosec G404 -- 缓存过期抖动不用于安全随机数。
 	return ttl + delta
 }
 
@@ -187,7 +198,7 @@ func ensureDestPtr(dest any) error {
 		return ErrInvalidDest
 	}
 	v := reflect.ValueOf(dest)
-	if v.Kind() != reflect.Ptr || v.IsNil() {
+	if v.Kind() != reflect.Pointer || v.IsNil() {
 		return ErrInvalidDest
 	}
 	return nil
@@ -227,18 +238,13 @@ type localItem struct {
 }
 
 // newLocalItem 创建新的 localItem
-func newLocalItem(packed []byte, expireAt time.Time, accessedAt time.Time) *localItem {
+func newLocalItem(packed []byte, expireAt, accessedAt time.Time) *localItem {
 	item := &localItem{
 		packed:   packed,
 		expireAt: expireAt,
 	}
 	item.accessedAt.Store(accessedAt.UnixNano())
 	return item
-}
-
-// getAccessedAt 获取访问时间
-func (i *localItem) getAccessedAt() time.Time {
-	return time.Unix(0, i.accessedAt.Load())
 }
 
 // setAccessedAt 设置访问时间（原子操作）
@@ -256,6 +262,7 @@ func (i *localItem) setSeq(s uint64) {
 	i.seq.Store(s)
 }
 
+// Cache 是支持 TTL、LRU 和 singleflight 防击穿的进程内缓存。
 type Cache struct {
 	mu         sync.RWMutex
 	items      map[string]*localItem // 使用指针以支持读锁下原子更新 accessedAt
@@ -349,6 +356,7 @@ func NewCacheNoCleanup(maxEntries int, opts ...Option) *Cache {
 	return NewCacheWithCleanup(maxEntries, 0, opts...)
 }
 
+// GetOrLoad 读取缓存，未命中时调用 loader 并回填结果。
 func (c *Cache) GetOrLoad(
 	ctx context.Context,
 	key string,
@@ -381,7 +389,10 @@ func (c *Cache) GetOrLoad(
 	// 2) singleflight 防击穿
 	v, err, _ := c.sf.Do(fullKey, func() (any, error) {
 		// double check
-		if packed2, ok2, _ := c.getItem(fullKey); ok2 {
+		packed2, ok2, getErr := c.getItem(fullKey)
+		if getErr != nil {
+			c.onError(ctx, "local_double_check", fullKey, getErr)
+		} else if ok2 {
 			return packed2, nil
 		}
 
@@ -416,6 +427,7 @@ func (c *Cache) GetOrLoad(
 	return c.unmarshalPacked(packed, dest)
 }
 
+// Del 删除一个或多个缓存 key。
 func (c *Cache) Del(ctx context.Context, keys ...string) error {
 	if len(keys) == 0 {
 		return nil
@@ -436,7 +448,7 @@ func (c *Cache) Del(ctx context.Context, keys ...string) error {
 
 // --- internal ---
 
-func (c *Cache) getItem(fullKey string) ([]byte, bool, error) {
+func (c *Cache) getItem(fullKey string) (data []byte, found bool, err error) {
 	now := c.opts.Now()
 
 	// 使用读锁进行读取操作
@@ -474,10 +486,6 @@ func (c *Cache) getItem(fullKey string) ([]byte, bool, error) {
 	copy(cp, item.packed)
 	c.mu.RUnlock()
 	return cp, true, nil
-}
-
-func (c *Cache) setItem(fullKey string, packed []byte, ttl time.Duration) {
-	c.setItemWithGen(fullKey, packed, ttl, 0, false)
 }
 
 // setItemWithGen 带版本号检查的写入方法
@@ -721,26 +729,29 @@ func (c *Cache) GetOrLoadEx(
 	if loader == nil {
 		return false, ErrInvalidLoader
 	}
-	if err := ensureDestPtr(dest); err != nil {
-		return false, err
+	if destErr := ensureDestPtr(dest); destErr != nil {
+		return false, destErr
 	}
 
 	fullKey := joinPrefix(c.opts.Prefix, key)
 
 	// 1) 先读本地缓存
-	if packed, ok, err := c.getItem(fullKey); err == nil && ok {
+	if packed, ok, getErr := c.getItem(fullKey); getErr == nil && ok {
 		return true, c.unmarshalPacked(packed, dest)
-	} else if err != nil {
-		c.onError(ctx, "local_get", fullKey, err)
+	} else if getErr != nil {
+		c.onError(ctx, "local_get", fullKey, getErr)
 	}
 
 	// 记录当前版本号，用于防止 Clear() 竞态
 	gen := c.getGeneration()
 
 	// 2) singleflight 防击穿，返回值携带来源信息
-	v, err, _ := c.sf.Do(fullKey, func() (any, error) {
+	v, loadErr, _ := c.sf.Do(fullKey, func() (any, error) {
 		// double check
-		if packed2, ok2, _ := c.getItem(fullKey); ok2 {
+		packed2, ok2, getErr := c.getItem(fullKey)
+		if getErr != nil {
+			c.onError(ctx, "local_double_check", fullKey, getErr)
+		} else if ok2 {
 			return loadResult{packed: packed2, fromCache: true}, nil
 		}
 
@@ -764,8 +775,8 @@ func (c *Cache) GetOrLoadEx(
 		}
 		return loadResult{packed: packed3, fromCache: false}, nil
 	})
-	if err != nil {
-		return false, err
+	if loadErr != nil {
+		return false, loadErr
 	}
 
 	// 解析 singleflight 返回值

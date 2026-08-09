@@ -4,15 +4,35 @@
 //
 // 基本用法:
 //
-//	cache := multi.NewBuilder().
+//	cache, err := multi.NewCache([]multi.LayerConfig{
+//	    {Layer: localCache, TTL: 5 * time.Minute, Name: "local"},
+//	    {Layer: redisCache, TTL: 30 * time.Minute, Name: "redis"},
+//	})
+//	if err != nil {
+//	    return err
+//	}
+//
+// 构建器用法:
+//
+//	cache, err = multi.NewBuilder().
 //	    WithLocal(localCache, 5*time.Minute).
 //	    WithRedis(redisCache, 30*time.Minute).
+//	    WithBackfillConcurrency(8).
 //	    Build()
+//	if err != nil {
+//	    return err
+//	}
 //
 //	var user User
 //	err := cache.GetOrLoad(ctx, "user:123", &user, func(ctx context.Context) (any, error) {
 //	    return db.FindUser(ctx, 123)
 //	})
+//
+// 构造契约:
+//   - NewCache 和 Builder.Build 都返回 (*Cache, error)，使用缓存前必须处理错误
+//   - 未配置层、nil 层和无效 Option 会在构造阶段返回可通过 errors.Is 识别的错误
+//   - BackfillConcurrency 默认值为 4，且必须大于 0
+//   - 回填并发槽饱和时跳过当前非关键回填，并通过 OnError 报告 ErrBackfillSaturated
 //
 // 特性:
 //   - 从慢速层自动回填到快速层
@@ -27,10 +47,24 @@
 //
 // Basic usage:
 //
-//	cache := multi.NewBuilder().
+//	cache, err := multi.NewCache([]multi.LayerConfig{
+//	    {Layer: localCache, TTL: 5 * time.Minute, Name: "local"},
+//	    {Layer: redisCache, TTL: 30 * time.Minute, Name: "redis"},
+//	})
+//	if err != nil {
+//	    return err
+//	}
+//
+// 构建器用法:
+//
+//	cache, err = multi.NewBuilder().
 //	    WithLocal(localCache, 5*time.Minute).
 //	    WithRedis(redisCache, 30*time.Minute).
+//	    WithBackfillConcurrency(8).
 //	    Build()
+//	if err != nil {
+//	    return err
+//	}
 //
 //	var user User
 //	err := cache.GetOrLoad(ctx, "user:123", &user, func(ctx context.Context) (any, error) {

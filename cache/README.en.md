@@ -78,10 +78,11 @@ func main() {
     redisCache := redis.NewStableCache(rdb)
 
     // 2. Combine into multi-level cache (Builder pattern)
-    cache := multi.NewBuilder().
+    cache, err := multi.NewBuilder().
         WithLocal(localCache, 10*time.Minute).
         WithRedis(redisCache, 60*time.Minute).
         Build()
+    if err != nil { panic(err) }
 
     // 3. Use (automatically handles three layers: local -> redis -> db)
     var user User

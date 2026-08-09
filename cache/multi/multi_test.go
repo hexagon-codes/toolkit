@@ -104,17 +104,28 @@ func (m *mockLayer) hasKey(key string) bool {
 	return ok
 }
 
+func mustNewCache(t *testing.T, layers []LayerConfig, opts ...Option) *Cache {
+	t.Helper()
+
+	cache, err := NewCache(layers, opts...)
+	if err != nil {
+		t.Fatalf("NewCache() error = %v", err)
+	}
+	return cache
+}
+
 func TestNewCache(t *testing.T) {
 	layer1 := newMockLayer()
 	layer2 := newMockLayer()
 
-	cache := NewCache([]LayerConfig{
+	cache := mustNewCache(t, []LayerConfig{
 		{Layer: layer1, TTL: 10 * time.Minute, Name: "local"},
 		{Layer: layer2, TTL: 60 * time.Minute, Name: "redis"},
 	})
 
 	if cache == nil {
 		t.Fatal("cache is nil")
+		return
 	}
 
 	if cache.LayerCount() != 2 {
@@ -123,7 +134,7 @@ func TestNewCache(t *testing.T) {
 }
 
 func TestCache_GetOrLoad_InvalidParams(t *testing.T) {
-	cache := NewCache([]LayerConfig{
+	cache := mustNewCache(t, []LayerConfig{
 		{Layer: newMockLayer(), TTL: time.Minute, Name: "test"},
 	})
 
@@ -154,14 +165,10 @@ func TestCache_GetOrLoad_InvalidParams(t *testing.T) {
 }
 
 func TestCache_GetOrLoad_NoLayers(t *testing.T) {
-	cache := NewCache([]LayerConfig{})
-
-	ctx := context.Background()
-	var dest string
-	err := cache.GetOrLoad(ctx, "key", &dest, func(ctx context.Context) (any, error) {
-		return "value", nil
-	})
-
+	cache, err := NewCache(nil)
+	if cache != nil {
+		t.Fatalf("NewCache(nil) cache = %#v, want nil", cache)
+	}
 	if !errors.Is(err, ErrNoLayers) {
 		t.Errorf("expected ErrNoLayers, got: %v", err)
 	}
@@ -169,7 +176,7 @@ func TestCache_GetOrLoad_NoLayers(t *testing.T) {
 
 func TestCache_GetOrLoad_SingleLayer(t *testing.T) {
 	layer := newMockLayer()
-	cache := NewCache([]LayerConfig{
+	cache := mustNewCache(t, []LayerConfig{
 		{Layer: layer, TTL: time.Minute, Name: "test"},
 	})
 
@@ -220,7 +227,7 @@ func TestCache_GetOrLoad_SingleLayer(t *testing.T) {
 
 func TestCache_Del(t *testing.T) {
 	layer := newMockLayer()
-	cache := NewCache([]LayerConfig{
+	cache := mustNewCache(t, []LayerConfig{
 		{Layer: layer, TTL: time.Minute, Name: "test"},
 	})
 
@@ -251,7 +258,7 @@ func TestCache_Del(t *testing.T) {
 }
 
 func TestCache_Del_NoKeys(t *testing.T) {
-	cache := NewCache([]LayerConfig{
+	cache := mustNewCache(t, []LayerConfig{
 		{Layer: newMockLayer(), TTL: time.Minute, Name: "test"},
 	})
 
@@ -267,7 +274,7 @@ func TestCache_OnError(t *testing.T) {
 	layer.errToReturn = errors.New("layer error")
 
 	var errorCount atomic.Int32
-	cache := NewCache([]LayerConfig{
+	cache := mustNewCache(t, []LayerConfig{
 		{Layer: layer, TTL: time.Minute, Name: "test"},
 	}, WithOnError(func(ctx context.Context, layerName, op, key string, err error) {
 		errorCount.Add(1)
@@ -290,13 +297,12 @@ func TestBuilder_Basic(t *testing.T) {
 	layer1 := newMockLayer()
 	layer2 := newMockLayer()
 
-	cache := NewBuilder().
+	cache, err := NewBuilder().
 		WithLocal(layer1, 10*time.Minute).
 		WithRedis(layer2, 60*time.Minute).
 		Build()
-
-	if cache == nil {
-		t.Fatal("cache is nil")
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
 	}
 
 	if cache.LayerCount() != 2 {
@@ -307,16 +313,15 @@ func TestBuilder_Basic(t *testing.T) {
 func TestBuilder_WithOptionsMethod(t *testing.T) {
 	errorCount := 0
 
-	cache := NewBuilder().
+	cache, err := NewBuilder().
 		WithLayer(newMockLayer(), time.Minute, "test").
 		WithOnError(func(ctx context.Context, layer, op, key string, err error) {
 			errorCount++
 		}).
 		WithSkipBackfill(true).
 		Build()
-
-	if cache == nil {
-		t.Fatal("cache is nil")
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
 	}
 
 	if !cache.opts.SkipBackfill {
@@ -345,7 +350,7 @@ func TestErrors(t *testing.T) {
 func TestOptions(t *testing.T) {
 	customErr := errors.New("custom not found")
 
-	cache := NewCache([]LayerConfig{
+	cache := mustNewCache(t, []LayerConfig{
 		{Layer: newMockLayer(), TTL: time.Minute, Name: "test"},
 	}, WithIsNotFound(func(err error) bool {
 		return errors.Is(err, customErr)
@@ -363,7 +368,7 @@ func TestOptions(t *testing.T) {
 }
 
 func TestCache_LayerCount(t *testing.T) {
-	cache := NewCache([]LayerConfig{
+	cache := mustNewCache(t, []LayerConfig{
 		{Layer: newMockLayer(), TTL: time.Minute, Name: "layer1"},
 		{Layer: newMockLayer(), TTL: time.Minute, Name: "layer2"},
 		{Layer: newMockLayer(), TTL: time.Minute, Name: "layer3"},
@@ -381,7 +386,7 @@ func TestCache_MultiLayer_LocalMiss_RedisHit(t *testing.T) {
 	// Pre-populate redis
 	redisLayer.data["key1"] = "redis_value"
 
-	cache := NewCache([]LayerConfig{
+	cache := mustNewCache(t, []LayerConfig{
 		{Layer: localLayer, TTL: 10 * time.Minute, Name: "local"},
 		{Layer: redisLayer, TTL: 60 * time.Minute, Name: "redis"},
 	})
@@ -415,7 +420,7 @@ func TestCache_Del_MultipleKeys(t *testing.T) {
 	layer.data["key2"] = "value2"
 	layer.data["key3"] = "value3"
 
-	cache := NewCache([]LayerConfig{
+	cache := mustNewCache(t, []LayerConfig{
 		{Layer: layer, TTL: time.Minute, Name: "test"},
 	})
 
@@ -444,7 +449,7 @@ func TestCache_Del_Error(t *testing.T) {
 	layer.errToReturn = errors.New("del error")
 
 	errorCount := 0
-	cache := NewCache([]LayerConfig{
+	cache := mustNewCache(t, []LayerConfig{
 		{Layer: layer, TTL: time.Minute, Name: "test"},
 	}, WithOnError(func(ctx context.Context, layerName, op, key string, err error) {
 		errorCount++
@@ -464,7 +469,7 @@ func TestCache_Del_Error(t *testing.T) {
 func TestCache_NotFound(t *testing.T) {
 	layer := newMockLayer()
 
-	cache := NewCache([]LayerConfig{
+	cache := mustNewCache(t, []LayerConfig{
 		{Layer: layer, TTL: time.Minute, Name: "test"},
 	})
 
@@ -481,7 +486,7 @@ func TestCache_NotFound(t *testing.T) {
 }
 
 func TestCache_isNotFound_NilError(t *testing.T) {
-	cache := NewCache([]LayerConfig{
+	cache := mustNewCache(t, []LayerConfig{
 		{Layer: newMockLayer(), TTL: time.Minute, Name: "test"},
 	})
 
@@ -493,7 +498,7 @@ func TestCache_isNotFound_NilError(t *testing.T) {
 func TestCache_LoaderError(t *testing.T) {
 	layer := newMockLayer()
 
-	cache := NewCache([]LayerConfig{
+	cache := mustNewCache(t, []LayerConfig{
 		{Layer: layer, TTL: time.Minute, Name: "test"},
 	})
 
@@ -520,7 +525,7 @@ func TestCache_AllLayersFail_LoaderSuccess(t *testing.T) {
 	layer2.errToReturn = errors.New("layer2 error")
 
 	var errorCount int32
-	cache := NewCache([]LayerConfig{
+	cache := mustNewCache(t, []LayerConfig{
 		{Layer: layer1, TTL: time.Minute, Name: "layer1"},
 		{Layer: layer2, TTL: time.Minute, Name: "layer2"},
 	}, WithOnError(func(ctx context.Context, layerName, op, key string, err error) {
@@ -551,7 +556,7 @@ func TestCache_AllLayersFail_LoaderSuccess(t *testing.T) {
 func TestCache_SkipBackfill(t *testing.T) {
 	layer := newMockLayer()
 
-	cache := NewCache([]LayerConfig{
+	cache := mustNewCache(t, []LayerConfig{
 		{Layer: layer, TTL: time.Minute, Name: "test"},
 	}, WithSkipBackfill(true))
 
@@ -563,12 +568,15 @@ func TestCache_SkipBackfill(t *testing.T) {
 func TestBuilder_WithIsNotFound(t *testing.T) {
 	customNotFound := errors.New("custom not found")
 
-	cache := NewBuilder().
+	cache, buildErr := NewBuilder().
 		WithLayer(newMockLayer(), time.Minute, "test").
 		WithIsNotFound(func(err error) bool {
 			return errors.Is(err, customNotFound)
 		}).
 		Build()
+	if buildErr != nil {
+		t.Fatalf("Build() error = %v", buildErr)
+	}
 
 	if cache.opts.IsNotFound == nil {
 		t.Fatal("IsNotFound should not be nil")
@@ -587,10 +595,13 @@ func TestBuilder_WithIsNotFound(t *testing.T) {
 }
 
 func TestBuilder_WithOptions(t *testing.T) {
-	cache := NewBuilder().
+	cache, err := NewBuilder().
 		WithLayer(newMockLayer(), time.Minute, "test").
 		WithOptions(WithSkipBackfill(true)).
 		Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
 
 	if !cache.opts.SkipBackfill {
 		t.Error("SkipBackfill should be true")
@@ -598,25 +609,19 @@ func TestBuilder_WithOptions(t *testing.T) {
 }
 
 func TestApplyOptions_NilFn(t *testing.T) {
-	// Should not panic with nil option
-	opts := applyOptions(nil, WithSkipBackfill(true), nil)
-
-	if !opts.SkipBackfill {
-		t.Error("SkipBackfill should be true")
+	opts, err := applyOptions(nil, WithSkipBackfill(true))
+	if !errors.Is(err, ErrInvalidOption) {
+		t.Fatalf("applyOptions() error = %v, want ErrInvalidOption", err)
+	}
+	if opts.IsNotFound != nil || opts.OnError != nil || opts.SkipBackfill || opts.BackfillConcurrency != 0 {
+		t.Fatalf("applyOptions() options = %#v, want zero value", opts)
 	}
 }
 
 func TestApplyOptions_NilIsNotFound(t *testing.T) {
-	opts := applyOptions(WithIsNotFound(nil))
-
-	// Should default to checking ErrNotFound
-	if opts.IsNotFound == nil {
-		t.Error("IsNotFound should have default function")
-	}
-
-	// Test default behavior
-	if !opts.IsNotFound(ErrNotFound) {
-		t.Error("default IsNotFound should return true for ErrNotFound")
+	_, err := applyOptions(WithIsNotFound(nil))
+	if !errors.Is(err, ErrInvalidOption) {
+		t.Fatalf("applyOptions() error = %v, want ErrInvalidOption", err)
 	}
 }
 
@@ -632,7 +637,7 @@ func TestCopyValue(t *testing.T) {
 func TestCache_IntValues(t *testing.T) {
 	layer := newMockLayer()
 
-	cache := NewCache([]LayerConfig{
+	cache := mustNewCache(t, []LayerConfig{
 		{Layer: layer, TTL: time.Minute, Name: "test"},
 	})
 
@@ -681,7 +686,7 @@ func TestCache_ThreeLayer_MiddleLayerHit(t *testing.T) {
 	// Pre-populate middle layer
 	layer2.data["key1"] = "redis_value"
 
-	cache := NewCache([]LayerConfig{
+	cache := mustNewCache(t, []LayerConfig{
 		{Layer: layer1, TTL: 5 * time.Minute, Name: "local"},
 		{Layer: layer2, TTL: 30 * time.Minute, Name: "redis"},
 		{Layer: layer3, TTL: 60 * time.Minute, Name: "db_cache"},
@@ -726,7 +731,7 @@ func TestCache_ThreeLayer_LastLayerHit(t *testing.T) {
 	// Pre-populate last layer
 	layer3.data["key1"] = "dbcache_value"
 
-	cache := NewCache([]LayerConfig{
+	cache := mustNewCache(t, []LayerConfig{
 		{Layer: layer1, TTL: 5 * time.Minute, Name: "local"},
 		{Layer: layer2, TTL: 30 * time.Minute, Name: "redis"},
 		{Layer: layer3, TTL: 60 * time.Minute, Name: "db_cache"},
@@ -763,7 +768,7 @@ func TestCache_ThreeLayer_AllMiss_LoaderSuccess(t *testing.T) {
 	layer2 := newMockLayer()
 	layer3 := newMockLayer()
 
-	cache := NewCache([]LayerConfig{
+	cache := mustNewCache(t, []LayerConfig{
 		{Layer: layer1, TTL: 5 * time.Minute, Name: "local"},
 		{Layer: layer2, TTL: 30 * time.Minute, Name: "redis"},
 		{Layer: layer3, TTL: 60 * time.Minute, Name: "db_cache"},
@@ -816,7 +821,7 @@ func TestCache_ThreeLayer_FirstLayerError_MiddleLayerHit(t *testing.T) {
 	layer3 := newMockLayer()
 
 	var errorCount int32
-	cache := NewCache([]LayerConfig{
+	cache := mustNewCache(t, []LayerConfig{
 		{Layer: layer1, TTL: 5 * time.Minute, Name: "local"},
 		{Layer: layer2, TTL: 30 * time.Minute, Name: "redis"},
 		{Layer: layer3, TTL: 60 * time.Minute, Name: "db_cache"},
@@ -859,7 +864,7 @@ func TestCache_ThreeLayer_NotFound_PropagatesCorrectly(t *testing.T) {
 	layer2 := newMockLayer()
 	layer3 := newMockLayer()
 
-	cache := NewCache([]LayerConfig{
+	cache := mustNewCache(t, []LayerConfig{
 		{Layer: layer1, TTL: 5 * time.Minute, Name: "local"},
 		{Layer: layer2, TTL: 30 * time.Minute, Name: "redis"},
 		{Layer: layer3, TTL: 60 * time.Minute, Name: "db_cache"},
@@ -884,7 +889,7 @@ func TestCache_ThreeLayer_WithSkipBackfill(t *testing.T) {
 	layer2 := newMockLayer()
 	layer3 := newMockLayer()
 
-	cache := NewCache([]LayerConfig{
+	cache := mustNewCache(t, []LayerConfig{
 		{Layer: layer1, TTL: 5 * time.Minute, Name: "local"},
 		{Layer: layer2, TTL: 30 * time.Minute, Name: "redis"},
 		{Layer: layer3, TTL: 60 * time.Minute, Name: "db_cache"},
@@ -944,7 +949,7 @@ func TestCache_ThreeLayer_MiddleLayerError_LastLayerHit(t *testing.T) {
 	layer3.data["key1"] = "dbcache_value"
 
 	var errorCount int32
-	cache := NewCache([]LayerConfig{
+	cache := mustNewCache(t, []LayerConfig{
 		{Layer: layer1, TTL: 5 * time.Minute, Name: "local"},
 		{Layer: layer2, TTL: 30 * time.Minute, Name: "redis"},
 		{Layer: layer3, TTL: 60 * time.Minute, Name: "db_cache"},
@@ -992,7 +997,7 @@ func TestCache_FourLayer_BackfillRange(t *testing.T) {
 	layer4.data["key1"] = "layer4_value"
 
 	var errorCount int32
-	cache := NewCache([]LayerConfig{
+	cache := mustNewCache(t, []LayerConfig{
 		{Layer: layer1, TTL: 5 * time.Minute, Name: "layer1"},
 		{Layer: layer2, TTL: 10 * time.Minute, Name: "layer2"},
 		{Layer: layer3, TTL: 30 * time.Minute, Name: "layer3"},
@@ -1033,7 +1038,7 @@ func TestCache_Del_ThreeLayers(t *testing.T) {
 	layer3 := newMockLayer()
 	layer3.data["key1"] = "value1"
 
-	cache := NewCache([]LayerConfig{
+	cache := mustNewCache(t, []LayerConfig{
 		{Layer: layer1, TTL: 5 * time.Minute, Name: "local"},
 		{Layer: layer2, TTL: 30 * time.Minute, Name: "redis"},
 		{Layer: layer3, TTL: 60 * time.Minute, Name: "db_cache"},
@@ -1057,21 +1062,17 @@ func TestCache_Del_ThreeLayers(t *testing.T) {
 	}
 }
 
-func TestNewCache_NilLayer_Panics(t *testing.T) {
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("expected panic for nil Layer")
-		}
-	}()
-
-	NewCache([]LayerConfig{
+func TestNewCache_NilLayer_ReturnsError(t *testing.T) {
+	cache, err := NewCache([]LayerConfig{
 		{Layer: nil, TTL: time.Minute, Name: "bad"},
 	})
+	if cache != nil || !errors.Is(err, ErrNilLayer) {
+		t.Fatalf("NewCache() = (%v, %v), want nil and ErrNilLayer", cache, err)
+	}
 }
 
 func TestCache_GetOrLoad_NonPointerDest(t *testing.T) {
-	cache := NewCache([]LayerConfig{
+	cache := mustNewCache(t, []LayerConfig{
 		{Layer: newMockLayer(), TTL: time.Minute, Name: "test"},
 	})
 
@@ -1094,7 +1095,7 @@ func TestCache_GetOrLoad_LoaderCalledExactlyOnce(t *testing.T) {
 		configs[i] = LayerConfig{Layer: layers[i], TTL: time.Minute, Name: fmt.Sprintf("layer%d", i)}
 	}
 
-	cache := NewCache(configs)
+	cache := mustNewCache(t, configs)
 
 	ctx := context.Background()
 	var dest string
@@ -1125,3 +1126,57 @@ func TestCache_GetOrLoad_LoaderCalledExactlyOnce(t *testing.T) {
 		}
 	}
 }
+
+func TestCache_BackfillConcurrencyIsBounded(t *testing.T) {
+	release := make(chan struct{})
+	layer := &blockingBackfillLayer{release: release}
+	cache := mustNewCache(t, []LayerConfig{{Layer: layer, TTL: time.Minute, Name: "blocking"}})
+
+	for i := 0; i < defaultBackfillConcurrency*4; i++ {
+		cache.backfillAll(context.Background(), fmt.Sprintf("key-%d", i), "value")
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for layer.current.Load() < defaultBackfillConcurrency && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := layer.maximum.Load(); got > defaultBackfillConcurrency {
+		t.Fatalf("backfill concurrency exceeded limit: got %d, want <= %d", got, defaultBackfillConcurrency)
+	}
+	if got := layer.current.Load(); got != defaultBackfillConcurrency {
+		t.Fatalf("expected all %d slots to be occupied, got %d", defaultBackfillConcurrency, got)
+	}
+	close(release)
+}
+
+type blockingBackfillLayer struct {
+	release <-chan struct{}
+	current atomic.Int32
+	maximum atomic.Int32
+}
+
+func (l *blockingBackfillLayer) GetOrLoad(
+	ctx context.Context,
+	_ string,
+	_ time.Duration,
+	_ any,
+	loader func(context.Context) (any, error),
+) error {
+	current := l.current.Add(1)
+	defer l.current.Add(-1)
+	for {
+		maximum := l.maximum.Load()
+		if current <= maximum || l.maximum.CompareAndSwap(maximum, current) {
+			break
+		}
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-l.release:
+		_, err := loader(ctx)
+		return err
+	}
+}
+
+func (*blockingBackfillLayer) Del(context.Context, ...string) error { return nil }

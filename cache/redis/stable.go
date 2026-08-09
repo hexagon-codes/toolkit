@@ -130,7 +130,11 @@ func (c *StableCache) GetOrLoad(
 	}
 
 	// 解包并填充
-	found, payload, uerr := unpack(packed.([]byte))
+	packedBytes, ok := packed.([]byte)
+	if !ok {
+		return ErrCorrupt
+	}
+	found, payload, uerr := unpack(packedBytes)
 	if uerr != nil {
 		return uerr
 	}
@@ -203,7 +207,7 @@ func (c *StableCache) Set(ctx context.Context, key string, value any, ttl time.D
 
 // asyncDel 异步删除损坏的缓存 key（自愈机制）
 func (c *StableCache) asyncDel(ctx context.Context, key string) {
-	gopool.Go(func() {
+	task := func() {
 		delCtx, cancel := withTimeout(context.Background(), c.opts.WriteTimeout)
 		defer cancel()
 
@@ -211,11 +215,12 @@ func (c *StableCache) asyncDel(ctx context.Context, key string) {
 		if err != nil {
 			c.onError(ctx, "stable_del_corrupt", key, err)
 		}
-	})
+	}
+	gopool.Go(task)
 }
 
 func (c *StableCache) asyncSet(ctx context.Context, key string, data []byte, ttl time.Duration) {
-	gopool.Go(func() {
+	task := func() {
 		writeCtx, cancel := withTimeout(context.Background(), c.opts.WriteTimeout)
 		defer cancel()
 
@@ -223,7 +228,8 @@ func (c *StableCache) asyncSet(ctx context.Context, key string, data []byte, ttl
 		if err != nil {
 			c.onError(ctx, "stable_set", key, err)
 		}
-	})
+	}
+	gopool.Go(task)
 }
 
 func (c *StableCache) loadAndFill(ctx context.Context, loader func(ctx context.Context) (any, error), dest any) error {

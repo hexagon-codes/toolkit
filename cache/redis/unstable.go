@@ -325,7 +325,11 @@ func (c *UnstableCache) getOrLoadInternal(
 	}
 
 	// 解包
-	found, payload, uerr := unpack(packed.([]byte))
+	packedBytes, ok := packed.([]byte)
+	if !ok {
+		return ErrCorrupt
+	}
+	found, payload, uerr := unpack(packedBytes)
 	if uerr != nil {
 		return uerr
 	}
@@ -340,9 +344,10 @@ func (c *UnstableCache) loadVersion() {
 	defer cancel()
 
 	val, err := c.client.Get(ctx, c.versionKey).Int64()
-	if err == nil {
+	switch err {
+	case nil:
 		atomic.StoreInt64(&c.version, val)
-	} else if err == redis.Nil {
+	case redis.Nil:
 		// 初始化版本号，使用 SetNX 避免多实例并发覆盖
 		set, sErr := c.client.SetNX(ctx, c.versionKey, 1, 0).Result()
 		if sErr != nil {
@@ -361,7 +366,7 @@ func (c *UnstableCache) loadVersion() {
 				atomic.StoreInt64(&c.version, 1)
 			}
 		}
-	} else {
+	default:
 		// 非 redis.Nil 的网络错误，记录日志，不静默忽略
 		c.onError(ctx, "unstable_load_version", c.versionKey, err)
 	}
@@ -383,7 +388,7 @@ func (c *UnstableCache) refreshVersionIfNeeded(ctx context.Context) {
 	}
 
 	// 使用 singleflight 确保只有一个 goroutine 执行刷新
-	_, _, _ = c.versionSf.Do("refresh", func() (any, error) {
+	_, refreshErr, _ := c.versionSf.Do("refresh", func() (any, error) {
 		// 双重检查：进入 singleflight 后再次检查时间
 		now2 := c.opts.Now().UnixNano()
 		lastCheck2 := atomic.LoadInt64(&c.lastVersionCheck)
@@ -399,19 +404,23 @@ func (c *UnstableCache) refreshVersionIfNeeded(ctx context.Context) {
 		defer cancel()
 
 		val, err := c.client.Get(readCtx, c.versionKey).Int64()
-		if err == nil {
-			currentVersion := atomic.LoadInt64(&c.version)
-			if val > currentVersion {
-				atomic.StoreInt64(&c.version, val)
-			}
+		if err != nil {
+			return nil, err
+		}
+		currentVersion := atomic.LoadInt64(&c.version)
+		if val > currentVersion {
+			atomic.StoreInt64(&c.version, val)
 		}
 		return nil, nil
 	})
+	if refreshErr != nil {
+		c.onError(ctx, "unstable_refresh_version", c.versionKey, refreshErr)
+	}
 }
 
 // asyncDel 异步删除损坏的缓存 key（自愈机制）
 func (c *UnstableCache) asyncDel(ctx context.Context, key string) {
-	gopool.Go(func() {
+	task := func() {
 		delCtx, cancel := withTimeout(context.Background(), c.opts.WriteTimeout)
 		defer cancel()
 
@@ -419,11 +428,12 @@ func (c *UnstableCache) asyncDel(ctx context.Context, key string) {
 		if err != nil {
 			c.onError(ctx, "unstable_del_corrupt", key, err)
 		}
-	})
+	}
+	gopool.Go(task)
 }
 
 func (c *UnstableCache) asyncSet(ctx context.Context, key string, data []byte, ttl time.Duration) {
-	gopool.Go(func() {
+	task := func() {
 		writeCtx, cancel := withTimeout(context.Background(), c.opts.WriteTimeout)
 		defer cancel()
 
@@ -431,7 +441,8 @@ func (c *UnstableCache) asyncSet(ctx context.Context, key string, data []byte, t
 		if err != nil {
 			c.onError(ctx, "unstable_set", key, err)
 		}
-	})
+	}
+	gopool.Go(task)
 }
 
 func (c *UnstableCache) loadAndFill(ctx context.Context, loader func(ctx context.Context) (any, error), dest any) error {

@@ -9,7 +9,7 @@ import (
 //
 // 示例：
 //
-//	cache := multi.NewBuilder().
+//	cache, err := multi.NewBuilder().
 //	    WithLocal(localCache, 10*time.Minute).
 //	    WithRedis(redisCache, 60*time.Minute).
 //	    Build()
@@ -75,7 +75,10 @@ func (b *Builder) WithSkipBackfill(skip bool) *Builder {
 	return b
 }
 
-// Build 构建多层缓存
-func (b *Builder) Build() *Cache {
+// Build 校验配置并构建多层缓存。
+func (b *Builder) Build() (*Cache, error) {
+	if b == nil {
+		return nil, ErrNilBuilder
+	}
 	return NewCache(b.layers, b.opts...)
 }

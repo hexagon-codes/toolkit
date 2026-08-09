@@ -25,6 +25,7 @@ package main
 import (
     "context"
     "crypto/tls"
+    "errors"
     "os"
     "time"
 
@@ -64,10 +65,11 @@ func main() {
     redisCache := redis.NewStableCache(rdb)
 
     // 2. 组合为多层缓存
-    cache := multi.NewCache([]multi.LayerConfig{
+    cache, err := multi.NewCache([]multi.LayerConfig{
         {Layer: localCache, TTL: 10 * time.Minute, Name: "local"},
         {Layer: redisCache, TTL: 60 * time.Minute, Name: "redis"},
     })
+    if err != nil { panic(err) }
 
     // 3. 使用（自动处理三层：local -> redis -> db）
     var user User
@@ -77,14 +79,14 @@ func main() {
             return findUserByID(ctx, 123)
         },
     )
-    if err == multi.ErrNotFound {
+    if errors.Is(err, multi.ErrNotFound) {
         // 数据不存在
     } else if err != nil {
         // 其他错误
     }
 
     // 删除缓存（所有层）
-    cache.Del(context.Background(), "user:123")
+    if err := cache.Del(ctx, "user:123"); err != nil { panic(err) }
 }
 
 func findUserByID(context.Context, int) (User, error) {
@@ -95,13 +97,16 @@ func findUserByID(context.Context, int) (User, error) {
 ### Builder 模式（推荐）
 
 ```go
-cache := multi.NewBuilder().
+cache, err := multi.NewBuilder().
     WithLocal(localCache, 10*time.Minute).
     WithRedis(redisCache, 60*time.Minute).
     WithOnError(func(ctx context.Context, layer, op, key string, err error) {
-        log.Printf("缓存错误: layer=%s op=%s key=%s err=%v", layer, op, key, err)
+        log.Printf("Cache error: layer=%s op=%s key=%s err=%v", layer, op, key, err)
     }).
     Build()
+if err != nil {
+    panic(err)
+}
 ```
 
 ## 工作原理
@@ -125,10 +130,21 @@ cache := multi.NewBuilder().
 ### Del 流程
 
 ```
-删除所有层的缓存（并发执行）
+按层删除缓存，并合并所有层返回的错误
 ├─ Local.Del("user:123")
 └─ Redis.Del("user:123")
 ```
+
+## 构造与配置错误
+
+`NewCache(layers, opts...)` 和 `Builder.Build()` 都返回 `(*Cache, error)`，调用方必须先处理错误，再使用缓存实例。可通过 `errors.Is` 区分以下配置错误：
+
+- 未配置缓存层：`ErrNoLayers`
+- 缓存层为 nil（包括 typed nil）：`ErrNilLayer`
+- nil Option、`WithIsNotFound(nil)`、`WithBackfillConcurrency(0)` 或自定义 Option 返回错误：`ErrInvalidOption`
+- 在 nil `*Builder` 上调用 `Build`：`ErrNilBuilder`
+
+自定义 Option 返回的原始错误会与 `ErrInvalidOption` 一并保留在错误链中；Builder 会原样转交 `NewCache` 的配置校验结果。
 
 ## 配置选项
 
@@ -137,9 +153,13 @@ cache := multi.NewBuilder().
 自定义 NotFound 判断（例如集成 GORM）
 
 ```go
-import "gorm.io/gorm"
+import (
+    "errors"
 
-cache := multi.NewBuilder().
+    "gorm.io/gorm"
+)
+
+cache, err := multi.NewBuilder().
     WithLocal(localCache, 10*time.Minute).
     WithRedis(redisCache, 60*time.Minute).
     WithIsNotFound(func(err error) bool {
@@ -147,6 +167,9 @@ cache := multi.NewBuilder().
                errors.Is(err, multi.ErrNotFound)
     }).
     Build()
+if err != nil {
+    panic(err)
+}
 ```
 
 ### WithOnError
@@ -154,12 +177,12 @@ cache := multi.NewBuilder().
 错误监控和日志
 
 ```go
-cache := multi.NewBuilder().
+cache, err := multi.NewBuilder().
     WithLocal(localCache, 10*time.Minute).
     WithRedis(redisCache, 60*time.Minute).
     WithOnError(func(ctx context.Context, layer, op, key string, err error) {
         // 打日志
-        log.Printf("缓存错误: layer=%s op=%s key=%s err=%v", layer, op, key, err)
+        log.Printf("Cache error: layer=%s op=%s key=%s err=%v", layer, op, key, err)
 
         // 打点监控
         metrics.Incr("cache.error", map[string]string{
@@ -168,6 +191,9 @@ cache := multi.NewBuilder().
         })
     }).
     Build()
+if err != nil {
+    panic(err)
+}
 ```
 
 ### WithSkipBackfill
@@ -175,12 +201,37 @@ cache := multi.NewBuilder().
 跳过回填（减少写入，但降低缓存命中率）
 
 ```go
-cache := multi.NewBuilder().
+cache, err := multi.NewBuilder().
     WithLocal(localCache, 10*time.Minute).
     WithRedis(redisCache, 60*time.Minute).
     WithSkipBackfill(true).  // 不回填
     Build()
+if err != nil {
+    panic(err)
+}
 ```
+
+### WithBackfillConcurrency
+
+限制单个 `Cache` 实例同时执行的异步回填任务数，默认值为 4。该值必须大于 0，否则构造函数返回 `ErrInvalidOption`。
+
+```go
+cache, err := multi.NewBuilder().
+    WithLocal(localCache, 10*time.Minute).
+    WithRedis(redisCache, 60*time.Minute).
+    WithBackfillConcurrency(8).
+    WithOnError(func(ctx context.Context, layer, op, key string, err error) {
+        if errors.Is(err, multi.ErrBackfillSaturated) {
+            log.Printf("Cache backfill skipped: key=%s", key)
+        }
+    }).
+    Build()
+if err != nil {
+    panic(err)
+}
+```
+
+当并发槽已满时，当前非关键回填会被跳过，`GetOrLoad` 不会因此阻塞或失败；若配置了 `WithOnError`，回调会收到 `ErrBackfillSaturated`。
 
 ## 高级用法
 
@@ -188,25 +239,31 @@ cache := multi.NewBuilder().
 
 ```go
 // 四层缓存：Local -> Redis -> Memcached -> DB
-cache := multi.NewCache([]multi.LayerConfig{
+cache, err := multi.NewCache([]multi.LayerConfig{
     {Layer: localCache, TTL: 5 * time.Minute, Name: "local"},
     {Layer: redisCache, TTL: 30 * time.Minute, Name: "redis"},
     {Layer: memcachedCache, TTL: 60 * time.Minute, Name: "memcached"},
 })
+if err != nil {
+    panic(err)
+}
 ```
 
 ### 只用两层（Local + Redis，无 DB）
 
 ```go
 // 创建两层缓存
-cache := multi.NewBuilder().
+cache, err := multi.NewBuilder().
     WithLocal(localCache, 10*time.Minute).
     WithRedis(redisCache, 60*time.Minute).
     Build()
+if err != nil {
+    panic(err)
+}
 
 // 使用时可以嵌套调用
 var user User
-err := cache.GetOrLoad(ctx, "user:123", &user,
+err = cache.GetOrLoad(ctx, "user:123", &user,
     func(ctx context.Context) (any, error) {
         // 这里可以再调用另一个 cache 或直接返回数据
         return fetchFromAPI(ctx, 123)

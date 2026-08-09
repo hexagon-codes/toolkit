@@ -25,6 +25,7 @@ package main
 import (
     "context"
     "crypto/tls"
+    "errors"
     "os"
     "time"
 
@@ -64,10 +65,11 @@ func main() {
     redisCache := redis.NewStableCache(rdb)
 
     // 2. Combine into multi-level cache
-    cache := multi.NewCache([]multi.LayerConfig{
+    cache, err := multi.NewCache([]multi.LayerConfig{
         {Layer: localCache, TTL: 10 * time.Minute, Name: "local"},
         {Layer: redisCache, TTL: 60 * time.Minute, Name: "redis"},
     })
+    if err != nil { panic(err) }
 
     // 3. Use (automatically handles three layers: local -> redis -> db)
     var user User
@@ -77,14 +79,14 @@ func main() {
             return findUserByID(ctx, 123)
         },
     )
-    if err == multi.ErrNotFound {
+    if errors.Is(err, multi.ErrNotFound) {
         // Data not found
     } else if err != nil {
         // Other error
     }
 
     // Delete cache (all layers)
-    cache.Del(context.Background(), "user:123")
+    if err := cache.Del(ctx, "user:123"); err != nil { panic(err) }
 }
 
 func findUserByID(context.Context, int) (User, error) {
@@ -95,13 +97,16 @@ func findUserByID(context.Context, int) (User, error) {
 ### Builder Pattern (Recommended)
 
 ```go
-cache := multi.NewBuilder().
+cache, err := multi.NewBuilder().
     WithLocal(localCache, 10*time.Minute).
     WithRedis(redisCache, 60*time.Minute).
     WithOnError(func(ctx context.Context, layer, op, key string, err error) {
         log.Printf("Cache error: layer=%s op=%s key=%s err=%v", layer, op, key, err)
     }).
     Build()
+if err != nil {
+    panic(err)
+}
 ```
 
 ## How It Works
@@ -125,10 +130,21 @@ cache := multi.NewBuilder().
 ### Del Flow
 
 ```
-Delete cache from all layers (concurrent execution)
+Delete from each layer and join every returned error
 ├─ Local.Del("user:123")
 └─ Redis.Del("user:123")
 ```
+
+## Construction and Configuration Errors
+
+Both `NewCache(layers, opts...)` and `Builder.Build()` return `(*Cache, error)`. Callers must handle the error before using the cache. Use `errors.Is` to distinguish these configuration errors:
+
+- No cache layers: `ErrNoLayers`
+- A nil cache layer, including a typed nil: `ErrNilLayer`
+- A nil Option, `WithIsNotFound(nil)`, `WithBackfillConcurrency(0)`, or an error returned by a custom Option: `ErrInvalidOption`
+- Calling `Build` on a nil `*Builder`: `ErrNilBuilder`
+
+An error returned by a custom Option remains in the error chain together with `ErrInvalidOption`. Builder forwards the configuration validation result from `NewCache` unchanged.
 
 ## Configuration Options
 
@@ -137,9 +153,13 @@ Delete cache from all layers (concurrent execution)
 Custom NotFound check (e.g., integrating with GORM)
 
 ```go
-import "gorm.io/gorm"
+import (
+    "errors"
 
-cache := multi.NewBuilder().
+    "gorm.io/gorm"
+)
+
+cache, err := multi.NewBuilder().
     WithLocal(localCache, 10*time.Minute).
     WithRedis(redisCache, 60*time.Minute).
     WithIsNotFound(func(err error) bool {
@@ -147,6 +167,9 @@ cache := multi.NewBuilder().
                errors.Is(err, multi.ErrNotFound)
     }).
     Build()
+if err != nil {
+    panic(err)
+}
 ```
 
 ### WithOnError
@@ -154,7 +177,7 @@ cache := multi.NewBuilder().
 Error monitoring and logging
 
 ```go
-cache := multi.NewBuilder().
+cache, err := multi.NewBuilder().
     WithLocal(localCache, 10*time.Minute).
     WithRedis(redisCache, 60*time.Minute).
     WithOnError(func(ctx context.Context, layer, op, key string, err error) {
@@ -168,6 +191,9 @@ cache := multi.NewBuilder().
         })
     }).
     Build()
+if err != nil {
+    panic(err)
+}
 ```
 
 ### WithSkipBackfill
@@ -175,12 +201,37 @@ cache := multi.NewBuilder().
 Skip backfilling (reduces writes but lowers cache hit rate)
 
 ```go
-cache := multi.NewBuilder().
+cache, err := multi.NewBuilder().
     WithLocal(localCache, 10*time.Minute).
     WithRedis(redisCache, 60*time.Minute).
     WithSkipBackfill(true).  // No backfill
     Build()
+if err != nil {
+    panic(err)
+}
 ```
+
+### WithBackfillConcurrency
+
+Limits the number of asynchronous backfill tasks running concurrently for one `Cache` instance. The default is 4. The value must be greater than zero, or construction returns `ErrInvalidOption`.
+
+```go
+cache, err := multi.NewBuilder().
+    WithLocal(localCache, 10*time.Minute).
+    WithRedis(redisCache, 60*time.Minute).
+    WithBackfillConcurrency(8).
+    WithOnError(func(ctx context.Context, layer, op, key string, err error) {
+        if errors.Is(err, multi.ErrBackfillSaturated) {
+            log.Printf("Cache backfill skipped: key=%s", key)
+        }
+    }).
+    Build()
+if err != nil {
+    panic(err)
+}
+```
+
+When all slots are occupied, the current non-critical backfill is skipped without blocking or failing `GetOrLoad`. If `WithOnError` is configured, the callback receives `ErrBackfillSaturated`.
 
 ## Advanced Usage
 
@@ -188,25 +239,31 @@ cache := multi.NewBuilder().
 
 ```go
 // Four-layer cache: Local -> Redis -> Memcached -> DB
-cache := multi.NewCache([]multi.LayerConfig{
+cache, err := multi.NewCache([]multi.LayerConfig{
     {Layer: localCache, TTL: 5 * time.Minute, Name: "local"},
     {Layer: redisCache, TTL: 30 * time.Minute, Name: "redis"},
     {Layer: memcachedCache, TTL: 60 * time.Minute, Name: "memcached"},
 })
+if err != nil {
+    panic(err)
+}
 ```
 
 ### Two Layers Only (Local + Redis, No DB)
 
 ```go
 // Create two-layer cache
-cache := multi.NewBuilder().
+cache, err := multi.NewBuilder().
     WithLocal(localCache, 10*time.Minute).
     WithRedis(redisCache, 60*time.Minute).
     Build()
+if err != nil {
+    panic(err)
+}
 
 // Can nest calls when using
 var user User
-err := cache.GetOrLoad(ctx, "user:123", &user,
+err = cache.GetOrLoad(ctx, "user:123", &user,
     func(ctx context.Context) (any, error) {
         // Can call another cache here or return data directly
         return fetchFromAPI(ctx, 123)

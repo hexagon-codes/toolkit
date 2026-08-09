@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"sync"
 	"time"
 )
 
@@ -31,6 +30,18 @@ var (
 
 	// ErrNilLayer 缓存层实例为 nil
 	ErrNilLayer = errors.New("multi-cache: layer instance is nil")
+
+	// ErrBackfillSaturated 表示异步回填并发槽已满，本次非关键回填被跳过。
+	ErrBackfillSaturated = errors.New("multi-cache: backfill concurrency is saturated")
+
+	// ErrInvalidOption 表示缓存选项无效。
+	ErrInvalidOption = errors.New("multi-cache: invalid option")
+
+	// ErrNilBuilder 表示构建器为 nil。
+	ErrNilBuilder = errors.New("multi-cache: builder must not be nil")
+
+	// ErrInvalidContext 表示调用方传入了 nil context。
+	ErrInvalidContext = errors.New("multi-cache: context must not be nil")
 )
 
 // Layer 缓存层接口（本地缓存和 Redis 缓存都实现了这个接口）
@@ -59,10 +70,13 @@ type LayerConfig struct {
 // 示例：
 //
 //	// 创建多层缓存
-//	cache := multi.NewCache(
+//	cache, err := multi.NewCache([]multi.LayerConfig{
 //	    multi.LayerConfig{Layer: localCache, TTL: 10 * time.Minute, Name: "local"},
 //	    multi.LayerConfig{Layer: redisCache, TTL: 60 * time.Minute, Name: "redis"},
-//	)
+//	})
+//	if err != nil {
+//	    return err
+//	}
 //
 //	// 使用（自动处理三层：local -> redis -> db）
 //	var user User
@@ -70,8 +84,9 @@ type LayerConfig struct {
 //	    return db.FindUserByID(ctx, 123)
 //	})
 type Cache struct {
-	layers []LayerConfig
-	opts   Options
+	layers        []LayerConfig
+	opts          Options
+	backfillSlots chan struct{}
 }
 
 // Options 多层缓存配置
@@ -85,46 +100,80 @@ type Options struct {
 	// SkipBackfill 是否跳过回填（默认 false，即会回填）
 	// 设置为 true 可以减少写入次数，但会降低缓存命中率
 	SkipBackfill bool
+
+	// BackfillConcurrency 限制单个 Cache 实例的异步回填并发数。
+	BackfillConcurrency int
 }
 
-type Option func(*Options)
+// Option 配置多级缓存行为。
+type Option func(*Options) error
 
 func defaultOptions() Options {
 	return Options{
 		IsNotFound: func(err error) bool {
 			return errors.Is(err, ErrNotFound)
 		},
-		OnError:      nil,
-		SkipBackfill: false,
+		OnError:             nil,
+		SkipBackfill:        false,
+		BackfillConcurrency: defaultBackfillConcurrency,
 	}
 }
 
-func applyOptions(opts ...Option) Options {
+func applyOptions(opts ...Option) (Options, error) {
 	o := defaultOptions()
-	for _, fn := range opts {
-		if fn != nil {
-			fn(&o)
+	for index, fn := range opts {
+		if fn == nil {
+			return Options{}, fmt.Errorf("%w: option %d must not be nil", ErrInvalidOption, index)
+		}
+		if err := fn(&o); err != nil {
+			return Options{}, fmt.Errorf("%w: option %d: %w", ErrInvalidOption, index, err)
 		}
 	}
 	if o.IsNotFound == nil {
-		o.IsNotFound = func(err error) bool { return errors.Is(err, ErrNotFound) }
+		return Options{}, fmt.Errorf("%w: not-found predicate must not be nil", ErrInvalidOption)
 	}
-	return o
+	if o.BackfillConcurrency <= 0 {
+		return Options{}, fmt.Errorf("%w: backfill concurrency must be greater than zero", ErrInvalidOption)
+	}
+	return o, nil
 }
 
 // WithIsNotFound 设置 NotFound 判断函数
 func WithIsNotFound(fn func(err error) bool) Option {
-	return func(o *Options) { o.IsNotFound = fn }
+	return func(o *Options) error {
+		if fn == nil {
+			return errors.New("not-found predicate must not be nil")
+		}
+		o.IsNotFound = fn
+		return nil
+	}
 }
 
 // WithOnError 设置错误回调
 func WithOnError(fn func(ctx context.Context, layer string, op string, key string, err error)) Option {
-	return func(o *Options) { o.OnError = fn }
+	return func(o *Options) error {
+		o.OnError = fn
+		return nil
+	}
 }
 
 // WithSkipBackfill 跳过回填（减少写入次数，但降低缓存命中率）
 func WithSkipBackfill(skip bool) Option {
-	return func(o *Options) { o.SkipBackfill = skip }
+	return func(o *Options) error {
+		o.SkipBackfill = skip
+		return nil
+	}
+}
+
+// WithBackfillConcurrency 设置单个多级缓存实例的异步回填并发上限。
+func WithBackfillConcurrency(concurrency int) Option {
+	return func(o *Options) error {
+		if concurrency <= 0 {
+			return errors.New("backfill concurrency must be greater than zero")
+		}
+		o.BackfillConcurrency = concurrency
+		return nil
+	}
 }
 
 // NewCache 创建多层缓存
@@ -133,24 +182,44 @@ func WithSkipBackfill(skip bool) Option {
 //   - layers: 缓存层配置（按优先级从高到低排列，如 local -> redis）
 //   - opts: 可选配置
 //
-// 如果 layers 中包含 nil Layer，会 panic。
-//
 // 示例：
 //
-//	cache := multi.NewCache(
+//	cache, err := multi.NewCache([]multi.LayerConfig{
 //	    multi.LayerConfig{Layer: localCache, TTL: 10 * time.Minute, Name: "local"},
 //	    multi.LayerConfig{Layer: redisCache, TTL: 60 * time.Minute, Name: "redis"},
-//	)
-func NewCache(layers []LayerConfig, opts ...Option) *Cache {
-	// 校验 layers 中是否包含 nil Layer
-	for i, l := range layers {
-		if l.Layer == nil {
-			panic(fmt.Sprintf("multi-cache: layer[%d] (%s) has nil Layer instance", i, l.Name))
+//	})
+func NewCache(layers []LayerConfig, opts ...Option) (*Cache, error) {
+	if len(layers) == 0 {
+		return nil, ErrNoLayers
+	}
+	layerCopy := make([]LayerConfig, len(layers))
+	for index, layer := range layers {
+		if isNilLayer(layer.Layer) {
+			return nil, fmt.Errorf("%w: layer %d (%q)", ErrNilLayer, index, layer.Name)
 		}
+		layerCopy[index] = layer
+	}
+	options, err := applyOptions(opts...)
+	if err != nil {
+		return nil, err
 	}
 	return &Cache{
-		layers: layers,
-		opts:   applyOptions(opts...),
+		layers:        layerCopy,
+		opts:          options,
+		backfillSlots: make(chan struct{}, options.BackfillConcurrency),
+	}, nil
+}
+
+func isNilLayer(layer Layer) bool {
+	if layer == nil {
+		return true
+	}
+	value := reflect.ValueOf(layer)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
 	}
 }
 
@@ -179,6 +248,9 @@ func (c *Cache) GetOrLoad(
 	dest any,
 	loader func(ctx context.Context) (any, error),
 ) error {
+	if ctx == nil {
+		return ErrInvalidContext
+	}
 	if key == "" {
 		return ErrInvalidKey
 	}
@@ -190,7 +262,7 @@ func (c *Cache) GetOrLoad(
 	}
 	// dest 必须是非 nil 的指针
 	dv := reflect.ValueOf(dest)
-	if dv.Kind() != reflect.Ptr || dv.IsNil() {
+	if dv.Kind() != reflect.Pointer || dv.IsNil() {
 		return ErrInvalidDest
 	}
 	if len(c.layers) == 0 {
@@ -246,80 +318,63 @@ func (c *Cache) GetOrLoad(
 // backfillTimeout 回填操作的超时时间
 const backfillTimeout = 5 * time.Second
 
+const defaultBackfillConcurrency = 4
+
 // backfillAll 回填到所有层（异步执行，不阻塞主流程）
 func (c *Cache) backfillAll(ctx context.Context, key string, value any) {
-	// 深拷贝 value，防止异步回填与调用方竞争
-	data, err := json.Marshal(value)
-	if err != nil {
-		return
-	}
-	var snapshot any
-	if err := json.Unmarshal(data, &snapshot); err != nil {
-		return
-	}
-	// 异步执行回填，不阻塞主流程
-	go func() {
-		// 使用 WithoutCancel 脱离原始请求的取消信号，但保留 trace/value 等上下文信息
-		// 这样即使原始请求被取消，回填操作仍能完成，且链路追踪不会丢失
-		backfillCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), backfillTimeout)
-		defer cancel() // 确保 cancel 总是被调用
-
-		var wg sync.WaitGroup
-		for _, layer := range c.layers {
-			wg.Add(1)
-			// 使用 goroutine 异步回填
-			go func(l LayerConfig) {
-				defer wg.Done()
-				// 创建一个临时变量接收数据（避免并发问题）
-				var temp any
-				err := l.Layer.GetOrLoad(backfillCtx, key, l.TTL, &temp, func(ctx context.Context) (any, error) {
-					return snapshot, nil
-				})
-				if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
-					c.onError(backfillCtx, l.Name, "backfill", key, err)
-				}
-			}(layer)
-		}
-
-		wg.Wait()
-	}()
+	c.scheduleBackfill(ctx, key, value, c.layers)
 }
 
 // backfillRange 回填到指定范围的层（异步执行，不阻塞主流程）
 // 将 value 回填到 [start, end) 范围内的层
 func (c *Cache) backfillRange(ctx context.Context, key string, value any, start, end int) {
-	// 深拷贝 value，防止异步回填与调用方竞争
+	if start < 0 || end > len(c.layers) || start >= end {
+		return
+	}
+	c.scheduleBackfill(ctx, key, value, c.layers[start:end])
+}
+
+func (c *Cache) scheduleBackfill(ctx context.Context, key string, value any, layers []LayerConfig) {
+	// 深拷贝 value，防止异步回填与调用方竞争。
 	data, err := json.Marshal(value)
 	if err != nil {
+		c.onError(ctx, "multi", "backfill_snapshot", key, err)
 		return
 	}
 	var snapshot any
 	if err := json.Unmarshal(data, &snapshot); err != nil {
+		c.onError(ctx, "multi", "backfill_snapshot", key, err)
 		return
 	}
-	// 异步执行回填，不阻塞主流程
+
+	select {
+	case c.backfillSlots <- struct{}{}:
+	case <-ctx.Done():
+		return
+	default:
+		c.onError(ctx, "multi", "backfill", key, ErrBackfillSaturated)
+		return
+	}
+
+	layers = append([]LayerConfig(nil), layers...)
 	go func() {
+		defer func() { <-c.backfillSlots }()
 		// 使用 WithoutCancel 脱离原始请求的取消信号，但保留 trace/value 等上下文信息
 		backfillCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), backfillTimeout)
-		defer cancel() // 确保 cancel 总是被调用
+		defer cancel()
 
-		var wg sync.WaitGroup
-		for i := start; i < end; i++ {
-			layer := c.layers[i]
-			wg.Add(1)
-			go func(l LayerConfig) {
-				defer wg.Done()
-				var temp any
-				err := l.Layer.GetOrLoad(backfillCtx, key, l.TTL, &temp, func(ctx context.Context) (any, error) {
-					return snapshot, nil
-				})
-				if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
-					c.onError(backfillCtx, l.Name, "backfill", key, err)
-				}
-			}(layer)
+		for _, layer := range layers {
+			var temp any
+			err := layer.Layer.GetOrLoad(backfillCtx, key, layer.TTL, &temp, func(context.Context) (any, error) {
+				return snapshot, nil
+			})
+			if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+				c.onError(backfillCtx, layer.Name, "backfill", key, err)
+			}
+			if backfillCtx.Err() != nil {
+				return
+			}
 		}
-
-		wg.Wait()
 	}()
 }
 
@@ -329,19 +384,22 @@ func (c *Cache) backfillRange(ctx context.Context, key string, value any, start,
 //
 //	cache.Del(ctx, "user:123", "user:456")
 func (c *Cache) Del(ctx context.Context, keys ...string) error {
+	if ctx == nil {
+		return ErrInvalidContext
+	}
 	if len(keys) == 0 {
 		return nil
 	}
 
-	var lastErr error
+	var deleteErr error
 	for _, layer := range c.layers {
 		err := layer.Layer.Del(ctx, keys...)
 		if err != nil {
 			c.onError(ctx, layer.Name, "del", keys[0], err)
-			lastErr = err
+			deleteErr = errors.Join(deleteErr, err)
 		}
 	}
-	return lastErr
+	return deleteErr
 }
 
 // LayerCount 返回缓存层数
@@ -379,14 +437,14 @@ func copyValue(src, dst any) error {
 	dstVal := reflect.ValueOf(dst)
 
 	// dst 必须是指针
-	if dstVal.Kind() != reflect.Ptr || dstVal.IsNil() {
+	if dstVal.Kind() != reflect.Pointer || dstVal.IsNil() {
 		return ErrInvalidDest
 	}
 
 	dstElem := dstVal.Elem()
 
 	// 如果 src 是指针，获取其元素
-	if srcVal.Kind() == reflect.Ptr {
+	if srcVal.Kind() == reflect.Pointer {
 		if srcVal.IsNil() {
 			return nil
 		}
