@@ -2,134 +2,100 @@
 
 # Asynq Queue Package
 
-## Features
+This is a production-oriented wrapper around `hibiken/asynq`. A Manager owns its Asynq client, worker, scheduler, inspector, and the dedicated Redis client used by polling and migration leases.
 
-- ✅ Task enqueue and consumption
-- ✅ Scheduled task dispatching
-- ✅ Task retry and dead letter queue
-- ✅ Circuit breaker and backpressure control
-- ✅ Task state machine management
-- ✅ Prometheus metrics monitoring
-- ✅ Task polling lock mechanism
-- ✅ Health check
-- ✅ Middleware support
+## Redis connection contract
 
-## Dependencies
+The package accepts only `infra/redisconn.Config`. It no longer duplicates address or credential fields, and it never guesses topology from the number of addresses.
 
-### Required Interfaces
+| Mode | Required fields | Meaning |
+|---|---|---|
+| `redisconn.ModeSingle` | exactly 1 `Addrs` entry | Standalone Redis or a cloud proxy endpoint |
+| `redisconn.ModeCluster` | at least 1 `Addrs` entry | One seed still creates a Cluster client |
+| `redisconn.ModeSentinel` | at least 1 `Addrs` entry and `MasterName` | Primary discovery through Sentinel |
 
-1. **ConfigProvider** - Configuration interface
-   - `GetRedisAddrs() []string` - Redis address list
-   - `GetRedisPassword() string` - Redis password
-   - `GetRedisUsername() string` - Redis username (Redis 6.0+ ACL)
-   - `GetConcurrency() int` - Worker concurrency
-   - `GetQueuePrefix() string` - Queue prefix (multi-environment isolation)
-   - `IsPollingEnabled() bool` - Whether polling is enabled
-   - `IsRedisEnabled() bool` - Whether Redis is enabled
+Redis capability and project policy are intentionally distinct. Redis 6+ still supports single-argument `AUTH password` for the default user. This project rejects password-only static configuration to eliminate ambiguous deployments: username and password must either both be empty or both be non-empty. Invalid credentials fail validation before startup.
 
-2. **Logger** - Logger interface
-   - `Log(msg string)` - Normal log
-   - `LogSkip(skip int, msg string)` - Log with call stack skip
-   - `Error(msg string)` - Error log
-   - `ErrorSkip(skip int, msg string)` - Error log with call stack skip
+Sentinel has two independent credential domains:
 
-### Usage
+- `DataCredentials` authenticate to Redis data nodes.
+- `SentinelCredentials` authenticate to Sentinel; they must not be replaced by data-node credentials.
 
-#### Option 1: Use Default Implementation (Quick Start)
+TLS, DB, timeouts, retries, and pool settings come from the same `redisconn.Config` for every client owned by the Manager.
+
+## Quick start
 
 ```go
-import "github.com/hexagon-codes/toolkit/infra/queue/asynq"
+startupCtx, cancelStartup := context.WithTimeout(context.Background(), 5*time.Second)
+runCtx, cancelRun := context.WithCancel(context.Background())
+defer cancelRun()
 
-// Use default configuration
-config := &asynq.DefaultConfigProvider{
-    RedisAddrs:     []string{"localhost:6379"},
-    RedisPassword:  "",
-    Concurrency:    10,
-    PollingEnabled: true,
-    RedisEnabled:   true,
+redisConfig := redisconn.DefaultConfig(
+    redisconn.ModeSingle,
+    "redis.internal:6379",
+)
+redisConfig.DataCredentials = redisconn.Credentials{
+    Username: "queue-worker",
+    Password: os.Getenv("REDIS_PASSWORD"),
+}
+redisConfig.TLSConfig = &tls.Config{
+    MinVersion: tls.VersionTLS12,
+    ServerName: "redis.internal",
 }
 
-// Use stdout logger
-logger := &asynq.StdLogger{}
+config := asynq.DefaultConfig(redisConfig)
+config.Concurrency = 20
+config.QueuePrefix = "prod:"
+
+manager, err := asynq.NewManager(startupCtx, config)
+if err != nil { // includes validation, network, and authentication failures
+    return err
+}
+cancelStartup()
+defer manager.Stop()
+
+manager.RegisterHandler("email:send", handleEmail)
+if err := manager.Start(runCtx); err != nil {
+    return err
+}
+
+_, err = manager.EnqueueTask(
+    runCtx,
+	"email:send",
+	payload,
+	hibasynq.Queue(asynq.QueueHigh),
+)
 ```
 
-#### Option 2: Adapt to Existing Project
+`NewManager` performs a Redis `PING` before it returns. Wrong credentials, unreachable endpoints, and invalid topology are reported synchronously instead of producing a false-success background startup.
 
-If you have an existing configuration and logging system, create adapters:
+## Lifecycle and concurrency
+
+- `Start` synchronously starts the worker and scheduler and rolls back resources created by a failed attempt.
+- `Stop` is idempotent and closes every Asynq/Redis client owned by the Manager, even if `Start` was never called.
+- `InitManager` installs a process-wide singleton. Repeated initialization returns `ErrManagerAlreadyInitialized`; it never silently keeps the first configuration.
+- Queue prefixes are Manager-scoped. `Queue(...)` arguments passed to `Manager.Enqueue`, `EnqueueTask`, and `RegisterSchedule`, along with `Config.Queues` keys, must be unnamespaced base names. The Manager applies its prefix and verifies that the resolved queue belongs to its configuration. Omitting Queue selects `QueueDefault`; if default is not configured, the operation returns `ErrQueueNotFound`. The Manager's final routing option overrides Queue options embedded in a Task.
+- Use `manager.QueueName(base)` only for native integrations such as Inspector or Asynqmon that require the actual Redis queue name. Direct `GetClient()` use is an explicit escape hatch and bypasses Manager namespace validation.
+
+## Safe leases
+
+Polling and migration locks use the same token-based Redis lease primitive:
 
 ```go
-// Adapter example
-type MyConfigAdapter struct {
-    // your config struct
+lease, acquired, err := manager.AcquirePollingLease(ctx, taskID)
+if err != nil {
+    return err // Redis/authentication errors fail closed
 }
-
-func (c *MyConfigAdapter) GetRedisAddrs() []string {
-    return common.GetRedisAddrs() // adapt to your config
+if !acquired {
+    return nil // another worker owns the lease
 }
-
-func (c *MyConfigAdapter) GetRedisPassword() string {
-    return common.GetRedisPassword()
-}
-
-// ... implement other methods
-
-type MyLoggerAdapter struct{}
-
-func (l *MyLoggerAdapter) Log(msg string) {
-    common.SysLog(msg) // adapt to your logger
-}
-
-func (l *MyLoggerAdapter) Error(msg string) {
-    common.SysError(msg)
-}
-
-// ... implement other methods
+defer lease.Release(context.WithoutCancel(ctx))
 ```
 
-#### Option 3: Custom Implementation
+`Refresh` and `Release` execute compare-token Lua scripts, so an expired owner cannot extend or delete a replacement owner's lock. Polling and migration internal base keys always use `prefix + base` for a non-empty `QueuePrefix`, even when the strings overlap. Different prefixes can own leases independently, while identical prefixes still contend. Migration automatically refreshes its lease; refresh failure cancels the migration context and returns an error.
 
-If you have specific requirements, you can fully customize the configuration and logging implementation.
+## Optional logging adapter
 
-## File Overview
+Configuration is injected directly through `Config`; there is no global `ConfigProvider` or second global Redis-client chain. Logging can still be adapted through `SetLogger` or `manager.SetLogger`.
 
-| File | Description |
-|------|-------------|
-| `config.go` | Configuration and logger interface definitions |
-| `manager.go` | Asynq manager core implementation |
-| `task.go` | Task builder and helper functions |
-| `task_types.go` | Task type definitions |
-| `init.go` | Polling system initialization |
-| `queues.go` | Queue configuration management |
-| `adapter.go` | Adapters and helper functions |
-| `middleware.go` | Middleware implementation |
-| `metrics.go` | Prometheus metrics |
-| `health.go` | Health check |
-| `circuit_breaker.go` | Circuit breaker |
-| `backpressure.go` | Backpressure control |
-| `dead_letter.go` | Dead letter queue management |
-| `state_machine.go` | Task state machine |
-| `polling_lock.go` | Polling distributed lock |
-| `task_tracer.go` | Task tracing |
-| `errors.go` | Error definitions |
-| `testing_helpers.go` | Test helper functions |
-
-## Current Status
-
-✅ **Interface refactoring complete**
-
-This package is fully decoupled from external dependencies and can be used directly in any Go project:
-- All configuration is provided through the `ConfigProvider` interface
-- All logging is output through the `Logger` interface
-- Provides `DefaultConfigProvider` and `StdLogger` as ready-to-use default implementations
-- Task types and queue names are generic definitions that can be customized as needed
-
-### Next Steps
-
-1. Add complete usage examples to `examples/infra/`
-2. Add unit tests
-3. Add performance benchmarks
-4. Improve API documentation
-
-## Contributing
-
-PRs to help improve this package are welcome!
+See [USAGE.en.md](USAGE.en.md) for connection modes, Polling, queues, and lease examples.

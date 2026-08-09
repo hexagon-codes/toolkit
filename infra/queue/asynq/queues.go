@@ -3,60 +3,39 @@ package asynq
 import (
 	"errors"
 	"fmt"
-	"github.com/hibiken/asynq"
+	"sort"
+	"strings"
 	"time"
+
+	"github.com/hibiken/asynq"
 )
 
 // =========================================
 // 队列定义
 // 统一管理所有队列名称和优先级
 // =========================================
-// 基础队列名称（内部使用）
+// Queue base names are immutable. Apply an environment prefix through
+// Config.QueueName or Manager.QueueName; package state is never rewritten.
 const (
-	baseQueueCritical   = "critical"
-	baseQueueHigh       = "high"
-	baseQueueDefault    = "default"
-	baseQueueScheduled  = "scheduled"
-	baseQueueLow        = "low"
-	baseQueueDeadLetter = "dead_letter"
-)
-
-// 队列名称变量（带环境前缀，在 init 时初始化）
-var (
 	// QueueCritical 关键队列（最高优先级）
 	// 用于：紧急任务、实时处理等
-	QueueCritical = baseQueueCritical
+	QueueCritical = "critical"
 	// QueueHigh 高优先级队列
 	// 用于：需要快速响应的任务
-	QueueHigh = baseQueueHigh
+	QueueHigh = "high"
 	// QueueDefault 默认队列
 	// 用于：一般异步任务
-	QueueDefault = baseQueueDefault
+	QueueDefault = "default"
 	// QueueScheduled 定时任务队列
 	// 用于：延迟执行的任务
-	QueueScheduled = baseQueueScheduled
+	QueueScheduled = "scheduled"
 	// QueueLow 低优先级队列
 	// 用于：后台任务、批量处理等
-	QueueLow = baseQueueLow
+	QueueLow = "low"
 	// QueueDeadLetter 死信队列
 	// 用于：超过最大重试次数的失败任务，支持人工介入
-	QueueDeadLetter = baseQueueDeadLetter
+	QueueDeadLetter = "dead_letter"
 )
-
-// InitQueueNames 初始化队列名称（添加环境前缀）
-// 必须在使用队列之前调用（通常在 main.go 初始化时）
-func InitQueueNames() {
-	prefix := GetConfigProvider().GetQueuePrefix()
-	if prefix == "" {
-		return // 无前缀，使用默认队列名
-	}
-	QueueCritical = prefix + baseQueueCritical
-	QueueHigh = prefix + baseQueueHigh
-	QueueDefault = prefix + baseQueueDefault
-	QueueScheduled = prefix + baseQueueScheduled
-	QueueLow = prefix + baseQueueLow
-	QueueDeadLetter = prefix + baseQueueDeadLetter
-}
 
 // 预定义任务类型前缀（示例）
 // 使用者应该在自己的项目中定义具体的任务类型
@@ -115,14 +94,113 @@ func FormatRetryTaskID(taskID string) string {
 // DefaultQueues 默认队列配置
 // 数值表示优先级权重，权重越高越优先处理
 func DefaultQueues() map[string]int {
+	return defaultQueuesForPrefix("")
+}
+
+func defaultQueuesForPrefix(prefix string) map[string]int {
 	return map[string]int{
-		QueueCritical:   10, // 关键任务，最高优先级
-		QueueHigh:       6,  // 高优先级任务
-		QueueDefault:    4,  // 一般任务
-		QueueScheduled:  3,  // 定时任务
-		QueueLow:        1,  // 低优先级
-		QueueDeadLetter: 1,  // 死信队列（人工处理）
+		queueName(prefix, QueueCritical):   10, // 关键任务，最高优先级
+		queueName(prefix, QueueHigh):       6,  // 高优先级任务
+		queueName(prefix, QueueDefault):    4,  // 一般任务
+		queueName(prefix, QueueScheduled):  3,  // 定时任务
+		queueName(prefix, QueueLow):        1,  // 低优先级
+		queueName(prefix, QueueDeadLetter): 1,  // 死信队列（人工处理）
 	}
+}
+
+func prefixQueues(queues map[string]int, prefix string) (map[string]int, error) {
+	prefixed := make(map[string]int, len(queues))
+	for queue, priority := range queues {
+		if strings.TrimSpace(queue) == "" {
+			return nil, fmt.Errorf("%w: queue name must not be blank", ErrInvalidConfig)
+		}
+		if priority <= 0 {
+			return nil, fmt.Errorf(
+				"%w: queue %q priority must be positive",
+				ErrInvalidConfig,
+				queue,
+			)
+		}
+		queue = queueName(prefix, queue)
+		if _, exists := prefixed[queue]; exists {
+			return nil, fmt.Errorf("%w: queue prefix creates duplicate %q", ErrInvalidConfig, queue)
+		}
+		prefixed[queue] = priority
+	}
+	return prefixed, nil
+}
+
+func queueName(prefix, base string) string {
+	if prefix == "" {
+		return base
+	}
+	return prefix + base
+}
+
+// QueueName applies this configuration's environment prefix to a base name.
+func (c Config) QueueName(base string) string {
+	return queueName(c.QueuePrefix, base)
+}
+
+// QueueName applies this manager's immutable environment prefix to a base name.
+func (m *Manager) QueueName(base string) string {
+	return m.config.QueueName(base)
+}
+
+// QueueNames returns an independent, deterministic snapshot of configured
+// queue names.
+func (m *Manager) QueueNames() []string {
+	names := make([]string, 0, len(m.config.Queues))
+	for name := range m.config.Queues {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// resolveQueue treats queue as an unnamespaced base name and resolves it to
+// one of this manager's configured queues. Callers cannot route work into a
+// different manager's namespace.
+func (m *Manager) resolveQueue(base string) (string, error) {
+	actual := m.QueueName(base)
+	if _, ok := m.config.Queues[actual]; !ok {
+		return "", fmt.Errorf(
+			"%w: base queue %q resolves to unconfigured queue %q",
+			ErrQueueNotFound,
+			base,
+			actual,
+		)
+	}
+	return actual, nil
+}
+
+// canonicalizeQueueOptions makes Manager the final owner of task routing.
+// The last explicit Queue option is interpreted as a base name; omission uses
+// QueueDefault. Appending the resolved option also overrides Task-embedded
+// queue options, which Asynq merges before Enqueue options.
+func (m *Manager) canonicalizeQueueOptions(opts []asynq.Option) ([]asynq.Option, error) {
+	base := QueueDefault
+	normalized := make([]asynq.Option, 0, len(opts)+1)
+	for _, opt := range opts {
+		if opt == nil {
+			normalized = append(normalized, opt)
+			continue
+		}
+		if opt.Type() != asynq.QueueOpt {
+			normalized = append(normalized, opt)
+			continue
+		}
+		value, ok := opt.Value().(string)
+		if !ok {
+			return nil, fmt.Errorf("%w: queue option value must be a string", ErrQueueNotFound)
+		}
+		base = value
+	}
+	actual, err := m.resolveQueue(base)
+	if err != nil {
+		return nil, err
+	}
+	return append(normalized, asynq.Queue(actual)), nil
 }
 
 // IsTaskConflictError 检查是否是任务冲突错误

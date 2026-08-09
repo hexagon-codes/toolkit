@@ -1,58 +1,49 @@
-// Package asynq 提供基于 hibiken/asynq 的异步任务队列
+// Package asynq provides a lifecycle-managed task queue based on
+// github.com/hibiken/asynq.
 //
-// 支持任务状态机、带退避策略的重试和死信队列。
+// Redis connection behavior is defined exclusively by redisconn.Config. The
+// topology mode is explicit: a one-seed Cluster remains a Cluster, and
+// Sentinel has independent data-node and Sentinel credentials. Static
+// authentication is either disabled or a complete username/password ACL pair;
+// password-only configuration is intentionally rejected by project policy.
 //
-// 基本用法:
+// A Manager verifies Redis connectivity before construction succeeds:
 //
-//	mgr, _ := asynq.NewManager(&asynq.Config{
-//	    RedisAddrs: []string{"localhost:6379"},
-//	})
-//	defer mgr.Close()
+//	redisConfig := redisconn.DefaultConfig(redisconn.ModeSingle, "redis.internal:6379")
+//	redisConfig.DataCredentials = redisconn.Credentials{
+//		Username: "queue-worker",
+//		Password: password,
+//	}
+//	config := queue.DefaultConfig(redisConfig)
+//	config.QueuePrefix = "prod:"
 //
-//	// 入队任务
-//	task := asynq.NewTask("email:send", payload)
-//	mgr.Enqueue(ctx, task)
+//	startupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+//	manager, err := queue.NewManager(startupCtx, config)
+//	cancel()
+//	if err != nil {
+//		return err
+//	}
+//	defer manager.Stop()
 //
-// 任务处理器:
+//	manager.RegisterHandler("email:send", handleEmail)
+//	if err := manager.Start(ctx); err != nil {
+//		return err
+//	}
+//	_, err = manager.EnqueueTask(
+//		ctx,
+//		"email:send",
+//		payload,
+//		hibasynq.Queue(queue.QueueHigh),
+//	)
 //
-//	mux := asynq.NewServeMux()
-//	mux.HandleFunc("email:send", func(ctx context.Context, task *asynq.Task) error {
-//	    // 处理任务
-//	    return nil
-//	})
+// Start reports worker and scheduler startup errors synchronously. Stop is
+// idempotent and closes every Redis resource owned by the Manager.
+// Queue options passed to Manager APIs are unnamespaced base names. Manager
+// applies QueuePrefix, validates ownership, and supplies the configured
+// default when Queue is omitted. QueueName is reserved for native Inspector
+// integrations that require the resolved Redis queue name.
 //
-// 状态机:
-//
-//	sm := asynq.GetTaskStateMachine()
-//	sm.CanTransition(asynq.StatePending, asynq.EventStart)
-//
-// --- English ---
-//
-// Package asynq provides an async task queue based on hibiken/asynq.
-//
-// Features task state machine, retry with backoff, and dead letter queue.
-//
-// Basic usage:
-//
-//	mgr, _ := asynq.NewManager(&asynq.Config{
-//	    RedisAddrs: []string{"localhost:6379"},
-//	})
-//	defer mgr.Close()
-//
-//	// Enqueue a task
-//	task := asynq.NewTask("email:send", payload)
-//	mgr.Enqueue(ctx, task)
-//
-// Task handler:
-//
-//	mux := asynq.NewServeMux()
-//	mux.HandleFunc("email:send", func(ctx context.Context, task *asynq.Task) error {
-//	    // process task
-//	    return nil
-//	})
-//
-// State machine:
-//
-//	sm := asynq.GetTaskStateMachine()
-//	sm.CanTransition(asynq.StatePending, asynq.EventStart)
+// Polling and migration coordination use token-based Redis leases. Redis and
+// authentication failures fail closed; Refresh and Release use compare-token
+// Lua scripts so a stale owner cannot modify a replacement owner's lock.
 package asynq

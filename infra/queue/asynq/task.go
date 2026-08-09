@@ -3,8 +3,9 @@ package asynq
 import (
 	"context"
 	"encoding/json"
-	"github.com/hibiken/asynq"
 	"time"
+
+	"github.com/hibiken/asynq"
 )
 
 // =========================================
@@ -88,6 +89,10 @@ func (b *TaskBuilder) Retention(d time.Duration) *TaskBuilder {
 
 // Build 构建任务
 func (b *TaskBuilder) Build() (*asynq.Task, error) {
+	return b.build(b.opts...)
+}
+
+func (b *TaskBuilder) build(opts ...asynq.Option) (*asynq.Task, error) {
 	var data []byte
 	var err error
 	if b.payload != nil {
@@ -96,12 +101,12 @@ func (b *TaskBuilder) Build() (*asynq.Task, error) {
 			return nil, err
 		}
 	}
-	return asynq.NewTask(b.taskType, data, b.opts...), nil
+	return asynq.NewTask(b.taskType, data, opts...), nil
 }
 
 // Enqueue 直接入队（使用全局管理器）
 func (b *TaskBuilder) Enqueue(ctx context.Context) (*asynq.TaskInfo, error) {
-	task, err := b.Build()
+	task, err := b.build()
 	if err != nil {
 		return nil, err
 	}
@@ -109,16 +114,16 @@ func (b *TaskBuilder) Enqueue(ctx context.Context) (*asynq.TaskInfo, error) {
 	if manager == nil {
 		return nil, ErrManagerNotInitialized
 	}
-	return manager.Enqueue(ctx, task)
+	return manager.Enqueue(ctx, task, b.opts...)
 }
 
 // EnqueueWith 使用指定管理器入队
 func (b *TaskBuilder) EnqueueWith(ctx context.Context, m *Manager) (*asynq.TaskInfo, error) {
-	task, err := b.Build()
+	task, err := b.build()
 	if err != nil {
 		return nil, err
 	}
-	return m.Enqueue(ctx, task)
+	return m.Enqueue(ctx, task, b.opts...)
 }
 
 // =========================================
@@ -134,7 +139,7 @@ func EnqueueTask(ctx context.Context, taskType string, payload interface{}, opts
 	if err != nil {
 		return nil, err
 	}
-	task := asynq.NewTask(taskType, data, opts...)
+	task := asynq.NewTask(taskType, data)
 	return manager.Enqueue(ctx, task, opts...)
 }
 

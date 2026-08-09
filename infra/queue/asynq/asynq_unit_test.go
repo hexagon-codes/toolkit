@@ -1,11 +1,14 @@
 package asynq
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/hibiken/asynq"
+
+	"github.com/hexagon-codes/toolkit/infra/redisconn"
 )
 
 // =========================================
@@ -300,13 +303,11 @@ func TestNormalizeState(t *testing.T) {
 // =========================================
 
 func TestDefaultConfig(t *testing.T) {
-	cfg := DefaultConfig()
+	redisConfig := redisconn.Config{Mode: redisconn.ModeCluster}
+	cfg := DefaultConfig(redisConfig)
 
-	if cfg == nil {
-		t.Fatal("DefaultConfig returned nil")
-	}
-	if len(cfg.RedisAddrs) != 0 {
-		t.Errorf("expected empty RedisAddrs, got %v", cfg.RedisAddrs)
+	if len(cfg.Redis.Addrs) != 0 {
+		t.Errorf("expected empty Redis Addrs, got %v", cfg.Redis.Addrs)
 	}
 	if cfg.Concurrency != 10 {
 		t.Errorf("expected Concurrency 10, got %d", cfg.Concurrency)
@@ -332,18 +333,19 @@ func TestDefaultConfig(t *testing.T) {
 	}
 }
 
-func TestNewManager_NilConfig(t *testing.T) {
-	_, err := NewManager(nil)
+func TestNewManager_NilContext(t *testing.T) {
+	cfg := DefaultConfig(redisconn.DefaultConfig(redisconn.ModeSingle, "127.0.0.1:6379"))
+	_, err := NewManager(nil, cfg) //nolint:staticcheck // Contract test verifies nil-context rejection.
 	if err == nil {
-		t.Error("expected error for nil config with no redis addrs")
+		t.Error("expected error for nil context")
 	}
 }
 
 func TestNewManager_EmptyRedisAddrs(t *testing.T) {
-	cfg := &Config{
-		RedisAddrs: []string{},
+	cfg := Config{
+		Redis: redisconn.Config{Mode: redisconn.ModeSingle},
 	}
-	_, err := NewManager(cfg)
+	_, err := NewManager(context.Background(), cfg)
 	if err == nil {
 		t.Error("expected error for empty redis addrs")
 	}

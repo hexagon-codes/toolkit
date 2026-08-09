@@ -2,9 +2,13 @@ package asynq
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	hibasynq "github.com/hibiken/asynq"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-	"time"
 )
 
 // =========================================
@@ -113,14 +117,12 @@ var (
 	)
 )
 
-// =========================================
-// Metrics 初始化函数
-// =========================================
-// InitMetrics 初始化所有指标（确保在 /metrics 中显示，即使值为 0）
+// InitMetrics 初始化所有指标（确保在 /metrics 中显示，即使值为 0）。
 // 在 StartMetricsUpdater 启动时调用一次
-func InitMetrics() {
-	// 初始化队列相关 Gauge 指标（所有队列）
-	queues := []string{QueueCritical, QueueHigh, QueueDefault, QueueScheduled, QueueLow, QueueDeadLetter}
+func InitMetrics(queues []string) {
+	if len(queues) == 0 {
+		queues = []string{QueueCritical, QueueHigh, QueueDefault, QueueScheduled, QueueLow, QueueDeadLetter}
+	}
 	for _, queue := range queues {
 		QueueSizeGauge.WithLabelValues(queue).Set(0)
 		ActiveTasksGauge.WithLabelValues(queue).Set(0)
@@ -152,57 +154,65 @@ func InitMetrics() {
 	}
 }
 
-// =========================================
-// Metrics 更新函数
-// =========================================
 // UpdateQueueMetrics 更新队列相关的 metrics（从 Inspector 获取数据）
 // 应该被定时任务定期调用（如每 15 秒）
-func UpdateQueueMetrics(ctx context.Context) error {
-	inspector := GetInspector()
-	if inspector == nil {
-		SystemHealthGauge.Set(0) // 系统不健康
-		ActiveWorkersGauge.Set(0)
-		return nil
+func UpdateQueueMetrics(ctx context.Context, manager *Manager) error {
+	if ctx == nil {
+		return fmt.Errorf("%w: update metrics requires a non-nil context", ErrInvalidContext)
 	}
-	// 获取所有队列信息
-	queues, err := inspector.Queues()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if manager == nil {
+		SystemHealthGauge.Set(0)
+		ActiveWorkersGauge.Set(0)
+		return ErrManagerNotInitialized
+	}
+	queues := manager.QueueNames()
+	err := manager.withInspector(func(inspector *hibasynq.Inspector) error {
+		// 更新活跃 Worker 数量，只统计处理本 Manager 队列的 worker。
+		servers, err := inspector.Servers()
+		if err != nil {
+			return err
+		}
+		totalActiveWorkers := 0
+		for _, server := range servers {
+			for _, worker := range server.ActiveWorkers {
+				if _, configured := manager.config.Queues[worker.Queue]; configured {
+					totalActiveWorkers++
+				}
+			}
+		}
+		ActiveWorkersGauge.Set(float64(totalActiveWorkers))
+		for _, queue := range queues {
+			info, err := configuredQueueInfo(inspector, queue)
+			if err != nil {
+				return fmt.Errorf("inspect queue %q: %w", queue, err)
+			}
+			totalSize := info.Active + info.Pending + info.Scheduled + info.Retry
+			QueueSizeGauge.WithLabelValues(queue).Set(float64(totalSize))
+			ActiveTasksGauge.WithLabelValues(queue).Set(float64(info.Active))
+			PendingTasksGauge.WithLabelValues(queue).Set(float64(info.Pending))
+			ScheduledTasksGauge.WithLabelValues(queue).Set(float64(info.Scheduled))
+			RetryTasksGauge.WithLabelValues(queue).Set(float64(info.Retry))
+			archivedInfo, err := inspector.ListArchivedTasks(queue)
+			if errors.Is(err, hibasynq.ErrQueueNotFound) {
+				DeadTasksGauge.WithLabelValues(queue).Set(0)
+				continue
+			}
+			if err != nil {
+				return fmt.Errorf("inspect archived queue %q: %w", queue, err)
+			}
+			DeadTasksGauge.WithLabelValues(queue).Set(float64(len(archivedInfo)))
+		}
+		return nil
+	})
 	if err != nil {
 		SystemHealthGauge.Set(0)
 		ActiveWorkersGauge.Set(0)
 		return err
 	}
-	SystemHealthGauge.Set(1) // 系统健康
-	// 更新活跃 Worker 数量（从所有服务器汇总）
-	servers, err := inspector.Servers()
-	if err == nil {
-		totalActiveWorkers := 0
-		for _, srv := range servers {
-			// ActiveWorkers 是 []*WorkerInfo 类型，使用 len() 获取数量
-			totalActiveWorkers += len(srv.ActiveWorkers)
-		}
-		ActiveWorkersGauge.Set(float64(totalActiveWorkers))
-	}
-	// 更新每个队列的指标
-	for _, queue := range queues {
-		info, err := inspector.GetQueueInfo(queue)
-		if err != nil {
-			continue
-		}
-		// 队列总大小
-		totalSize := info.Active + info.Pending + info.Scheduled + info.Retry
-		QueueSizeGauge.WithLabelValues(queue).Set(float64(totalSize))
-		// 各状态任务数
-		ActiveTasksGauge.WithLabelValues(queue).Set(float64(info.Active))
-		PendingTasksGauge.WithLabelValues(queue).Set(float64(info.Pending))
-		ScheduledTasksGauge.WithLabelValues(queue).Set(float64(info.Scheduled))
-		RetryTasksGauge.WithLabelValues(queue).Set(float64(info.Retry))
-		// Dead Letter Queue（按队列分组，使用 Archived 表示）
-		// 注意：asynq v0.24+ 将 Dead 改名为 Archived
-		archivedInfo, err := inspector.ListArchivedTasks(queue)
-		if err == nil {
-			DeadTasksGauge.WithLabelValues(queue).Set(float64(len(archivedInfo)))
-		}
-	}
+	SystemHealthGauge.Set(1)
 	return nil
 }
 
@@ -240,24 +250,44 @@ func UpdateActiveWorkers(count int) {
 	ActiveWorkersGauge.Set(float64(count))
 }
 
-// =========================================
-// 启动 Metrics 定时更新器
-// =========================================
 // StartMetricsUpdater 启动定时更新 Metrics 的后台任务
 // interval: 更新间隔（推荐 15 秒）
-func StartMetricsUpdater(ctx context.Context, interval time.Duration) {
+func StartMetricsUpdater(ctx context.Context, manager *Manager, interval time.Duration) error {
+	if ctx == nil {
+		return fmt.Errorf("%w: start metrics updater requires a non-nil context", ErrInvalidContext)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if interval <= 0 {
+		return fmt.Errorf("%w: metrics interval must be positive", ErrInvalidConfig)
+	}
 	// 初始化所有指标（确保在 /metrics 中可见，即使没有数据）
-	InitMetrics()
+	if manager != nil {
+		InitMetrics(manager.QueueNames())
+	} else {
+		InitMetrics(nil)
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	// 立即更新一次
-	UpdateQueueMetrics(ctx)
+	if err := UpdateQueueMetrics(ctx, manager); err != nil {
+		if errors.Is(err, ErrManagerStopped) || errors.Is(err, ErrManagerNotInitialized) {
+			return err
+		}
+		GetLogger().Error(fmt.Sprintf("[Asynq] update queue metrics: %v", err))
+	}
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		case <-ticker.C:
-			UpdateQueueMetrics(ctx)
+			if err := UpdateQueueMetrics(ctx, manager); err != nil {
+				if errors.Is(err, ErrManagerStopped) {
+					return err
+				}
+				GetLogger().Error(fmt.Sprintf("[Asynq] update queue metrics: %v", err))
+			}
 		}
 	}
 }

@@ -2,6 +2,7 @@ package asynq
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -80,13 +81,33 @@ type QueueBackpressure struct {
 
 // BackpressureController 背压控制器
 type BackpressureController struct {
-	mu           sync.RWMutex
-	config       BackpressureConfig
-	manager      *Manager
-	states       map[string]*QueueBackpressure
-	rejectCounts map[string]int64
-	cancel       context.CancelFunc // 使用 context 取消替代 channel
-	running      bool
+	mu            sync.RWMutex
+	config        BackpressureConfig
+	manager       *Manager
+	states        map[string]*QueueBackpressure
+	rejectCounts  map[string]int64
+	cancel        context.CancelFunc
+	done          chan struct{}
+	running       bool
+	stopping      bool
+	newTicker     func(time.Duration) backpressureTicker
+	inspectQueues func(context.Context, *Manager, *hibasynq.Inspector) error
+}
+
+type backpressureTicker interface {
+	Chan() <-chan time.Time
+	Stop()
+}
+
+type systemBackpressureTicker struct {
+	ticker *time.Ticker
+}
+
+func (t *systemBackpressureTicker) Chan() <-chan time.Time { return t.ticker.C }
+func (t *systemBackpressureTicker) Stop()                  { t.ticker.Stop() }
+
+func newSystemBackpressureTicker(interval time.Duration) backpressureTicker {
+	return &systemBackpressureTicker{ticker: time.NewTicker(interval)}
 }
 
 var (
@@ -101,16 +122,24 @@ func GetBackpressureController() *BackpressureController {
 			config:       DefaultBackpressureConfig(),
 			states:       make(map[string]*QueueBackpressure),
 			rejectCounts: make(map[string]int64),
+			newTicker:    newSystemBackpressureTicker,
 		}
 	})
 	return backpressureController
 }
 
 // SetConfig 设置配置
-func (bc *BackpressureController) SetConfig(config BackpressureConfig) {
+func (bc *BackpressureController) SetConfig(config BackpressureConfig) error {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
+	if config.CheckInterval <= 0 {
+		return fmt.Errorf("%w: backpressure check interval must be positive", ErrInvalidConfig)
+	}
+	if bc.running || bc.stopping {
+		return ErrBackpressureRunning
+	}
 	bc.config = config
+	return nil
 }
 
 // SetManager 设置 Manager
@@ -121,72 +150,109 @@ func (bc *BackpressureController) SetManager(m *Manager) {
 }
 
 // Start 启动背压监控
-func (bc *BackpressureController) Start() {
+func (bc *BackpressureController) Start() error {
 	bc.mu.Lock()
 	if bc.running {
+		if bc.stopping {
+			bc.mu.Unlock()
+			return ErrBackpressureRunning
+		}
 		bc.mu.Unlock()
-		return
+		return nil
 	}
+	if bc.config.CheckInterval <= 0 {
+		bc.mu.Unlock()
+		return fmt.Errorf("%w: backpressure check interval must be positive", ErrInvalidConfig)
+	}
+	interval := bc.config.CheckInterval
+	newTicker := bc.newTicker
+	if newTicker == nil {
+		newTicker = newSystemBackpressureTicker
+	}
+	ticker := newTicker(interval)
 	bc.running = true
+	bc.stopping = false
 	ctx, cancel := context.WithCancel(context.Background())
 	bc.cancel = cancel
+	done := make(chan struct{})
+	bc.done = done
 	bc.mu.Unlock()
-	go bc.monitorLoop(ctx)
+	go func() {
+		defer close(done)
+		bc.monitorLoop(ctx, ticker)
+	}()
 	GetLogger().Log("[Backpressure] Controller started")
+	return nil
 }
 
 // Stop 停止背压监控
 func (bc *BackpressureController) Stop() {
 	bc.mu.Lock()
-	defer bc.mu.Unlock()
 	if !bc.running {
+		bc.mu.Unlock()
 		return
 	}
-	if bc.cancel != nil {
-		bc.cancel()
-		bc.cancel = nil
+	done := bc.done
+	cancel := bc.cancel
+	initiated := !bc.stopping
+	if initiated {
+		bc.stopping = true
 	}
-	bc.running = false
-	GetLogger().Log("[Backpressure] Controller stopped")
+	bc.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done
+	}
+
+	bc.mu.Lock()
+	if bc.done == done {
+		bc.cancel = nil
+		bc.done = nil
+		bc.running = false
+		bc.stopping = false
+	}
+	bc.mu.Unlock()
+	if initiated {
+		GetLogger().Log("[Backpressure] Controller stopped")
+	}
 }
 
 // monitorLoop 监控循环
-func (bc *BackpressureController) monitorLoop(ctx context.Context) {
-	ticker := time.NewTicker(bc.config.CheckInterval)
+func (bc *BackpressureController) monitorLoop(ctx context.Context, ticker backpressureTicker) {
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			bc.checkAllQueues()
+		case <-ticker.Chan():
+			bc.checkAllQueues(ctx)
 		}
 	}
 }
 
 // checkAllQueues 检查所有队列
-func (bc *BackpressureController) checkAllQueues() {
+func (bc *BackpressureController) checkAllQueues(ctx context.Context) {
 	bc.mu.RLock()
 	manager := bc.manager
+	inspectQueues := bc.inspectQueues
 	bc.mu.RUnlock()
 	if manager == nil {
 		return
 	}
-	inspector := manager.GetInspector()
-	if inspector == nil {
-		return
-	}
-	// 检查所有预定义队列
-	queues := []string{
-		QueueCritical,
-		QueueHigh,
-		QueueDefault,
-		QueueScheduled,
-		QueueLow,
-		QueueDeadLetter,
-	}
-	for _, queue := range queues {
-		bc.checkQueue(queue, inspector)
+	err := manager.withInspector(func(inspector *hibasynq.Inspector) error {
+		if inspectQueues != nil {
+			return inspectQueues(ctx, manager, inspector)
+		}
+		for _, queue := range manager.QueueNames() {
+			bc.checkQueue(queue, inspector)
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, ErrManagerStopped) && !errors.Is(err, context.Canceled) {
+		GetLogger().Error(fmt.Sprintf("[Backpressure] inspect queues: %v", err))
 	}
 }
 
@@ -198,7 +264,6 @@ func (bc *BackpressureController) checkQueue(queue string, inspector *hibasynq.I
 	}
 	currentSize := queueInfo.Pending + queueInfo.Active + queueInfo.Scheduled + queueInfo.Retry
 	bc.mu.Lock()
-	defer bc.mu.Unlock()
 	// 获取或创建队列背压信息
 	bp, ok := bc.states[queue]
 	if !ok {
@@ -225,35 +290,46 @@ func (bc *BackpressureController) checkQueue(queue string, inspector *hibasynq.I
 	}
 	bp.State = newState
 	bp.StateStr = newState.String()
+	config := bc.config
+	stateChanged := newState != oldState
+	bc.mu.Unlock()
 	// 状态变化时触发回调
-	if newState != oldState {
-		bc.handleStateChange(queue, oldState, newState, currentSize)
+	if stateChanged {
+		handleBackpressureStateChange(config, queue, oldState, newState, currentSize)
 	}
 }
 
-// handleStateChange 处理状态变化
-func (bc *BackpressureController) handleStateChange(queue string, oldState, newState BackpressureState, size int) {
-	threshold := int(float64(bc.config.MaxQueueSize) * bc.config.WarningThreshold)
+// handleBackpressureStateChange 处理状态变化
+func handleBackpressureStateChange(
+	config BackpressureConfig,
+	queue string,
+	oldState, newState BackpressureState,
+	size int,
+) {
+	threshold := int(float64(config.MaxQueueSize) * config.WarningThreshold)
 	switch newState {
 	case StateWarning:
 		GetLogger().Log(fmt.Sprintf("[Backpressure] Queue %s entering WARNING state: size=%d, threshold=%d",
 			queue, size, threshold))
-		if bc.config.OnWarning != nil {
-			go bc.config.OnWarning(queue, size, threshold)
+		if config.OnWarning != nil {
+			// User callbacks are intentionally detached from controller shutdown.
+			go config.OnWarning(queue, size, threshold)
 		}
 	case StateCritical:
-		threshold = int(float64(bc.config.MaxQueueSize) * bc.config.CriticalThreshold)
+		threshold = int(float64(config.MaxQueueSize) * config.CriticalThreshold)
 		GetLogger().Log(fmt.Sprintf("[Backpressure] Queue %s entering CRITICAL state: size=%d, threshold=%d",
 			queue, size, threshold))
-		if bc.config.OnCritical != nil {
-			go bc.config.OnCritical(queue, size, threshold)
+		if config.OnCritical != nil {
+			// User callbacks are intentionally detached from controller shutdown.
+			go config.OnCritical(queue, size, threshold)
 		}
 	case StateNormal:
 		if oldState != StateNormal {
 			GetLogger().Log(fmt.Sprintf("[Backpressure] Queue %s recovered to NORMAL state: size=%d",
 				queue, size))
-			if bc.config.OnRecover != nil {
-				go bc.config.OnRecover(queue, size)
+			if config.OnRecover != nil {
+				// User callbacks are intentionally detached from controller shutdown.
+				go config.OnRecover(queue, size)
 			}
 		}
 	}

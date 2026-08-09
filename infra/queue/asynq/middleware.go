@@ -4,10 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/hibiken/asynq"
 	"runtime/debug"
 	"sync"
 	"time"
+
+	"github.com/hibiken/asynq"
 )
 
 // =========================================

@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"runtime/debug"
 	"time"
 
-	"github.com/hexagon-codes/toolkit/infra/queue/asynq"
 	asq "github.com/hibiken/asynq"
+
+	"github.com/hexagon-codes/toolkit/infra/queue/asynq"
+	"github.com/hexagon-codes/toolkit/infra/redisconn"
 )
 
 // =========================================
@@ -22,11 +25,16 @@ func main() {
 	fmt.Println("║   Asynq 完整示例 - 生产级实践                  ║")
 	fmt.Println("╚═══════════════════════════════════════════════╝")
 
-	// 1. 配置依赖注入
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+
+	// 1. 配置日志依赖
 	setupDependencies()
 
 	// 2. 初始化管理器
-	manager, err := initManager()
+	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 5*time.Second)
+	manager, err := initManager(startupCtx)
+	cancelStartup()
 	if err != nil {
 		log.Fatalf("❌ 初始化失败: %v", err)
 	}
@@ -35,15 +43,14 @@ func main() {
 	registerWorkers(manager)
 
 	// 4. 启动 Worker
-	ctx := context.Background()
-	if err := manager.Start(ctx); err != nil {
+	if err := manager.Start(runCtx); err != nil {
 		log.Fatalf("❌ 启动失败: %v", err)
 	}
 
 	fmt.Println("✅ Worker 已启动")
 
 	// 5. 模拟业务场景：入队各种任务
-	demonstrateTaskQueuing(ctx, manager)
+	demonstrateTaskQueuing(runCtx, manager)
 
 	// 6. 等待任务处理
 	fmt.Println("\n⏳ 等待任务处理（15秒）...")
@@ -51,7 +58,9 @@ func main() {
 
 	// 7. 优雅关闭
 	fmt.Println("\n🛑 优雅关闭...")
-	manager.Stop()
+	if err := manager.Stop(); err != nil {
+		log.Printf("关闭 Manager 失败: %v", err)
+	}
 
 	fmt.Println("\n✅ 示例完成!")
 }
@@ -67,17 +76,7 @@ func setupDependencies() {
 	logger := &ProductionLogger{}
 	asynq.SetLogger(logger)
 
-	// 配置提供者
-	config := &ProductionConfig{
-		redisAddrs:    []string{"localhost:6379"},
-		redisPassword: "",
-		concurrency:   5,
-		redisEnabled:  true,
-	}
-	asynq.SetConfigProvider(config)
-
 	fmt.Println("   ✓ Logger 已设置")
-	fmt.Println("   ✓ ConfigProvider 已设置")
 	fmt.Println()
 }
 
@@ -85,11 +84,28 @@ func setupDependencies() {
 // 步骤 2：初始化管理器
 // =========================================
 
-func initManager() (*asynq.Manager, error) {
+func initManager(ctx context.Context) (*asynq.Manager, error) {
 	fmt.Println("🚀 初始化 Asynq Manager...")
 
-	configProvider := asynq.GetConfigProvider()
-	manager, err := asynq.InitManagerFromConfig(configProvider)
+	redisAddr := os.Getenv("REDIS_ADDR")
+	if redisAddr == "" {
+		redisAddr = "localhost:6379"
+	}
+	username := os.Getenv("REDIS_USERNAME")
+	password := os.Getenv("REDIS_PASSWORD")
+	if (username == "") != (password == "") {
+		return nil, fmt.Errorf("REDIS_USERNAME and REDIS_PASSWORD must be configured together")
+	}
+	redisConfig := redisconn.DefaultConfig(redisconn.ModeSingle, redisAddr)
+	if username != "" {
+		redisConfig.DataCredentials = redisconn.Credentials{
+			Username: username,
+			Password: password,
+		}
+	}
+	config := asynq.DefaultConfig(redisConfig)
+	config.Concurrency = 5
+	manager, err := asynq.InitManager(ctx, config)
 	if err != nil {
 		return nil, err
 	}
@@ -172,7 +188,7 @@ func enqueueTask(ctx context.Context, manager *asynq.Manager, taskType string, p
 		opts = append(opts, asq.ProcessIn(delay))
 	}
 
-	task := asq.NewTask(taskType, data, opts...)
+	task := asq.NewTask(taskType, data)
 	info, err := manager.Enqueue(ctx, task, opts...)
 	if err != nil {
 		fmt.Printf("   ❌ 入队失败: %v\n", err)
@@ -185,7 +201,7 @@ func enqueueTask(ctx context.Context, manager *asynq.Manager, taskType string, p
 	}
 
 	fmt.Printf("   ✅ [%s] %s | ID=%s, Retry=%d%s\n",
-		queue, taskType, info.ID[:8], maxRetry, delayMsg)
+		info.Queue, taskType, info.ID[:8], maxRetry, delayMsg)
 }
 
 // =========================================
@@ -353,18 +369,3 @@ func (l *ProductionLogger) Error(msg string) {
 func (l *ProductionLogger) ErrorSkip(skip int, msg string) {
 	log.Printf("[ERROR] %s", msg)
 }
-
-type ProductionConfig struct {
-	redisAddrs    []string
-	redisPassword string
-	concurrency   int
-	redisEnabled  bool
-}
-
-func (c *ProductionConfig) IsRedisEnabled() bool     { return c.redisEnabled }
-func (c *ProductionConfig) GetRedisAddrs() []string  { return c.redisAddrs }
-func (c *ProductionConfig) GetRedisPassword() string { return c.redisPassword }
-func (c *ProductionConfig) GetRedisUsername() string { return "" }
-func (c *ProductionConfig) GetConcurrency() int      { return c.concurrency }
-func (c *ProductionConfig) GetQueuePrefix() string   { return "" }
-func (c *ProductionConfig) IsPollingEnabled() bool   { return true }

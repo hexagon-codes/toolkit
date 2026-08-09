@@ -2,10 +2,12 @@ package asynq
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"github.com/hibiken/asynq"
 	"sync/atomic"
 	"time"
+
+	"github.com/hibiken/asynq"
 )
 
 // =========================================
@@ -22,15 +24,18 @@ type HealthStatus struct {
 
 // HealthChecker 健康检查器
 type HealthChecker struct {
-	manager    *Manager
-	lastStatus atomic.Value // *HealthStatus
+	manager       *Manager
+	lastStatus    atomic.Value // *HealthStatus
+	checkQueuesFn func(context.Context, *HealthStatus) error
 }
 
 // NewHealthChecker 创建健康检查器
 func NewHealthChecker(m *Manager) *HealthChecker {
-	return &HealthChecker{
+	checker := &HealthChecker{
 		manager: m,
 	}
+	checker.checkQueuesFn = checker.checkQueues
+	return checker
 }
 
 // Check 执行健康检查
@@ -59,7 +64,9 @@ func (h *HealthChecker) Check(ctx context.Context) *HealthStatus {
 		status.Details["redis"] = "connected"
 	}
 	// 检查队列状态
-	if err := h.checkQueues(ctx, status); err != nil {
+	if err := h.checkQueuesFn(ctx, status); err != nil {
+		status.Healthy = false
+		status.Ready = false
 		status.Details["queues"] = err.Error()
 	}
 	h.lastStatus.Store(status)
@@ -68,39 +75,41 @@ func (h *HealthChecker) Check(ctx context.Context) *HealthStatus {
 
 // checkRedis 检查 Redis 连接
 func (h *HealthChecker) checkRedis(ctx context.Context) error {
-	// 尝试获取队列信息来验证连接
-	inspector := h.manager.GetInspector()
-	_, err := inspector.Queues()
-	return err
+	if h.manager == nil {
+		return ErrManagerNotInitialized
+	}
+	return h.manager.pingRedis(ctx)
 }
 
 // checkQueues 检查队列状态
 func (h *HealthChecker) checkQueues(ctx context.Context, status *HealthStatus) error {
-	inspector := h.manager.GetInspector()
-	queues, err := inspector.Queues()
-	if err != nil {
-		return err
+	if h.manager == nil {
+		return ErrManagerNotInitialized
 	}
-	for _, q := range queues {
-		info, err := inspector.GetQueueInfo(q)
-		if err != nil {
-			status.Details[fmt.Sprintf("queue_%s", q)] = err.Error()
-			continue
+	queues := h.manager.QueueNames()
+	return h.manager.withInspector(func(inspector *asynq.Inspector) error {
+		for _, q := range queues {
+			info, err := configuredQueueInfo(inspector, q)
+			if err != nil {
+				return fmt.Errorf("inspect queue %q: %w", q, err)
+			}
+			// 检查队列积压
+			if info.Pending > 10000 {
+				status.Details[fmt.Sprintf("queue_%s", q)] = fmt.Sprintf("high_backlog: %d", info.Pending)
+			} else {
+				status.Details[fmt.Sprintf("queue_%s", q)] = fmt.Sprintf("pending=%d, active=%d", info.Pending, info.Active)
+			}
 		}
-		// 检查队列积压
-		if info.Pending > 10000 {
-			status.Details[fmt.Sprintf("queue_%s", q)] = fmt.Sprintf("high_backlog: %d", info.Pending)
-		} else {
-			status.Details[fmt.Sprintf("queue_%s", q)] = fmt.Sprintf("pending=%d, active=%d", info.Pending, info.Active)
-		}
-	}
-	return nil
+		return nil
+	})
 }
 
 // IsHealthy 是否健康（用于 liveness 探针）
 func (h *HealthChecker) IsHealthy() bool {
 	if v := h.lastStatus.Load(); v != nil {
-		return v.(*HealthStatus).Healthy
+		if status, ok := v.(*HealthStatus); ok {
+			return status.Healthy
+		}
 	}
 	return false
 }
@@ -108,7 +117,9 @@ func (h *HealthChecker) IsHealthy() bool {
 // IsReady 是否就绪（用于 readiness 探针）
 func (h *HealthChecker) IsReady() bool {
 	if v := h.lastStatus.Load(); v != nil {
-		return v.(*HealthStatus).Ready
+		if status, ok := v.(*HealthStatus); ok {
+			return status.Ready
+		}
 	}
 	return false
 }
@@ -116,7 +127,9 @@ func (h *HealthChecker) IsReady() bool {
 // GetLastStatus 获取最后一次检查状态
 func (h *HealthChecker) GetLastStatus() *HealthStatus {
 	if v := h.lastStatus.Load(); v != nil {
-		return v.(*HealthStatus)
+		if status, ok := v.(*HealthStatus); ok {
+			return status
+		}
 	}
 	return nil
 }
@@ -147,6 +160,12 @@ func (g *GracefulShutdown) OnShutdown(fn func()) {
 
 // Shutdown 执行优雅关闭
 func (g *GracefulShutdown) Shutdown(ctx context.Context) error {
+	if g.manager == nil {
+		return ErrManagerNotInitialized
+	}
+	if ctx == nil {
+		return fmt.Errorf("%w: graceful shutdown requires a non-nil context", ErrInvalidContext)
+	}
 	g.manager.logger.Log("[Asynq] graceful shutdown initiated...")
 	// 执行注册的回调
 	for _, fn := range g.onShutdown {
@@ -155,32 +174,18 @@ func (g *GracefulShutdown) Shutdown(ctx context.Context) error {
 	// 创建超时上下文
 	shutdownCtx, cancel := context.WithTimeout(ctx, g.shutdownTimeout)
 	defer cancel()
-	// 停止调度器（停止产生新任务）
-	if g.manager.scheduler != nil {
-		g.manager.logger.Log("[Asynq] stopping scheduler...")
-		g.manager.scheduler.Shutdown()
-	}
-	// 等待正在处理的任务完成
-	done := make(chan struct{})
+	done := make(chan error, 1)
 	go func() {
-		if g.manager.server != nil {
-			g.manager.logger.Log("[Asynq] waiting for active tasks to complete...")
-			g.manager.server.Shutdown()
-		}
-		close(done)
+		done <- g.manager.Stop()
 	}()
 	select {
-	case <-done:
+	case err := <-done:
 		g.manager.logger.Log("[Asynq] all tasks completed")
+		return err
 	case <-shutdownCtx.Done():
 		g.manager.logger.Error("[Asynq] shutdown timeout, forcing stop")
+		return shutdownCtx.Err()
 	}
-	// 关闭客户端
-	if g.manager.client != nil {
-		g.manager.client.Close()
-	}
-	g.manager.logger.Log("[Asynq] graceful shutdown completed")
-	return nil
 }
 
 // =========================================
@@ -203,28 +208,45 @@ func GetQueueStats() ([]QueueStats, error) {
 	if m == nil {
 		return nil, ErrManagerNotInitialized
 	}
-	inspector := m.GetInspector() // 复用 Inspector
-	queues, err := inspector.Queues()
+	queues := m.QueueNames()
+	stats := make([]QueueStats, 0, len(queues))
+	err := m.withInspector(func(inspector *asynq.Inspector) error {
+		for _, q := range queues {
+			info, err := configuredQueueInfo(inspector, q)
+			if err != nil {
+				return fmt.Errorf("inspect queue %q: %w", q, err)
+			}
+			stats = append(stats, QueueStats{
+				Name:      q,
+				Pending:   info.Pending,
+				Active:    info.Active,
+				Scheduled: info.Scheduled,
+				Retry:     info.Retry,
+				Archived:  info.Archived,
+				Completed: info.Completed,
+			})
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	stats := make([]QueueStats, 0, len(queues))
-	for _, q := range queues {
-		info, err := inspector.GetQueueInfo(q)
-		if err != nil {
-			continue
-		}
-		stats = append(stats, QueueStats{
-			Name:      q,
-			Pending:   info.Pending,
-			Active:    info.Active,
-			Scheduled: info.Scheduled,
-			Retry:     info.Retry,
-			Archived:  info.Archived,
-			Completed: info.Completed,
-		})
-	}
 	return stats, nil
+}
+
+func configuredQueueInfo(inspector *asynq.Inspector, queue string) (*asynq.QueueInfo, error) {
+	info, err := inspector.GetQueueInfo(queue)
+	if err == nil {
+		return info, nil
+	}
+	_, probeErr := inspector.ListPendingTasks(queue, asynq.PageSize(1))
+	if errors.Is(probeErr, asynq.ErrQueueNotFound) {
+		return &asynq.QueueInfo{Queue: queue}, nil
+	}
+	if probeErr != nil {
+		return nil, errors.Join(err, probeErr)
+	}
+	return inspector.GetQueueInfo(queue)
 }
 
 // GetDeadLetterTasks 获取死信队列任务
@@ -233,8 +255,19 @@ func GetDeadLetterTasks(queue string, limit int) ([]*asynq.TaskInfo, error) {
 	if m == nil {
 		return nil, ErrManagerNotInitialized
 	}
-	inspector := m.GetInspector() // 复用 Inspector
-	tasks, err := inspector.ListArchivedTasks(queue, asynq.PageSize(limit))
+	var tasks []*asynq.TaskInfo
+	err := m.withInspector(func(inspector *asynq.Inspector) error {
+		actual, err := m.resolveQueue(queue)
+		if err != nil {
+			return err
+		}
+		tasks, err = inspector.ListArchivedTasks(actual, asynq.PageSize(limit))
+		if errors.Is(err, asynq.ErrQueueNotFound) {
+			tasks = []*asynq.TaskInfo{}
+			return nil
+		}
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -247,8 +280,13 @@ func RetryDeadLetterTask(queue, taskID string) error {
 	if m == nil {
 		return ErrManagerNotInitialized
 	}
-	inspector := m.GetInspector() // 复用 Inspector
-	return inspector.RunTask(queue, taskID)
+	return m.withInspector(func(inspector *asynq.Inspector) error {
+		actual, err := m.resolveQueue(queue)
+		if err != nil {
+			return err
+		}
+		return inspector.RunTask(actual, taskID)
+	})
 }
 
 // DeleteDeadLetterTask 删除死信任务
@@ -257,8 +295,13 @@ func DeleteDeadLetterTask(queue, taskID string) error {
 	if m == nil {
 		return ErrManagerNotInitialized
 	}
-	inspector := m.GetInspector() // 复用 Inspector
-	return inspector.DeleteTask(queue, taskID)
+	return m.withInspector(func(inspector *asynq.Inspector) error {
+		actual, err := m.resolveQueue(queue)
+		if err != nil {
+			return err
+		}
+		return inspector.DeleteTask(actual, taskID)
+	})
 }
 
 // =========================================

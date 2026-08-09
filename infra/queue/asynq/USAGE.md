@@ -2,428 +2,220 @@
 
 # Asynq 使用指南
 
-## 快速开始
+## 1. 初始化
 
-### 1. 安装
-
-```bash
-go get github.com/hexagon-codes/toolkit/infra/queue/asynq
-```
-
-### 2. 基本概念
-
-**Asynq** 是一个基于 Redis 的分布式任务队列，本包提供了生产级的封装。
-
-**核心组件：**
-- **Manager**: 管理器，负责任务入队和 Worker 调度
-- **Worker**: 任务处理器，实现具体业务逻辑
-- **Queue**: 队列，不同优先级的任务队列
-- **Payload**: 任务载荷，包含任务所需的数据
-
-### 3. 依赖注入配置
-
-使用前必须配置依赖注入：
+Manager 必须接收 caller-owned `context.Context` 和一份显式 `Config`：
 
 ```go
-import "github.com/hexagon-codes/toolkit/infra/queue/asynq"
+redisConfig := redisconn.DefaultConfig(
+    redisconn.ModeSingle,
+    "redis.internal:6379",
+)
+redisConfig.DataCredentials = redisconn.Credentials{
+    Username: "queue-worker",
+    Password: os.Getenv("REDIS_PASSWORD"),
+}
 
-// 1. 实现 Logger 接口
-type MyLogger struct{}
+config := asynq.DefaultConfig(redisConfig)
+config.Concurrency = 16
+config.QueuePrefix = "prod:"
 
-func (l *MyLogger) Log(msg string)            { /* 实现 */ }
-func (l *MyLogger) LogSkip(skip int, msg string) { /* 实现 */ }
-func (l *MyLogger) Error(msg string)          { /* 实现 */ }
-func (l *MyLogger) ErrorSkip(skip int, msg string) { /* 实现 */ }
-
-// 2. 实现 ConfigProvider 接口
-type MyConfig struct{}
-
-func (c *MyConfig) IsRedisEnabled() bool { return true }
-func (c *MyConfig) GetRedisAddrs() []string { return []string{"localhost:6379"} }
-func (c *MyConfig) GetRedisPassword() string { return "" }
-func (c *MyConfig) GetRedisUsername() string { return "" }
-func (c *MyConfig) GetConcurrency() int { return 10 }
-func (c *MyConfig) GetQueuePrefix() string { return "" }
-func (c *MyConfig) IsPollingEnabled() bool { return true }
-
-// 3. 设置依赖
-asynq.SetLogger(&MyLogger{})
-asynq.SetConfigProvider(&MyConfig{})
-```
-
-### 4. 初始化 Manager
-
-```go
-// 从配置提供者初始化
-manager, err := asynq.InitManagerFromConfig(configProvider)
+startupCtx, cancelStartup := context.WithTimeout(context.Background(), 5*time.Second)
+manager, err := asynq.NewManager(startupCtx, config)
+cancelStartup()
 if err != nil {
-    log.Fatal(err)
+    return err
 }
-
-// 注册任务处理器
-manager.RegisterHandler("email:send", handleEmail)
-manager.RegisterHandler("report:generate", handleReport)
-
-// 启动 Worker
-ctx := context.Background()
-if err := manager.Start(ctx); err != nil {
-    log.Fatal(err)
-}
-
-// 优雅关闭
 defer manager.Stop()
-```
 
-### 5. 创建 Worker
-
-**推荐模式：结构体 + ProcessTask 方法**
-
-```go
-type EmailWorker struct {
-    // 依赖注入
-    emailService *EmailService
-    tracer       *Tracer
-}
-
-func NewEmailWorker(emailService *EmailService) *EmailWorker {
-    return &EmailWorker{
-        emailService: emailService,
-        tracer:       GetTracer(),
-    }
-}
-
-func (w *EmailWorker) ProcessTask(ctx context.Context, t *asynq.Task) (err error) {
-    startTime := time.Now()
-
-    // Panic 恢复（生产环境必须）
-    defer func() {
-        if r := recover(); r != nil {
-            stack := debug.Stack()
-            log.Printf("[PANIC] %v\nStack:\n%s", r, string(stack))
-            err = fmt.Errorf("panic recovered: %v", r)
-        }
-    }()
-
-    // 解析 Payload
-    var payload EmailPayload
-    if err := json.Unmarshal(t.Payload(), &payload); err != nil {
-        return fmt.Errorf("parse payload failed: %w", err)
-    }
-
-    // 记录追踪（可选）
-    if w.tracer != nil {
-        w.tracer.RecordEvent(ctx, payload.TraceID, "email_send_start", nil)
-    }
-
-    // 业务逻辑
-    if err := w.emailService.Send(payload.To, payload.Subject, payload.Body); err != nil {
-        log.Printf("[EmailWorker] 发送失败: %v", err)
-        return err // 返回错误触发重试
-    }
-
-    log.Printf("[EmailWorker] 完成: to=%s, 耗时=%v", payload.To, time.Since(startTime))
-    return nil
-}
-```
-
-### 6. 入队任务
-
-**方式 1：使用 TaskBuilder（推荐）**
-
-```go
-import "github.com/hexagon-codes/toolkit/infra/queue/asynq"
-
-// 简单任务
-task := asynq.NewTask("email:send").
-    Payload(map[string]string{
-        "to": "user@example.com",
-        "subject": "Welcome",
-    }).
-    Queue(asynq.QueueHigh).
-    MaxRetry(3).
-    Enqueue(ctx)
-
-// 延迟任务
-task := asynq.NewTask("report:generate").
-    Payload(reportData).
-    ProcessIn(5 * time.Minute).
-    Queue(asynq.QueueDefault).
-    Enqueue(ctx)
-
-// 定时任务
-task := asynq.NewTask("cleanup").
-    Payload(nil).
-    ProcessAt(time.Now().Add(24 * time.Hour)).
-    Queue(asynq.QueueLow).
-    Enqueue(ctx)
-
-// 唯一任务（去重）
-task := asynq.NewTask("user:sync").
-    Payload(userData).
-    TaskID(fmt.Sprintf("sync:%d", userID)).
-    Unique(10 * time.Minute).
-    Enqueue(ctx)
-```
-
-**方式 2：使用原生 API**
-
-```go
-import asq "github.com/hibiken/asynq"
-
-payload, _ := json.Marshal(data)
-task := asq.NewTask("task:type", payload)
-
-manager := asynq.GetManager()
-info, err := manager.Enqueue(ctx, task,
-    asq.Queue(asynq.QueueHigh),
-    asq.MaxRetry(3),
-    asq.Timeout(5 * time.Minute),
-)
-```
-
-## 高级特性
-
-### 1. 队列优先级
-
-```go
-// 预定义队列（优先级从高到低）
-asynq.QueueCritical   // 最高优先级
-asynq.QueueHigh       // 高优先级
-asynq.QueueDefault    // 默认优先级
-asynq.QueueScheduled  // 调度队列
-asynq.QueueLow        // 低优先级
-asynq.QueueDeadLetter // 死信队列
-```
-
-### 2. 错误处理和重试
-
-```go
-func (w *Worker) ProcessTask(ctx context.Context, t *asynq.Task) error {
-    // 返回错误会触发重试
-    if err := doSomething(); err != nil {
-        return err // Asynq 会根据 MaxRetry 重试
-    }
-
-    // 返回 nil 表示成功
-    return nil
-}
-```
-
-**重试策略：**
-- 指数退避：1s, 2s, 4s, 8s, 16s...
-- 最大重试次数由 `MaxRetry()` 设定
-- 超过重试次数后进入死信队列
-
-### 3. 超时控制
-
-```go
-task := asynq.NewTask("long:task").
-    Payload(data).
-    Timeout(10 * time.Minute). // 10分钟超时
-    Deadline(time.Now().Add(1 * time.Hour)). // 1小时截止
-    Enqueue(ctx)
-```
-
-### 4. 任务去重
-
-```go
-// 使用 TaskID 去重
-task := asynq.NewTask("user:sync").
-    Payload(userData).
-    TaskID(fmt.Sprintf("sync:%d", userID)). // 相同 ID 会冲突
-    Enqueue(ctx)
-
-// 使用 Unique 时间窗口去重
-task := asynq.NewTask("notification").
-    Payload(data).
-    Unique(5 * time.Minute). // 5分钟内不重复入队
-    Enqueue(ctx)
-```
-
-### 5. 定时任务（Cron）
-
-```go
-// 注册定时任务
-manager.RegisterSchedule(
-    "@every 1h",                    // Cron 表达式
-    asq.NewTask("cleanup", nil),    // 任务
-    asq.Queue(asynq.QueueLow),      // 选项
-)
-
-// Cron 表达式示例
-"@every 1h"       // 每小时
-"0 */5 * * *"     // 每5分钟
-"0 0 * * *"       // 每天0点
-"0 9 * * 1"       // 每周一9点
-```
-
-### 6. 监控和追踪
-
-```go
-// 获取统计信息
-stats := asynq.GetStats()
-fmt.Printf("Running: %v, Handlers: %d\n", stats["started"], stats["handlers"])
-
-// 使用 Inspector 查询
-inspector := manager.GetInspector()
-defer inspector.Close()
-
-// 查询队列信息
-queueInfo, err := inspector.GetQueueInfo("default")
-fmt.Printf("Pending: %d, Active: %d\n", queueInfo.Pending, queueInfo.Active)
-```
-
-## 生产环境最佳实践
-
-### 1. Panic 恢复（必须）
-
-```go
-func (w *Worker) ProcessTask(ctx context.Context, t *asynq.Task) (err error) {
-    defer func() {
-        if r := recover(); r != nil {
-            stack := debug.Stack()
-            log.Printf("[PANIC] %v\nStack:\n%s", r, string(stack))
-            err = fmt.Errorf("panic recovered: %v", r)
-        }
-    }()
-
-    // 业务逻辑
-}
-```
-
-### 2. 幂等性设计
-
-```go
-// 使用唯一标识防止重复处理
-func (w *Worker) ProcessTask(ctx context.Context, t *asynq.Task) error {
-    taskID := payload.TaskID
-
-    // 检查是否已处理
-    if isProcessed(taskID) {
-        log.Printf("[Worker] Task already processed: %s", taskID)
-        return nil // 返回 nil 避免重试
-    }
-
-    // 标记为处理中
-    markAsProcessing(taskID)
-
-    // 处理业务逻辑
-    // ...
-
-    // 标记为已完成
-    markAsCompleted(taskID)
-    return nil
-}
-```
-
-### 3. 超时控制
-
-```go
-// Context 超时
-ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-defer cancel()
-
-// 检查 Context
-select {
-case <-ctx.Done():
-    return fmt.Errorf("task cancelled: %w", ctx.Err())
-default:
-    // 继续处理
-}
-```
-
-### 4. 资源清理
-
-```go
-func (w *Worker) ProcessTask(ctx context.Context, t *asynq.Task) error {
-    // 获取资源
-    conn := getConnection()
-    defer conn.Close() // 确保释放
-
-    // 业务逻辑
-    // ...
-
-    return nil
-}
-```
-
-### 5. 日志记录
-
-```go
-func (w *Worker) ProcessTask(ctx context.Context, t *asynq.Task) error {
-    startTime := time.Now()
-
-    log.Printf("[Worker] 开始: task_id=%s", payload.TaskID)
-
-    // 业务逻辑
-    err := w.process(payload)
-
-    duration := time.Since(startTime)
-    if err != nil {
-        log.Printf("[Worker] 失败: task_id=%s, err=%v, 耗时=%v",
-            payload.TaskID, err, duration)
-    } else {
-        log.Printf("[Worker] 成功: task_id=%s, 耗时=%v",
-            payload.TaskID, duration)
-    }
-
+manager.RegisterHandler("email:send", handleEmail)
+if err := manager.Start(ctx); err != nil {
     return err
 }
 ```
 
-## 完整示例
+`NewManager` 会规范化并校验配置、创建 canonical Redis factory，并在返回前通过专用 Redis client 执行 `PING`。因此调用方必须处理初始化错误。
 
-参考项目中的示例代码：
-- `examples/infra/asynq_example.go` - 基础示例
-- `examples/infra/asynq_complete_example.go` - 生产级完整示例
+如果确实需要进程级单例，可改用：
 
-## 故障排查
-
-### 1. 任务没有被处理
-
-**检查清单：**
-- [ ] Redis 是否可访问
-- [ ] Manager 是否已启动（`manager.Start(ctx)`）
-- [ ] 任务类型是否已注册（`manager.RegisterHandler`）
-- [ ] 队列配置是否正确
-- [ ] Worker 并发数是否足够
-
-### 2. 任务一直重试
-
-**原因：**
-- Worker 返回错误会触发重试
-- 检查业务逻辑是否抛出错误
-- 检查 MaxRetry 配置
-
-**解决：**
 ```go
-// 对于不可重试的错误，返回 nil
-if isNonRetryableError(err) {
-    log.Printf("Non-retryable error: %v", err)
-    return nil // 不重试
+manager, err := asynq.InitManager(ctx, config)
+```
+
+第二次调用返回 `ErrManagerAlreadyInitialized`。不再提供 `ConfigProvider`、`DefaultConfigProvider`、`InitManagerFromConfig`、`SetRedisClient` 或 `GetRedisClient`。
+
+## 2. Redis 拓扑与认证
+
+### 单机或代理
+
+```go
+redisConfig := redisconn.DefaultConfig(
+    redisconn.ModeSingle,
+    "redis.internal:6379",
+)
+```
+
+Single 模式必须且只能配置一个地址。
+
+### Redis Cluster
+
+```go
+redisConfig := redisconn.DefaultConfig(
+    redisconn.ModeCluster,
+    "redis-0.internal:6379", // 一个 seed 也明确保持 Cluster 模式
+)
+redisConfig.MaxRedirects = 5
+```
+
+拓扑由 `ModeCluster` 决定，不由地址数量推断。
+
+### Redis Sentinel
+
+```go
+redisConfig := redisconn.DefaultConfig(
+    redisconn.ModeSentinel,
+    "sentinel-0.internal:26379",
+    "sentinel-1.internal:26379",
+)
+redisConfig.MasterName = "mymaster"
+redisConfig.DataCredentials = redisconn.Credentials{
+    Username: "queue-worker",
+    Password: os.Getenv("REDIS_DATA_PASSWORD"),
 }
-return err // 可重试错误
-```
-
-### 3. 任务进入死信队列
-
-**查看死信队列：**
-```go
-inspector := manager.GetInspector()
-tasks, err := inspector.ListDeadletterTasks("default")
-for _, task := range tasks {
-    log.Printf("Dead task: %s, error: %s", task.ID, task.LastErr)
+redisConfig.SentinelCredentials = redisconn.Credentials{
+    Username: "sentinel-reader",
+    Password: os.Getenv("REDIS_SENTINEL_PASSWORD"),
 }
 ```
 
-**重新入队：**
+数据节点和 Sentinel 是两个认证域，两套凭据不能混用。
+
+### ACL 策略
+
+Redis 6+ 仍兼容 default user 的 `AUTH password`，老版本 Redis 也只有 password-only 认证。但本项目采用更严格的现代 ACL 契约：
+
+- 无认证：`Username` 和 `Password` 均为空。
+- 有认证：`Username` 和 `Password` 必须同时非空。
+- password-only 或 username-only：配置校验失败。
+
+因此，启用了 password-only 的旧 Redis 不在本版本支持范围内；应先迁移到 Redis 6+ ACL 账号，不能通过填入伪用户名绕过校验。
+
+动态凭据通过 `CredentialsProvider` 注入，也必须返回完整账号密码对，并且不能与静态 `DataCredentials` 同时配置：
+
 ```go
-// 从死信队列重新入队
-err := inspector.DeleteTask("default", taskID)
+redisConfig.CredentialsProvider = func(ctx context.Context) (redisconn.Credentials, error) {
+    return loadRedisACLFromSecretManager(ctx)
+}
 ```
 
-## 更多资源
+### TLS 与连接池
 
-- [Asynq 官方文档](https://github.com/hibiken/asynq)
-- [项目示例代码](../../examples/infra/)
-- [接口定义](./interfaces.go)
+```go
+redisConfig.TLSConfig = &tls.Config{
+    MinVersion: tls.VersionTLS12,
+    ServerName: "redis.internal",
+}
+redisConfig.DialTimeout = 3 * time.Second
+redisConfig.ReadTimeout = 2 * time.Second
+redisConfig.WriteTimeout = 2 * time.Second
+redisConfig.PoolSize = 100
+redisConfig.MinIdleConns = 10
+```
+
+这些设置由同一个 factory 传递给 Asynq client、worker、scheduler、inspector 和 Manager 的锁 client。
+
+## 3. 队列与环境隔离
+
+`QueueCritical`、`QueueHigh`、`QueueDefault`、`QueueScheduled`、`QueueLow` 和 `QueueDeadLetter` 是不可变基名。`Manager.Enqueue`、`EnqueueTask`、`RegisterSchedule` 的 `Queue(...)` 输入以及 `Config.Queues` key 都必须是未加 namespace 的 base name。Manager 对非空 `QueuePrefix` 始终直接拼接，即使 prefix 与 base 的文本开头相交，并校验最终名称属于本实例。
+
+```go
+config.QueuePrefix = "prod:"
+
+_, err := manager.EnqueueTask(
+    ctx,
+	"email:send",
+	payload,
+	hibasynq.Queue(asynq.QueueHigh), // Manager 解析为 prod:high
+)
+```
+
+省略 `Queue(...)` 时，Manager 会选择 `QueueDefault`；自定义 `Config.Queues` 若没有 default，入队和 scheduler 注册会返回 `ErrQueueNotFound`，不会把任务投到无人消费的 Asynq default。Manager 最后追加的规范 Queue 会覆盖 Task 内嵌 Queue，避免跨 namespace。不要提前传 `manager.QueueName(base)`，否则会被视为 base 并因未配置而拒绝。
+
+`GetDeadLetterTasks`、`RetryDeadLetterTask` 和 `DeleteDeadLetterTask` 的 queue 参数同样只接收 base name，并拒绝其他 namespace。`manager.QueueName(base)` 只用于 Inspector、Asynqmon 等需要实际 Redis 队列名的原生集成。直接使用 `manager.GetClient()` 是显式 escape hatch，会绕过 Manager 的 namespace 不变量。
+
+自定义优先级放在 `Config.Queues`：
+
+```go
+config.Queues = map[string]int{
+    asynq.QueueCritical: 10,
+    asynq.QueueDefault:  4,
+    asynq.QueueLow:      1,
+}
+```
+
+规范化时 `QueuePrefix` 会应用到每个 key，并复制 map，调用方后续修改原 map 不会改变 Manager。
+
+## 4. Polling 初始化
+
+`PollingConfig` 只保留轮询策略，不再重复 Redis、并发或队列配置：
+
+```go
+cleanup, err := asynq.InitPolling(
+    ctx,
+    asynq.PollingConfig{
+        Enabled:         true,
+        MigrateExisting: true,
+    },
+    config,
+    asynq.WorkerDependencies{
+        RegisterTaskPollWorker: registerTaskPollWorker,
+        RegisterWebhookWorker:  registerWebhookWorker,
+        MigrateFunc:            migrateExistingTasks,
+    },
+)
+if err != nil {
+    return err
+}
+defer cleanup()
+```
+
+Manager 创建、worker/scheduler 启动或 migration lease 失败都会同步返回错误并回滚资源。
+
+## 5. Token lease
+
+```go
+lease, acquired, err := manager.AcquirePollingLease(ctx, taskID)
+if err != nil {
+    return err // fail-closed，不执行重复任务
+}
+if !acquired {
+    return nil
+}
+
+defer func() {
+    cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+    defer cancel()
+    _ = lease.Release(cleanupCtx)
+}()
+
+// 长任务可以主动续租。
+if err := lease.Refresh(ctx); err != nil {
+    return err
+}
+```
+
+lease value 是随机 token。`Refresh`/`Release` 使用 Lua compare-token；TTL 过期后，即使其他 worker 获得同一个 key，旧 lease 也不能修改它。
+
+Polling 和 migration key 都通过专用 internal-key 规则自动使用 Manager 的 `QueuePrefix` 作为 namespace：非空 prefix 始终拼接固定 base，不做字符串前缀猜测。不同租户前缀不会错误互斥，同一前缀的副本仍共享锁。
+
+迁移使用相同 primitive，并按 TTL/3 自动续租。续租失败会取消传给迁移函数的派生 context，默认 fail-closed。
+
+## 6. 生命周期与可观测性
+
+- `Start(ctx)` 同步调用 Asynq server/scheduler 的 `Start`。
+- scheduler 注册或启动失败时，`started` 不会被错误置为 true，相关 client 会关闭。
+- `Stop()` 可重复调用，并关闭未启动 Manager 的资源。
+- 日志不会输出用户名或密码。
+- `SetLogger` 支持替换不同具体类型的 Logger；配置本身使用显式依赖注入。
+
+完整可编译示例见 `examples/infra/asynq_complete_example.go`。

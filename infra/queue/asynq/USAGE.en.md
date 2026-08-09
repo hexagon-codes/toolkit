@@ -2,428 +2,220 @@
 
 # Asynq Usage Guide
 
-## Quick Start
+## 1. Initialization
 
-### 1. Installation
-
-```bash
-go get github.com/hexagon-codes/toolkit/infra/queue/asynq
-```
-
-### 2. Core Concepts
-
-**Asynq** is a Redis-based distributed task queue. This package provides a production-grade wrapper.
-
-**Core Components:**
-- **Manager**: Manages task enqueue and worker scheduling
-- **Worker**: Task processor implementing specific business logic
-- **Queue**: Queue with different task priority levels
-- **Payload**: Task payload containing the data required for a task
-
-### 3. Dependency Injection Configuration
-
-Before use, configure dependency injection:
+A Manager requires a caller-owned `context.Context` and one explicit `Config`:
 
 ```go
-import "github.com/hexagon-codes/toolkit/infra/queue/asynq"
+redisConfig := redisconn.DefaultConfig(
+    redisconn.ModeSingle,
+    "redis.internal:6379",
+)
+redisConfig.DataCredentials = redisconn.Credentials{
+    Username: "queue-worker",
+    Password: os.Getenv("REDIS_PASSWORD"),
+}
 
-// 1. Implement the Logger interface
-type MyLogger struct{}
+config := asynq.DefaultConfig(redisConfig)
+config.Concurrency = 16
+config.QueuePrefix = "prod:"
 
-func (l *MyLogger) Log(msg string)            { /* implement */ }
-func (l *MyLogger) LogSkip(skip int, msg string) { /* implement */ }
-func (l *MyLogger) Error(msg string)          { /* implement */ }
-func (l *MyLogger) ErrorSkip(skip int, msg string) { /* implement */ }
-
-// 2. Implement the ConfigProvider interface
-type MyConfig struct{}
-
-func (c *MyConfig) IsRedisEnabled() bool { return true }
-func (c *MyConfig) GetRedisAddrs() []string { return []string{"localhost:6379"} }
-func (c *MyConfig) GetRedisPassword() string { return "" }
-func (c *MyConfig) GetRedisUsername() string { return "" }
-func (c *MyConfig) GetConcurrency() int { return 10 }
-func (c *MyConfig) GetQueuePrefix() string { return "" }
-func (c *MyConfig) IsPollingEnabled() bool { return true }
-
-// 3. Set dependencies
-asynq.SetLogger(&MyLogger{})
-asynq.SetConfigProvider(&MyConfig{})
-```
-
-### 4. Initialize Manager
-
-```go
-// Initialize from config provider
-manager, err := asynq.InitManagerFromConfig(configProvider)
+startupCtx, cancelStartup := context.WithTimeout(context.Background(), 5*time.Second)
+manager, err := asynq.NewManager(startupCtx, config)
+cancelStartup()
 if err != nil {
-    log.Fatal(err)
+    return err
 }
-
-// Register task handlers
-manager.RegisterHandler("email:send", handleEmail)
-manager.RegisterHandler("report:generate", handleReport)
-
-// Start Worker
-ctx := context.Background()
-if err := manager.Start(ctx); err != nil {
-    log.Fatal(err)
-}
-
-// Graceful shutdown
 defer manager.Stop()
-```
 
-### 5. Create Worker
-
-**Recommended pattern: struct + ProcessTask method**
-
-```go
-type EmailWorker struct {
-    // dependency injection
-    emailService *EmailService
-    tracer       *Tracer
-}
-
-func NewEmailWorker(emailService *EmailService) *EmailWorker {
-    return &EmailWorker{
-        emailService: emailService,
-        tracer:       GetTracer(),
-    }
-}
-
-func (w *EmailWorker) ProcessTask(ctx context.Context, t *asynq.Task) (err error) {
-    startTime := time.Now()
-
-    // Panic recovery (required in production)
-    defer func() {
-        if r := recover(); r != nil {
-            stack := debug.Stack()
-            log.Printf("[PANIC] %v\nStack:\n%s", r, string(stack))
-            err = fmt.Errorf("panic recovered: %v", r)
-        }
-    }()
-
-    // Parse Payload
-    var payload EmailPayload
-    if err := json.Unmarshal(t.Payload(), &payload); err != nil {
-        return fmt.Errorf("parse payload failed: %w", err)
-    }
-
-    // Record trace (optional)
-    if w.tracer != nil {
-        w.tracer.RecordEvent(ctx, payload.TraceID, "email_send_start", nil)
-    }
-
-    // Business logic
-    if err := w.emailService.Send(payload.To, payload.Subject, payload.Body); err != nil {
-        log.Printf("[EmailWorker] Send failed: %v", err)
-        return err // return error to trigger retry
-    }
-
-    log.Printf("[EmailWorker] Done: to=%s, duration=%v", payload.To, time.Since(startTime))
-    return nil
-}
-```
-
-### 6. Enqueue Tasks
-
-**Option 1: Use TaskBuilder (recommended)**
-
-```go
-import "github.com/hexagon-codes/toolkit/infra/queue/asynq"
-
-// Simple task
-task := asynq.NewTask("email:send").
-    Payload(map[string]string{
-        "to": "user@example.com",
-        "subject": "Welcome",
-    }).
-    Queue(asynq.QueueHigh).
-    MaxRetry(3).
-    Enqueue(ctx)
-
-// Delayed task
-task := asynq.NewTask("report:generate").
-    Payload(reportData).
-    ProcessIn(5 * time.Minute).
-    Queue(asynq.QueueDefault).
-    Enqueue(ctx)
-
-// Scheduled task
-task := asynq.NewTask("cleanup").
-    Payload(nil).
-    ProcessAt(time.Now().Add(24 * time.Hour)).
-    Queue(asynq.QueueLow).
-    Enqueue(ctx)
-
-// Unique task (deduplication)
-task := asynq.NewTask("user:sync").
-    Payload(userData).
-    TaskID(fmt.Sprintf("sync:%d", userID)).
-    Unique(10 * time.Minute).
-    Enqueue(ctx)
-```
-
-**Option 2: Use Native API**
-
-```go
-import asq "github.com/hibiken/asynq"
-
-payload, _ := json.Marshal(data)
-task := asq.NewTask("task:type", payload)
-
-manager := asynq.GetManager()
-info, err := manager.Enqueue(ctx, task,
-    asq.Queue(asynq.QueueHigh),
-    asq.MaxRetry(3),
-    asq.Timeout(5 * time.Minute),
-)
-```
-
-## Advanced Features
-
-### 1. Queue Priority
-
-```go
-// Predefined queues (priority from high to low)
-asynq.QueueCritical   // highest priority
-asynq.QueueHigh       // high priority
-asynq.QueueDefault    // default priority
-asynq.QueueScheduled  // scheduled queue
-asynq.QueueLow        // low priority
-asynq.QueueDeadLetter // dead letter queue
-```
-
-### 2. Error Handling and Retry
-
-```go
-func (w *Worker) ProcessTask(ctx context.Context, t *asynq.Task) error {
-    // Returning an error triggers retry
-    if err := doSomething(); err != nil {
-        return err // Asynq will retry based on MaxRetry
-    }
-
-    // Return nil on success
-    return nil
-}
-```
-
-**Retry strategy:**
-- Exponential backoff: 1s, 2s, 4s, 8s, 16s...
-- Maximum retry count set by `MaxRetry()`
-- Tasks exceeding retry count go to dead letter queue
-
-### 3. Timeout Control
-
-```go
-task := asynq.NewTask("long:task").
-    Payload(data).
-    Timeout(10 * time.Minute). // 10-minute timeout
-    Deadline(time.Now().Add(1 * time.Hour)). // 1-hour deadline
-    Enqueue(ctx)
-```
-
-### 4. Task Deduplication
-
-```go
-// Deduplication using TaskID
-task := asynq.NewTask("user:sync").
-    Payload(userData).
-    TaskID(fmt.Sprintf("sync:%d", userID)). // same ID causes conflict
-    Enqueue(ctx)
-
-// Deduplication using Unique time window
-task := asynq.NewTask("notification").
-    Payload(data).
-    Unique(5 * time.Minute). // no duplicate enqueue within 5 minutes
-    Enqueue(ctx)
-```
-
-### 5. Scheduled Tasks (Cron)
-
-```go
-// Register scheduled task
-manager.RegisterSchedule(
-    "@every 1h",                    // Cron expression
-    asq.NewTask("cleanup", nil),    // task
-    asq.Queue(asynq.QueueLow),      // options
-)
-
-// Cron expression examples
-"@every 1h"       // every hour
-"0 */5 * * *"     // every 5 minutes
-"0 0 * * *"       // daily at midnight
-"0 9 * * 1"       // every Monday at 9am
-```
-
-### 6. Monitoring and Tracing
-
-```go
-// Get statistics
-stats := asynq.GetStats()
-fmt.Printf("Running: %v, Handlers: %d\n", stats["started"], stats["handlers"])
-
-// Use Inspector to query
-inspector := manager.GetInspector()
-defer inspector.Close()
-
-// Query queue info
-queueInfo, err := inspector.GetQueueInfo("default")
-fmt.Printf("Pending: %d, Active: %d\n", queueInfo.Pending, queueInfo.Active)
-```
-
-## Production Best Practices
-
-### 1. Panic Recovery (Required)
-
-```go
-func (w *Worker) ProcessTask(ctx context.Context, t *asynq.Task) (err error) {
-    defer func() {
-        if r := recover(); r != nil {
-            stack := debug.Stack()
-            log.Printf("[PANIC] %v\nStack:\n%s", r, string(stack))
-            err = fmt.Errorf("panic recovered: %v", r)
-        }
-    }()
-
-    // Business logic
-}
-```
-
-### 2. Idempotency Design
-
-```go
-// Use unique identifier to prevent duplicate processing
-func (w *Worker) ProcessTask(ctx context.Context, t *asynq.Task) error {
-    taskID := payload.TaskID
-
-    // Check if already processed
-    if isProcessed(taskID) {
-        log.Printf("[Worker] Task already processed: %s", taskID)
-        return nil // return nil to avoid retry
-    }
-
-    // Mark as processing
-    markAsProcessing(taskID)
-
-    // Execute business logic
-    // ...
-
-    // Mark as completed
-    markAsCompleted(taskID)
-    return nil
-}
-```
-
-### 3. Timeout Control
-
-```go
-// Context timeout
-ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-defer cancel()
-
-// Check Context
-select {
-case <-ctx.Done():
-    return fmt.Errorf("task cancelled: %w", ctx.Err())
-default:
-    // continue processing
-}
-```
-
-### 4. Resource Cleanup
-
-```go
-func (w *Worker) ProcessTask(ctx context.Context, t *asynq.Task) error {
-    // Acquire resource
-    conn := getConnection()
-    defer conn.Close() // ensure release
-
-    // Business logic
-    // ...
-
-    return nil
-}
-```
-
-### 5. Logging
-
-```go
-func (w *Worker) ProcessTask(ctx context.Context, t *asynq.Task) error {
-    startTime := time.Now()
-
-    log.Printf("[Worker] Start: task_id=%s", payload.TaskID)
-
-    // Business logic
-    err := w.process(payload)
-
-    duration := time.Since(startTime)
-    if err != nil {
-        log.Printf("[Worker] Failed: task_id=%s, err=%v, duration=%v",
-            payload.TaskID, err, duration)
-    } else {
-        log.Printf("[Worker] Success: task_id=%s, duration=%v",
-            payload.TaskID, duration)
-    }
-
+manager.RegisterHandler("email:send", handleEmail)
+if err := manager.Start(ctx); err != nil {
     return err
 }
 ```
 
-## Complete Example
+`NewManager` normalizes and validates configuration, creates the canonical Redis factory, and performs `PING` through a dedicated Redis client before returning. Callers must handle initialization errors.
 
-Refer to the example code in the project:
-- `examples/infra/asynq_example.go` - basic example
-- `examples/infra/asynq_complete_example.go` - production-grade complete example
+Use the process-wide singleton only when required:
 
-## Troubleshooting
-
-### 1. Tasks Not Being Processed
-
-**Checklist:**
-- [ ] Is Redis accessible?
-- [ ] Is Manager started? (`manager.Start(ctx)`)
-- [ ] Is the task type registered? (`manager.RegisterHandler`)
-- [ ] Is queue configuration correct?
-- [ ] Is Worker concurrency sufficient?
-
-### 2. Tasks Keep Retrying
-
-**Causes:**
-- Workers returning errors trigger retries
-- Check if business logic is throwing errors
-- Check MaxRetry configuration
-
-**Solution:**
 ```go
-// For non-retryable errors, return nil
-if isNonRetryableError(err) {
-    log.Printf("Non-retryable error: %v", err)
-    return nil // no retry
+manager, err := asynq.InitManager(ctx, config)
+```
+
+A second call returns `ErrManagerAlreadyInitialized`. `ConfigProvider`, `DefaultConfigProvider`, `InitManagerFromConfig`, `SetRedisClient`, and `GetRedisClient` no longer exist.
+
+## 2. Redis topology and authentication
+
+### Standalone or proxy
+
+```go
+redisConfig := redisconn.DefaultConfig(
+    redisconn.ModeSingle,
+    "redis.internal:6379",
+)
+```
+
+Single mode requires exactly one address.
+
+### Redis Cluster
+
+```go
+redisConfig := redisconn.DefaultConfig(
+    redisconn.ModeCluster,
+    "redis-0.internal:6379", // one seed remains explicit Cluster mode
+)
+redisConfig.MaxRedirects = 5
+```
+
+`ModeCluster`, not address count, selects topology.
+
+### Redis Sentinel
+
+```go
+redisConfig := redisconn.DefaultConfig(
+    redisconn.ModeSentinel,
+    "sentinel-0.internal:26379",
+    "sentinel-1.internal:26379",
+)
+redisConfig.MasterName = "mymaster"
+redisConfig.DataCredentials = redisconn.Credentials{
+    Username: "queue-worker",
+    Password: os.Getenv("REDIS_DATA_PASSWORD"),
 }
-return err // retryable error
-```
-
-### 3. Tasks in Dead Letter Queue
-
-**View dead letter queue:**
-```go
-inspector := manager.GetInspector()
-tasks, err := inspector.ListDeadletterTasks("default")
-for _, task := range tasks {
-    log.Printf("Dead task: %s, error: %s", task.ID, task.LastErr)
+redisConfig.SentinelCredentials = redisconn.Credentials{
+    Username: "sentinel-reader",
+    Password: os.Getenv("REDIS_SENTINEL_PASSWORD"),
 }
 ```
 
-**Re-enqueue:**
+Data nodes and Sentinel are separate authentication domains; do not conflate their credentials.
+
+### ACL policy
+
+Redis 6+ still supports `AUTH password` for the default user, and older Redis supports only password-only authentication. This project intentionally adopts a stricter modern ACL contract:
+
+- No authentication: both `Username` and `Password` are empty.
+- Authentication: both `Username` and `Password` are non-empty.
+- Password-only or username-only: validation fails.
+
+Password-protected pre-Redis-6 deployments are therefore outside this version's support contract. Migrate them to a Redis 6+ ACL account; do not supply a fake username to bypass validation.
+
+Dynamic credentials use `CredentialsProvider`, must return a complete pair, and are mutually exclusive with static `DataCredentials`:
+
 ```go
-// Re-enqueue from dead letter queue
-err := inspector.DeleteTask("default", taskID)
+redisConfig.CredentialsProvider = func(ctx context.Context) (redisconn.Credentials, error) {
+    return loadRedisACLFromSecretManager(ctx)
+}
 ```
 
-## More Resources
+### TLS and pools
 
-- [Asynq Official Documentation](https://github.com/hibiken/asynq)
-- [Project Example Code](../../examples/infra/)
-- [Interface Definitions](./interfaces.go)
+```go
+redisConfig.TLSConfig = &tls.Config{
+    MinVersion: tls.VersionTLS12,
+    ServerName: "redis.internal",
+}
+redisConfig.DialTimeout = 3 * time.Second
+redisConfig.ReadTimeout = 2 * time.Second
+redisConfig.WriteTimeout = 2 * time.Second
+redisConfig.PoolSize = 100
+redisConfig.MinIdleConns = 10
+```
+
+The same factory propagates these settings to the Asynq client, worker, scheduler, inspector, and the Manager's lease client.
+
+## 3. Queues and environment isolation
+
+`QueueCritical`, `QueueHigh`, `QueueDefault`, `QueueScheduled`, `QueueLow`, and `QueueDeadLetter` are immutable base names. `Queue(...)` arguments passed to `Manager.Enqueue`, `EnqueueTask`, and `RegisterSchedule`, plus keys in `Config.Queues`, must be unnamespaced base names. A Manager always concatenates a non-empty `QueuePrefix`, even when its text overlaps the beginning of the base, and verifies that the result belongs to this instance.
+
+```go
+config.QueuePrefix = "prod:"
+
+_, err := manager.EnqueueTask(
+    ctx,
+	"email:send",
+	payload,
+	hibasynq.Queue(asynq.QueueHigh), // Manager resolves this to prod:high
+)
+```
+
+Omitting `Queue(...)` selects `QueueDefault`. If a custom `Config.Queues` omits default, enqueue and scheduler registration return `ErrQueueNotFound` instead of sending work to an unconsumed Asynq default queue. The Manager's final canonical Queue overrides Task-embedded Queue options, preventing cross-namespace routing. Do not pass `manager.QueueName(base)` to enqueue APIs; it is treated as a base name and rejected as unconfigured.
+
+The queue arguments to `GetDeadLetterTasks`, `RetryDeadLetterTask`, and `DeleteDeadLetterTask` likewise accept base names only and reject other namespaces. Use `manager.QueueName(base)` only for native integrations such as Inspector or Asynqmon that need the actual Redis queue name. Direct `manager.GetClient()` use is an explicit escape hatch and bypasses the Manager namespace invariant.
+
+Set custom priorities through `Config.Queues`:
+
+```go
+config.Queues = map[string]int{
+    asynq.QueueCritical: 10,
+    asynq.QueueDefault:  4,
+    asynq.QueueLow:      1,
+}
+```
+
+Normalization applies `QueuePrefix` to every key and copies the map, so later caller mutation cannot change the Manager.
+
+## 4. Polling initialization
+
+`PollingConfig` contains only polling policy; it does not duplicate Redis, concurrency, or queue configuration:
+
+```go
+cleanup, err := asynq.InitPolling(
+    ctx,
+    asynq.PollingConfig{
+        Enabled:         true,
+        MigrateExisting: true,
+    },
+    config,
+    asynq.WorkerDependencies{
+        RegisterTaskPollWorker: registerTaskPollWorker,
+        RegisterWebhookWorker:  registerWebhookWorker,
+        MigrateFunc:            migrateExistingTasks,
+    },
+)
+if err != nil {
+    return err
+}
+defer cleanup()
+```
+
+Manager construction, worker/scheduler startup, or migration-lease failure is returned synchronously and rolls back owned resources.
+
+## 5. Token leases
+
+```go
+lease, acquired, err := manager.AcquirePollingLease(ctx, taskID)
+if err != nil {
+    return err // fail closed; do not execute duplicate work
+}
+if !acquired {
+    return nil
+}
+
+defer func() {
+    cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+    defer cancel()
+    _ = lease.Release(cleanupCtx)
+}()
+
+// Long-running work may explicitly refresh its lease.
+if err := lease.Refresh(ctx); err != nil {
+    return err
+}
+```
+
+Each lease value is a random token. `Refresh` and `Release` use compare-token Lua scripts, so an expired owner cannot modify a replacement owner's lock.
+
+Polling and migration keys use a dedicated internal-key rule: a non-empty Manager `QueuePrefix` is always concatenated with the fixed base, with no string-prefix guessing. Different tenant prefixes do not contend accidentally, while replicas with the same prefix still share a lock.
+
+Migration uses the same primitive and refreshes at TTL/3. Refresh failure cancels the derived context passed to the migration function and fails closed.
+
+## 6. Lifecycle and observability
+
+- `Start(ctx)` synchronously calls Asynq server/scheduler `Start`.
+- Scheduler registration or startup failure never leaves `started` set to true and closes attempt resources.
+- `Stop()` is idempotent and closes resources even for a Manager that was never started.
+- Logs do not expose usernames or passwords.
+- `SetLogger` safely replaces different concrete Logger implementations; configuration itself uses explicit dependency injection.
+
+See `examples/infra/asynq_complete_example.go` for a complete buildable example.

@@ -2,130 +2,160 @@ package asynq
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 const (
-	// PollingLockTTL 轮询锁过期时间（秒）
-	// 计算依据：
-	// - 默认轮询间隔：180s（配置轮询周期 × 12）
-	// - 单次最长操作：任务处理(60s) + 文件上传(300s) = 360s
-	// - 安全余量：60s
-	// 设置为 480s（8分钟）确保：
-	// - 无需依赖续租机制即可覆盖所有场景
-	// - ExtendPollingLock 续租作为额外保障（超长任务）
-	// - Worker 崩溃后最多 8 分钟恢复（可接受）
-	PollingLockTTL = 480 // 8 分钟
-
-	// redisOpTimeout Redis 操作超时时间
-	redisOpTimeout = 5 * time.Second
-)
-
-// MarkTaskAsPolling 标记任务正在轮询
-//
-// 返回 true 表示成功获取锁，false 表示任务已在轮询中
-//
-// 降级行为说明:
-//   - 当 Redis 未启用时，直接返回 true
-//   - 当 Redis 操作失败时，返回 true 并记录日志（允许继续执行）
-//   - 降级可能导致多个 worker 同时处理同一任务，调用方应确保任务处理是幂等的
-func MarkTaskAsPolling(taskID string) bool {
-	if !GetConfigProvider().IsRedisEnabled() {
-		return true // Redis 未启用，允许继续
-	}
-	key := fmt.Sprintf("polling_lock:%s", taskID)
-	ctx, cancel := context.WithTimeout(context.Background(), redisOpTimeout)
-	defer cancel()
-	// 使用 SetNX（只在不存在时设置）
-	success, err := GetRedisClient().SetNX(ctx, key, "1", PollingLockTTL*time.Second).Result()
-	if err != nil {
-		GetLogger().Log(fmt.Sprintf("[PollingLock] SetNX error: %s, err=%v", taskID, err))
-		return true // 错误时允许继续（降级）
-	}
-	return success
-}
-
-// IsTaskPolling 检查任务是否正在轮询
-func IsTaskPolling(taskID string) bool {
-	if !GetConfigProvider().IsRedisEnabled() {
-		return false
-	}
-	key := fmt.Sprintf("polling_lock:%s", taskID)
-	ctx, cancel := context.WithTimeout(context.Background(), redisOpTimeout)
-	defer cancel()
-	val, err := GetRedisClient().Get(ctx, key).Result()
-	if err != nil {
-		return false // 不存在或错误，认为未轮询
-	}
-	return val == "1"
-}
-
-// ReleasePollingLock 释放轮询锁（可选，依赖 TTL 自动过期）
-func ReleasePollingLock(taskID string) {
-	if !GetConfigProvider().IsRedisEnabled() {
-		return
-	}
-	key := fmt.Sprintf("polling_lock:%s", taskID)
-	ctx, cancel := context.WithTimeout(context.Background(), redisOpTimeout)
-	defer cancel()
-	GetRedisClient().Del(ctx, key)
-}
-
-// ExtendPollingLock 延长轮询锁（任务处理时间超过 TTL 时使用）
-func ExtendPollingLock(taskID string) {
-	if !GetConfigProvider().IsRedisEnabled() {
-		return
-	}
-	key := fmt.Sprintf("polling_lock:%s", taskID)
-	ctx, cancel := context.WithTimeout(context.Background(), redisOpTimeout)
-	defer cancel()
-	GetRedisClient().Expire(ctx, key, PollingLockTTL*time.Second)
-}
-
-// =========================================
-// 迁移分布式锁
-// 确保多 Pod 启动时只有一个执行迁移
-// =========================================
-const (
-	// MigrationLockKey 迁移锁的 Redis key
+	// PollingLockTTL is the default ownership window for task polling.
+	PollingLockTTL = 8 * time.Minute
+	// MigrationLockKey is the base key namespaced by Manager.QueuePrefix.
 	MigrationLockKey = "asynq:migration_lock"
-	// MigrationLockTTL 迁移锁过期时间（2分钟）
-	// 缩短 TTL 以便 Pod 崩溃后其他 Pod 能更快接管迁移任务
-	// 如果迁移任务量大，会在执行过程中定期续租
+	// MigrationLockTTL is the migration lease window refreshed at one third.
 	MigrationLockTTL = 2 * time.Minute
+	redisOpTimeout   = 5 * time.Second
 )
 
-// AcquireMigrationLock 获取迁移锁
-//
-// 返回 true 表示成功获取锁，可以执行迁移
-// 返回 false 表示其他 Pod 正在迁移，应跳过
-//
-// 降级行为说明:
-//   - 当 Redis 未启用时，返回 true（单 Pod 场景）
-//   - 当 Redis 操作失败时，返回 true 并记录日志
-//   - 降级可能导致多个 Pod 同时执行迁移，迁移操作应设计为幂等
-func AcquireMigrationLock() bool {
-	if !GetConfigProvider().IsRedisEnabled() {
-		return true // Redis 未启用，允许继续（单 Pod 场景）
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), redisOpTimeout)
-	defer cancel()
-	// 使用 SetNX 尝试获取锁
-	success, err := GetRedisClient().SetNX(ctx, MigrationLockKey, "1", MigrationLockTTL).Result()
-	if err != nil {
-		GetLogger().Log(fmt.Sprintf("[MigrationLock] SetNX error: %v, allowing migration", err))
-		return true // 错误时允许继续（降级）
-	}
-	return success
+var (
+	releaseLeaseScript = redis.NewScript(`
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+  return redis.call("DEL", KEYS[1])
+end
+return 0`)
+	refreshLeaseScript = redis.NewScript(`
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+  return redis.call("PEXPIRE", KEYS[1], ARGV[2])
+end
+return 0`)
+)
+
+// Lease is an ownership token for a Redis lock. Only the owner token may
+// refresh or release the key, preventing a stale worker from touching a later
+// owner's lock after TTL expiry.
+type Lease struct {
+	client redis.UniversalClient
+	key    string
+	token  string
+	ttl    time.Duration
 }
 
-// ReleaseMigrationLock 释放迁移锁
-func ReleaseMigrationLock() {
-	if !GetConfigProvider().IsRedisEnabled() {
-		return
+// AcquirePollingLease attempts to own a task's polling lease. A false result
+// with nil error means another worker owns it; Redis failures return an error
+// and never grant work.
+func (m *Manager) AcquirePollingLease(ctx context.Context, taskID string) (*Lease, bool, error) {
+	if taskID == "" {
+		return nil, false, fmt.Errorf("%w: empty task ID", ErrInvalidLease)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), redisOpTimeout)
+	return m.acquireLease(ctx, m.internalKey("polling_lock:"+taskID), PollingLockTTL)
+}
+
+// AcquireMigrationLease attempts to own the migration lease within this
+// manager's queue-prefix namespace.
+func (m *Manager) AcquireMigrationLease(ctx context.Context) (*Lease, bool, error) {
+	return m.acquireMigrationLease(ctx, MigrationLockTTL)
+}
+
+func (m *Manager) acquireMigrationLease(ctx context.Context, ttl time.Duration) (*Lease, bool, error) {
+	return m.acquireLease(ctx, m.internalKey(MigrationLockKey), ttl)
+}
+
+func (m *Manager) internalKey(base string) string {
+	if m.config.QueuePrefix == "" {
+		return base
+	}
+	return m.config.QueuePrefix + base
+}
+
+func (m *Manager) acquireLease(ctx context.Context, key string, ttl time.Duration) (*Lease, bool, error) {
+	if ctx == nil {
+		return nil, false, fmt.Errorf("%w: nil context", ErrInvalidLease)
+	}
+	if key == "" || ttl <= 0 {
+		return nil, false, fmt.Errorf("%w: key and positive TTL are required", ErrInvalidLease)
+	}
+	m.mu.RLock()
+	client := m.redisClient
+	closed := m.closed
+	m.mu.RUnlock()
+	if closed || client == nil {
+		return nil, false, ErrRedisClientUnavailable
+	}
+	token, err := newLeaseToken()
+	if err != nil {
+		return nil, false, fmt.Errorf("asynq: generate lease token: %w", err)
+	}
+
+	opCtx, cancel := context.WithTimeout(ctx, redisOpTimeout)
 	defer cancel()
-	GetRedisClient().Del(ctx, MigrationLockKey)
+	acquired, err := client.SetNX(opCtx, key, token, ttl).Result()
+	if err != nil {
+		return nil, false, fmt.Errorf("asynq: acquire Redis lease %q: %w", key, err)
+	}
+	if !acquired {
+		return nil, false, nil
+	}
+	return &Lease{client: client, key: key, token: token, ttl: ttl}, true, nil
+}
+
+// Refresh extends this lease only while its ownership token still matches.
+func (l *Lease) Refresh(ctx context.Context) error {
+	if l == nil || l.client == nil {
+		return ErrRedisClientUnavailable
+	}
+	if ctx == nil {
+		return fmt.Errorf("%w: nil context", ErrInvalidLease)
+	}
+	opCtx, cancel := context.WithTimeout(ctx, redisOpTimeout)
+	defer cancel()
+	result, err := refreshLeaseScript.Run(
+		opCtx,
+		l.client,
+		[]string{l.key},
+		l.token,
+		l.ttl.Milliseconds(),
+	).Int64()
+	if err != nil {
+		return fmt.Errorf("asynq: refresh Redis lease %q: %w", l.key, err)
+	}
+	if result != 1 {
+		return ErrLeaseLost
+	}
+	return nil
+}
+
+// Release deletes this lease only while its ownership token still matches.
+func (l *Lease) Release(ctx context.Context) error {
+	if l == nil || l.client == nil {
+		return ErrRedisClientUnavailable
+	}
+	if ctx == nil {
+		return fmt.Errorf("%w: nil context", ErrInvalidLease)
+	}
+	opCtx, cancel := context.WithTimeout(ctx, redisOpTimeout)
+	defer cancel()
+	result, err := releaseLeaseScript.Run(
+		opCtx,
+		l.client,
+		[]string{l.key},
+		l.token,
+	).Int64()
+	if err != nil {
+		return fmt.Errorf("asynq: release Redis lease %q: %w", l.key, err)
+	}
+	if result != 1 {
+		return ErrLeaseLost
+	}
+	return nil
+}
+
+func newLeaseToken() (string, error) {
+	var token [16]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(token[:]), nil
 }
