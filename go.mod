@@ -5,7 +5,6 @@ go 1.25.12
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.43.0
 	github.com/alicebob/miniredis/v2 v2.36.1
-	github.com/bytedance/gopkg v0.1.3
 	github.com/elastic/go-elasticsearch/v8 v8.19.1
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/google/uuid v1.6.0
