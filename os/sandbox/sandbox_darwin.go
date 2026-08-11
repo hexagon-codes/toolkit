@@ -36,6 +36,8 @@ var (
 		"/usr/bin",
 		"/usr/sbin",
 		"/usr/libexec",
+		"/usr/local/bin",
+		"/opt/homebrew/bin",
 		"/Library/Apple",
 		"/Library/Frameworks",
 	}

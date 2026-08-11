@@ -528,7 +528,15 @@ func auditWindowsHandleOwner(file *os.File, ownerSID *windows.SID) error {
 	if err != nil {
 		return fmt.Errorf("read handle owner: %w", err)
 	}
-	if defaulted || actualOwner == nil || !actualOwner.Equals(ownerSID) {
+	// 管理员运行的进程（如 CI runner）创建的临时目录 owner 是 BUILTIN\Administrators
+	// 组而非具体用户 SID；两者均视为受信 owner。
+	administratorsSID, sidErr := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if sidErr != nil {
+		return fmt.Errorf("resolve builtin administrators SID: %w", sidErr)
+	}
+	runtime.KeepAlive(administratorsSID)
+	if defaulted || actualOwner == nil ||
+		(!actualOwner.Equals(ownerSID) && !actualOwner.Equals(administratorsSID)) {
 		actualDescription := "<nil>"
 		if actualOwner != nil {
 			actualDescription = actualOwner.String()
@@ -810,8 +818,8 @@ func windowsBlockedAppContainerSIDs(appContainerSID []byte, networkMode NetworkM
 }
 
 func verifyWindowsDeniedRootTree(root *os.Root, relativePath string, blockedSIDs []*windows.SID) (resultErr error) {
-	if err := rejectWindowsRootReparsePoint(root, relativePath); err != nil {
-		return fmt.Errorf("audit denied path entry %q: %w", relativePath, err)
+	if rejectErr := rejectWindowsRootReparsePoint(root, relativePath); rejectErr != nil {
+		return fmt.Errorf("audit denied path entry %q: %w", relativePath, rejectErr)
 	}
 	file, err := root.Open(relativePath)
 	if err != nil {

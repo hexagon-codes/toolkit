@@ -192,16 +192,16 @@ func TestWindowsDeniedPathsRejectsAccessibleDescendant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open denied-path child fixture: %v", err)
 	}
-	if err := setPersistentWindowsWorkspaceACL(
+	if aclErr := setPersistentWindowsWorkspaceACL(
 		child,
 		windowsValue.workspace.ownerSID,
 		windowsValue.workspace.appContainerSID,
-	); err != nil {
+	); aclErr != nil {
 		_ = child.Close()
-		t.Fatalf("grant child AppContainer fixture access: %v", err)
+		t.Fatalf("grant child AppContainer fixture access: %v", aclErr)
 	}
-	if err := child.Close(); err != nil {
-		t.Fatalf("close denied-path child fixture: %v", err)
+	if closeErr := child.Close(); closeErr != nil {
+		t.Fatalf("close denied-path child fixture: %v", closeErr)
 	}
 
 	_, err = New(Config{

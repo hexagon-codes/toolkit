@@ -55,8 +55,8 @@ func resolveWindowsWorkspaceExecutable(workspace *windowsWorkspace, absolutePath
 	if err != nil || relativePath == ".." || strings.HasPrefix(relativePath, `..\`) {
 		return nil, fmt.Errorf("workspace executable is outside the sandbox root")
 	}
-	if err := rejectWindowsRootReparsePoint(workspace.root, relativePath); err != nil {
-		return nil, fmt.Errorf("workspace executable path is invalid: %w", err)
+	if rejectErr := rejectWindowsRootReparsePoint(workspace.root, relativePath); rejectErr != nil {
+		return nil, fmt.Errorf("workspace executable path is invalid: %w", rejectErr)
 	}
 	original, err := workspace.root.Open(relativePath)
 	if err != nil {

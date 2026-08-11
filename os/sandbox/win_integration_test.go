@@ -120,10 +120,10 @@ func TestWindows_WorkspaceIsolation(t *testing.T) {
 	if !strings.Contains(result.Stdout, "sandbox data") {
 		t.Fatalf("stdout = %q, want workspace content", result.Stdout)
 	}
-	if _, err := sandboxValue.Exec(context.Background(), Command{
+	if _, execErr := sandboxValue.Exec(context.Background(), Command{
 		Path: canonicalWindowsSystemExecutable(t, "cmd.exe"),
 		Args: []string{"/d", "/c", "echo", "child-data", ">", "child.txt"},
-	}); err != nil {
+	}); execErr != nil {
 		t.Fatalf("write workspace file from AppContainer: %v", err)
 	}
 	written, err := os.ReadFile(filepath.Join(workspacePath, "child.txt"))
@@ -822,9 +822,9 @@ func installWindowsTestPayload(t *testing.T, workspacePath, filename string) str
 	if err := os.WriteFile(payloadPath, payload, 0o700); err != nil {
 		t.Fatalf("write test payload: %v", err)
 	}
-	file, err := os.Open(payloadPath)
-	if err != nil {
-		t.Fatalf("open test payload: %v", err)
+	file, openErr := os.Open(payloadPath)
+	if openErr != nil {
+		t.Fatalf("open test payload: %v", openErr)
 	}
 	defer file.Close()
 	canonicalPath, err := canonicalWindowsPathFromHandle(file)
