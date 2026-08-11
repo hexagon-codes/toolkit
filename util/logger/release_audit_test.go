@@ -117,6 +117,51 @@ func TestNewWithHandlerSetLevelControlsOutput(t *testing.T) {
 	}
 }
 
+func TestUseHandlerSetLevelControlsOutput(t *testing.T) {
+	previousLogger := defaultLoggerPtr.Load()
+	previousSlog := slog.Default()
+	t.Cleanup(func() {
+		defaultLoggerPtr.Store(previousLogger)
+		slog.SetDefault(previousSlog)
+	})
+
+	var output bytes.Buffer
+	UseHandler(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	SetLevel("error")
+	Info("must be filtered")
+	if output.Len() != 0 {
+		t.Fatalf("info output was not filtered: %s", output.String())
+	}
+	Error("must be emitted")
+	if !bytes.Contains(output.Bytes(), []byte("must be emitted")) {
+		t.Fatalf("error output was filtered: %s", output.String())
+	}
+}
+
+func TestUseHandlerWithConfigSetLevelControlsOutput(t *testing.T) {
+	previousLogger := defaultLoggerPtr.Load()
+	previousSlog := slog.Default()
+	t.Cleanup(func() {
+		defaultLoggerPtr.Store(previousLogger)
+		slog.SetDefault(previousSlog)
+	})
+
+	var output bytes.Buffer
+	UseHandlerWithConfig(
+		slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}),
+		&Config{Level: "debug", Format: "json", Output: "stdout"},
+	)
+	SetLevel("error")
+	Info("must be filtered")
+	if output.Len() != 0 {
+		t.Fatalf("info output was not filtered: %s", output.String())
+	}
+	Error("must be emitted")
+	if !bytes.Contains(output.Bytes(), []byte("must be emitted")) {
+		t.Fatalf("error output was filtered: %s", output.String())
+	}
+}
+
 func TestMultiWriterConvertsWriterPanicToError(t *testing.T) {
 	panicErr := errors.New("writer exploded")
 	writer := NewMultiWriter(auditPanicWriter{err: panicErr})

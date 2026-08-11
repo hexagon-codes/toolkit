@@ -14,6 +14,31 @@ type secureHandler struct {
 	handler slog.Handler
 }
 
+type levelHandler struct {
+	handler slog.Handler
+	level   *slog.LevelVar
+}
+
+func newLevelHandler(handler slog.Handler, level *slog.LevelVar) slog.Handler {
+	return &levelHandler{handler: handler, level: level}
+}
+
+func (h *levelHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return level >= h.level.Level() && h.handler.Enabled(ctx, level)
+}
+
+func (h *levelHandler) Handle(ctx context.Context, record slog.Record) error {
+	return h.handler.Handle(ctx, record)
+}
+
+func (h *levelHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return newLevelHandler(h.handler.WithAttrs(attrs), h.level)
+}
+
+func (h *levelHandler) WithGroup(name string) slog.Handler {
+	return newLevelHandler(h.handler.WithGroup(name), h.level)
+}
+
 func newSecureHandler(handler slog.Handler) slog.Handler {
 	if handler == nil {
 		panic("logger: nil handler")

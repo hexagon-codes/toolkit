@@ -5,6 +5,8 @@ import (
 	"log/slog"
 )
 
+const customHandlerPassThroughLevel = slog.Level(-1 << 30)
+
 // ZapHandler 是一个示例接口，展示如何集成 zap
 // 实际使用时，需要引入 zap 包：
 //
@@ -24,9 +26,11 @@ import (
 
 // UseHandler 使用自定义 Handler（可用于集成 zap）
 func UseHandler(h slog.Handler) {
+	levelVar := &slog.LevelVar{}
+	levelVar.Set(customHandlerPassThroughLevel)
 	logger := &Logger{
-		slog:   slog.New(newSecureHandler(h)),
-		level:  &slog.LevelVar{},
+		slog:   slog.New(newLevelHandler(newSecureHandler(h), levelVar)),
+		level:  levelVar,
 		config: DefaultConfig(),
 	}
 	SetDefault(logger)
@@ -38,7 +42,7 @@ func UseHandlerWithConfig(h slog.Handler, cfg *Config) {
 	levelVar.Set(parseLevel(cfg.Level))
 
 	logger := &Logger{
-		slog:   slog.New(newSecureHandler(h)),
+		slog:   slog.New(newLevelHandler(newSecureHandler(h), levelVar)),
 		level:  levelVar,
 		config: cfg,
 	}
@@ -47,9 +51,11 @@ func UseHandlerWithConfig(h slog.Handler, cfg *Config) {
 
 // NewWithHandler 使用自定义 Handler 创建 Logger
 func NewWithHandler(h slog.Handler) *Logger {
+	levelVar := &slog.LevelVar{}
+	levelVar.Set(customHandlerPassThroughLevel)
 	return &Logger{
-		slog:   slog.New(newSecureHandler(h)),
-		level:  &slog.LevelVar{},
+		slog:   slog.New(newLevelHandler(newSecureHandler(h), levelVar)),
+		level:  levelVar,
 		config: DefaultConfig(),
 	}
 }
