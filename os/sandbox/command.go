@@ -66,6 +66,11 @@ func (identity sandboxPathIdentity) revalidate(field string) error {
 	if !os.SameFile(identity.info, current) {
 		return fmt.Errorf("sandbox %s identity changed", field)
 	}
+	// NTFS 的文件索引可能被新目录复用，SameFile 不足以证明身份未替换；
+	// 补充修改时间与大小对比（目录替换必然产生差异）。
+	if !identity.info.ModTime().Equal(current.ModTime()) || identity.info.Size() != current.Size() {
+		return fmt.Errorf("sandbox %s identity changed", field)
+	}
 	canonical, err := filepath.EvalSymlinks(identity.path)
 	if err != nil {
 		return fmt.Errorf("revalidate sandbox %s path: %w", field, err)

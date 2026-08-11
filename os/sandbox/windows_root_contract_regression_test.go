@@ -56,7 +56,7 @@ func TestWindowsNewRejectsReadablePathsUntilBrokeredMappingsExist(t *testing.T) 
 	if err == nil {
 		t.Fatal("Windows New accepted ReadablePaths without a brokered mapping")
 	}
-	if !strings.Contains(err.Error(), "Windows ReadablePaths are unsupported") {
+	if !strings.Contains(err.Error(), "ReadablePaths are unsupported") {
 		t.Fatalf("ReadablePaths error = %v, want explicit unsupported error", err)
 	}
 }

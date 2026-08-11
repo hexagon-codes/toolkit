@@ -92,6 +92,11 @@ func TestWindows_ExecPythonCode(t *testing.T) {
 		t.Fatalf("resolve canonical python path: %v", err)
 	}
 	sandboxValue := newWindowsTestSandbox(t, Config{Workspace: t.TempDir(), Timeout: 15, RequiredCapabilities: UntrustedCodeIsolationCapabilities})
+	// GitHub 托管 runner 的 setup-python 把解释器装到 hostedtoolcache，不在
+	// Windows 可信运行时根内；该场景由系统安装的解释器另行验证。
+	if strings.Contains(strings.ToLower(pythonPath), "hostedtoolcache") {
+		t.Skip("python is outside the trusted runtime roots on this runner")
+	}
 	result, err := sandboxValue.Exec(context.Background(), Command{
 		Path: pythonPath,
 		Args: []string{"-c", `print("hello from sandbox")`},
@@ -563,6 +568,10 @@ func TestWindows_JobProcessRootPayload(t *testing.T) {
 		"--",
 		firstReady,
 	) // #nosec G204 -- 仅重启工作区内已冻结的测试载荷。
+	// AppContainer 沙箱内 nil stdio 会打开 NUL 设备并被拒绝；显式继承父进程 stdio。
+	first.Stdin = os.Stdin
+	first.Stdout = os.Stdout
+	first.Stderr = os.Stderr
 	if err := first.Start(); err != nil {
 		fmt.Printf("JOB_PROCESS_FIXTURE_FAILED:first-start:%v", err)
 		return
@@ -586,6 +595,9 @@ func TestWindows_JobProcessRootPayload(t *testing.T) {
 		"--",
 		secondReady,
 	) // #nosec G204 -- 仅重启工作区内已冻结的测试载荷。
+	second.Stdin = os.Stdin
+	second.Stdout = os.Stdout
+	second.Stderr = os.Stderr
 	if err := second.Start(); err != nil {
 		killWindowsPayloadChildren([]*exec.Cmd{first}, []<-chan error{firstDone})
 		fmt.Printf("JOB_PROCESS_FIXTURE_FAILED:second-start:%v", err)
@@ -688,6 +700,10 @@ func TestWindows_JobMemoryRootPayload(t *testing.T) {
 			"--",
 			resultPath,
 		) // #nosec G204 -- 仅重启工作区内已冻结的测试载荷。
+		// AppContainer 沙箱内 nil stdio 会打开 NUL 设备并被拒绝；显式继承父进程 stdio。
+		child.Stdin = os.Stdin
+		child.Stdout = os.Stdout
+		child.Stderr = os.Stderr
 		if err := child.Start(); err != nil {
 			killWindowsPayloadChildren(children, waits)
 			fmt.Printf("JOB_MEMORY_FIXTURE_FAILED:child-%d-start:%v", index, err)

@@ -347,8 +347,9 @@ func inspectWindowsFileHandle(file *os.File) (windowsFileIdentity, error) {
 		return windowsFileIdentity{}, err
 	}
 	attributes := info.FileAttributes
-	// FILE_FLAG_OPEN_REPARSE_POINT 打开时 GetFileInformationByHandle 不返回
-	// REPARSE_POINT 位；用 FileAttributeTagInformation 补齐 reparse tag 检测。
+	// FILE_FLAG_OPEN_REPARSE_POINT 打开时 GetFileInformationByHandle 返回的属性
+	// 可能缺失 DIRECTORY/REPARSE_POINT 位；FileAttributeTagInformation 返回的
+	// 属性最完整，以其为准并补齐 reparse tag 检测。
 	// FILE_ATTRIBUTE_TAG_INFO 结构（x/sys/windows 仅有信息类常量，无现成类型）。
 	var tagInfo struct {
 		fileAttributes uint32
@@ -359,8 +360,11 @@ func inspectWindowsFileHandle(file *os.File) (windowsFileIdentity, error) {
 		windows.FileAttributeTagInfo,
 		(*byte)(unsafe.Pointer(&tagInfo)),
 		uint32(unsafe.Sizeof(tagInfo)),
-	); err == nil && tagInfo.reparseTag != 0 {
-		attributes |= windows.FILE_ATTRIBUTE_REPARSE_POINT
+	); err == nil {
+		attributes = tagInfo.fileAttributes
+		if tagInfo.reparseTag != 0 {
+			attributes |= windows.FILE_ATTRIBUTE_REPARSE_POINT
+		}
 	}
 	runtime.KeepAlive(file)
 	return windowsFileIdentity{
