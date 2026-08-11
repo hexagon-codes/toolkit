@@ -277,7 +277,7 @@ func resolveWindowsWorkingDirectory(workspace *windowsWorkspace, commandDir stri
 	frozenHandle, err := reopenWindowsHandle(
 		windows.Handle(original.Fd()),
 		windows.FILE_GENERIC_READ,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 		windowsReparseFlag,
 	)
 	runtime.KeepAlive(original)

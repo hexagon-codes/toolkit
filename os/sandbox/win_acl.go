@@ -346,13 +346,29 @@ func inspectWindowsFileHandle(file *os.File) (windowsFileIdentity, error) {
 	if err := windows.GetFileInformationByHandle(windows.Handle(file.Fd()), &info); err != nil {
 		return windowsFileIdentity{}, err
 	}
+	attributes := info.FileAttributes
+	// FILE_FLAG_OPEN_REPARSE_POINT 打开时 GetFileInformationByHandle 不返回
+	// REPARSE_POINT 位；用 FileAttributeTagInformation 补齐 reparse tag 检测。
+	// FILE_ATTRIBUTE_TAG_INFO 结构（x/sys/windows 仅有信息类常量，无现成类型）。
+	var tagInfo struct {
+		fileAttributes uint32
+		reparseTag     uint32
+	}
+	if err := windows.GetFileInformationByHandleEx(
+		windows.Handle(file.Fd()),
+		windows.FileAttributeTagInfo,
+		(*byte)(unsafe.Pointer(&tagInfo)),
+		uint32(unsafe.Sizeof(tagInfo)),
+	); err == nil && tagInfo.reparseTag != 0 {
+		attributes |= windows.FILE_ATTRIBUTE_REPARSE_POINT
+	}
 	runtime.KeepAlive(file)
 	return windowsFileIdentity{
 		volumeSerial: info.VolumeSerialNumber,
 		fileIndex:    uint64(info.FileIndexHigh)<<32 | uint64(info.FileIndexLow),
 		lastWrite:    info.LastWriteTime,
 		size:         uint64(info.FileSizeHigh)<<32 | uint64(info.FileSizeLow),
-		attributes:   info.FileAttributes,
+		attributes:   attributes,
 		links:        info.NumberOfLinks,
 	}, nil
 }
@@ -564,25 +580,13 @@ func setPersistentWindowsWorkspaceACL(file *os.File, ownerSID *windows.SID, appC
 		return fmt.Errorf("build persistent workspace DACL: %w", err)
 	}
 
-	// ReOpenFile 不能提升访问权限（请求超过原句柄权限会得到 ACCESS_DENIED），
-	// DACL 更新必须按路径重新打开文件请求 WRITE_DAC。
-	objectPath, pathErr := canonicalWindowsPathFromHandle(file)
-	if pathErr != nil {
-		return fmt.Errorf("resolve workspace object path for DACL update: %w", pathErr)
-	}
-	pathPointer, pathErr := windows.UTF16PtrFromString(objectPath)
-	if pathErr != nil {
-		return fmt.Errorf("encode workspace object path for DACL update: %w", pathErr)
-	}
-	writableHandle, err := windows.CreateFile(
-		pathPointer,
+	writableHandle, err := reopenWindowsHandle(
+		windows.Handle(file.Fd()),
 		windows.READ_CONTROL|windows.WRITE_DAC,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil,
-		windows.OPEN_EXISTING,
 		windowsReparseFlag,
-		0,
 	)
+	runtime.KeepAlive(file)
 	if err != nil {
 		return fmt.Errorf("open workspace object for DACL update: %w", err)
 	}
@@ -628,24 +632,13 @@ func setPersistentWindowsWorkspaceIntegrity(file *os.File) (resultErr error) {
 	if labelACL == nil {
 		return fmt.Errorf("low-integrity label ACL is unavailable")
 	}
-	// ReOpenFile 不能提升访问权限，integrity 更新同样按路径重新打开。
-	objectPath, pathErr := canonicalWindowsPathFromHandle(file)
-	if pathErr != nil {
-		return fmt.Errorf("resolve workspace object path for integrity update: %w", pathErr)
-	}
-	pathPointer, pathErr := windows.UTF16PtrFromString(objectPath)
-	if pathErr != nil {
-		return fmt.Errorf("encode workspace object path for integrity update: %w", pathErr)
-	}
-	writableHandle, err := windows.CreateFile(
-		pathPointer,
+	writableHandle, err := reopenWindowsHandle(
+		windows.Handle(file.Fd()),
 		windows.READ_CONTROL|windows.WRITE_OWNER,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil,
-		windows.OPEN_EXISTING,
 		windowsReparseFlag,
-		0,
 	)
+	runtime.KeepAlive(file)
 	if err != nil {
 		return fmt.Errorf("open workspace object for integrity update: %w", err)
 	}
@@ -689,10 +682,48 @@ func reopenWindowsHandle(
 		uintptr(shareMode),
 		uintptr(flags),
 	)
-	if windows.Handle(result) == windows.InvalidHandle {
+	if windows.Handle(result) != windows.InvalidHandle {
+		return windows.Handle(result), nil
+	}
+	// ReOpenFile 无法提升访问权限（请求超过原句柄权限时返回 ACCESS_DENIED）。
+	// 统一回退为按 GetFinalPathNameByHandle 解析出的真实路径重新 CreateFile，
+	// 调用方无需关心原句柄的权限范围。
+	path := windowsFinalPath(handle)
+	if path == "" {
 		return windows.InvalidHandle, callErr
 	}
-	return windows.Handle(result), nil
+	pathPointer, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return windows.InvalidHandle, callErr
+	}
+	reopened, err := windows.CreateFile(
+		pathPointer,
+		desiredAccess,
+		shareMode,
+		nil,
+		windows.OPEN_EXISTING,
+		flags,
+		0,
+	)
+	if err != nil {
+		return windows.InvalidHandle, err
+	}
+	return reopened, nil
+}
+
+// windowsFinalPath 返回句柄对应对象的真实路径（展开 8.3 短名并剥离 \\?\ 前缀）。
+func windowsFinalPath(handle windows.Handle) string {
+	buffer := make([]uint16, 512)
+	for {
+		length, err := windows.GetFinalPathNameByHandle(handle, &buffer[0], uint32(len(buffer)), 0)
+		if err != nil {
+			return ""
+		}
+		if int(length) < len(buffer) {
+			return strings.TrimPrefix(windows.UTF16ToString(buffer[:length]), `\\?\`)
+		}
+		buffer = make([]uint16, length+1)
+	}
 }
 
 func canonicalWindowsPathFromHandle(file *os.File) (string, error) {
