@@ -21,7 +21,9 @@ var (
 // DB MySQL 数据库封装
 type DB struct {
 	*sql.DB
-	config *Config
+	config    *Config
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // Init 初始化全局 MySQL 实例
@@ -59,7 +61,7 @@ func Reset() error {
 	if db == nil || db.DB == nil {
 		return nil
 	}
-	return db.DB.Close()
+	return db.Close()
 }
 
 // New 创建新的 MySQL 连接
@@ -67,6 +69,7 @@ func New(config *Config) (*DB, error) {
 	if config == nil {
 		return nil, fmt.Errorf("mysql config is nil")
 	}
+	config = cloneConfig(config)
 
 	dsn := config.BuildDSN()
 	if dsn == "" {
@@ -219,7 +222,10 @@ func (db *DB) Close() error {
 	if db.DB == nil {
 		return nil
 	}
-	return db.DB.Close()
+	db.closeOnce.Do(func() {
+		db.closeErr = db.DB.Close()
+	})
+	return db.closeErr
 }
 
 // maskDSN 隐藏 DSN 中的敏感信息

@@ -20,6 +20,18 @@ import (
 // ErrExporterAlreadyStarted 表示同一导出器已经启动。
 var ErrExporterAlreadyStarted = errors.New("prometheus: exporter already started")
 
+// ErrExporterClosed 表示导出器已经进入终止状态。
+var ErrExporterClosed = errors.New("prometheus: exporter is closed")
+
+type exporterState uint8
+
+const (
+	exporterStateReady exporterState = iota
+	exporterStateStarting
+	exporterStateServing
+	exporterStateClosed
+)
+
 // Exporter 通过 HTTP 暴露隔离的指标注册表。
 type Exporter struct {
 	namespace string
@@ -29,6 +41,7 @@ type Exporter struct {
 
 	mu     sync.RWMutex
 	server *http.Server
+	state  exporterState
 }
 
 // ExporterOption 配置 Exporter。
@@ -79,41 +92,83 @@ func (e *Exporter) ListenAndServe(addr string) error {
 	mux.Handle("/metrics", e.Handler())
 
 	e.mu.Lock()
-	if e.server != nil {
+	switch e.state {
+	case exporterStateClosed:
+		e.mu.Unlock()
+		return ErrExporterClosed
+	case exporterStateStarting, exporterStateServing:
 		e.mu.Unlock()
 		return ErrExporterAlreadyStarted
 	}
+	e.state = exporterStateStarting
+	e.mu.Unlock()
+
 	var listenConfig net.ListenConfig
 	listener, err := listenConfig.Listen(context.Background(), "tcp", addr)
 	if err != nil {
+		e.mu.Lock()
+		closed := e.state == exporterStateClosed
+		if e.state == exporterStateStarting {
+			e.state = exporterStateReady
+		}
 		e.mu.Unlock()
-		return err
+		listenErr := fmt.Errorf("listen for prometheus exporter: %w", err)
+		if closed {
+			return errors.Join(ErrExporterClosed, listenErr)
+		}
+		return listenErr
 	}
 	server := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+
+	e.mu.Lock()
+	if e.state == exporterStateClosed {
+		e.mu.Unlock()
+		if closeErr := listener.Close(); closeErr != nil {
+			return errors.Join(ErrExporterClosed, fmt.Errorf("close prometheus listener: %w", closeErr))
+		}
+		return ErrExporterClosed
+	}
 	e.server = server
+	e.state = exporterStateServing
 	e.mu.Unlock()
 
 	err = server.Serve(listener)
 	e.mu.Lock()
-	if e.server == server {
+	if e.server == server && e.state != exporterStateClosed {
 		e.server = nil
+		e.state = exporterStateReady
 	}
 	e.mu.Unlock()
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
-	return err
+	if err != nil {
+		return fmt.Errorf("serve prometheus metrics: %w", err)
+	}
+	return nil
 }
 
 // Shutdown 优雅停止 HTTP 服务，多次调用是安全的。
 func (e *Exporter) Shutdown(ctx context.Context) error {
-	e.mu.RLock()
+	if isNilValue(ctx) {
+		return errors.New("prometheus: shutdown context must not be nil")
+	}
+	e.mu.Lock()
+	e.state = exporterStateClosed
 	server := e.server
-	e.mu.RUnlock()
+	e.mu.Unlock()
 	if server == nil {
 		return nil
 	}
-	return server.Shutdown(ctx)
+	if err := server.Shutdown(ctx); err != nil {
+		return fmt.Errorf("shutdown prometheus exporter: %w", err)
+	}
+	e.mu.Lock()
+	if e.server == server {
+		e.server = nil
+	}
+	e.mu.Unlock()
+	return nil
 }
 
 // MetricsAdapter 将 observe.Metrics 适配到 client_golang 指标。
@@ -125,7 +180,7 @@ type MetricsAdapter struct {
 
 // NewMetricsAdapter 创建 observe.Metrics 适配器。
 func NewMetricsAdapter(registry *Registry, namespace, subsystem string) (*MetricsAdapter, error) {
-	if registry == nil {
+	if !registry.ready() {
 		return nil, ErrNilRegistry
 	}
 	return &MetricsAdapter{registry: registry, namespace: namespace, subsystem: subsystem}, nil

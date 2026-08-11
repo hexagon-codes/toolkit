@@ -287,6 +287,48 @@ func TestClientConditionalAndIncrementConvenienceMethods(t *testing.T) {
 	}
 }
 
+func TestIncrByWithExpirePreservesExistingTTL(t *testing.T) {
+	server, client := setupMiniRedis(t)
+	ctx := context.Background()
+	if err := client.Set(ctx, "existing-counter", 2, 10*time.Second).Err(); err != nil {
+		t.Fatalf("Set() error = %v", err)
+	}
+
+	value, err := client.IncrByWithExpire(ctx, "existing-counter", 3, time.Minute)
+	if err != nil || value != 5 {
+		t.Fatalf("IncrByWithExpire() = %d, %v; want 5, nil", value, err)
+	}
+	if got := server.TTL("existing-counter"); got != 10*time.Second {
+		t.Fatalf("existing counter TTL = %s, want unchanged 10s", got)
+	}
+}
+
+func TestClientConvenienceMethodsRejectNilContext(t *testing.T) {
+	_, client := setupMiniRedis(t)
+	tests := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "get", run: func() error { _, err := client.GetWithDefault(nil, "key", "fallback"); return err }},
+		{name: "set", run: func() error { return client.SetWithExpire(nil, "key", "value", time.Minute) }},
+		{name: "set-nx", run: func() error { _, err := client.SetNX(nil, "key", "value", time.Minute); return err }},
+		{name: "mget", run: func() error { _, err := client.MGetValues(nil, "key"); return err }},
+		{name: "mset", run: func() error { return client.MSetValues(nil, "key", "value") }},
+		{name: "increment", run: func() error { _, err := client.IncrByWithExpire(nil, "key", 1, time.Minute); return err }},
+		{name: "exists", run: func() error { _, err := client.ExistsCount(nil, "key"); return err }},
+		{name: "delete", run: func() error { return client.DeleteKeys(nil, "key") }},
+		{name: "expire-at", run: func() error { return client.SetExpireAt(nil, "key", time.Now()) }},
+		{name: "ttl", run: func() error { _, err := client.GetTTL(nil, "key"); return err }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.run(); !errors.Is(err, ErrInvalidContext) {
+				t.Fatalf("operation error = %v, want ErrInvalidContext", err)
+			}
+		})
+	}
+}
+
 func TestClientExpirationConvenienceMethods(t *testing.T) {
 	_, client := setupMiniRedis(t)
 	ctx := context.Background()
@@ -321,5 +363,11 @@ func TestClientCloseAndStatsNilSafety(t *testing.T) {
 	_, live := setupMiniRedis(t)
 	if stats := live.Stats(); stats == nil {
 		t.Fatal("live Client.Stats() = nil")
+	}
+	if err := live.Close(); err != nil {
+		t.Fatalf("first live Client.Close() error = %v", err)
+	}
+	if err := live.Close(); err != nil {
+		t.Fatalf("second live Client.Close() error = %v, want idempotent success", err)
 	}
 }

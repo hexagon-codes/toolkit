@@ -147,7 +147,7 @@ func adaptCredentialsProvider(provider CredentialsProvider) func(context.Context
 	return func(ctx context.Context) (string, string, error) {
 		credentials, err := provider(ctx)
 		if err != nil {
-			return "", "", ErrCredentialsProvider
+			return "", "", &credentialsProviderFailure{cause: err}
 		}
 		if !credentials.validPair() {
 			return "", "", fmt.Errorf(
@@ -157,4 +157,17 @@ func adaptCredentialsProvider(provider CredentialsProvider) func(context.Context
 		}
 		return credentials.Username, credentials.Password, nil
 	}
+}
+
+// credentialsProviderFailure 保留底层错误身份，同时避免把提供器错误文本中的凭据写入日志。
+type credentialsProviderFailure struct {
+	cause error
+}
+
+func (*credentialsProviderFailure) Error() string {
+	return ErrCredentialsProvider.Error()
+}
+
+func (e *credentialsProviderFailure) Unwrap() []error {
+	return []error{ErrCredentialsProvider, e.cause}
 }

@@ -1,6 +1,9 @@
 package observe
 
-import "time"
+import (
+	"sync"
+	"time"
+)
 
 // Metrics 指标收集器接口
 //
@@ -116,10 +119,17 @@ type Timer interface {
 type TimerContext struct {
 	timer     Timer
 	startTime time.Time
+
+	mu       sync.Mutex
+	stopped  bool
+	duration time.Duration
 }
 
 // NewTimerContext 创建计时上下文
 func NewTimerContext(timer Timer) *TimerContext {
+	if isNilInterface(timer) {
+		timer = nil
+	}
 	return &TimerContext{
 		timer:     timer,
 		startTime: time.Now(),
@@ -130,9 +140,23 @@ func NewTimerContext(timer Timer) *TimerContext {
 //
 // 返回从开始到停止的持续时间
 func (tc *TimerContext) Stop() time.Duration {
-	duration := time.Since(tc.startTime)
-	if tc.timer != nil {
-		tc.timer.ObserveDuration(duration)
+	if tc == nil {
+		return 0
+	}
+	tc.mu.Lock()
+	if tc.stopped {
+		duration := tc.duration
+		tc.mu.Unlock()
+		return duration
+	}
+	tc.stopped = true
+	tc.duration = time.Since(tc.startTime)
+	duration := tc.duration
+	timer := tc.timer
+	tc.mu.Unlock()
+
+	if !isNilInterface(timer) {
+		timer.ObserveDuration(duration)
 	}
 	return duration
 }

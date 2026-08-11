@@ -6,6 +6,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"reflect"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -39,8 +41,8 @@ func NewLock(client redis.UniversalClient, key string, expiration time.Duration)
 
 // Acquire 获取锁
 func (l *Lock) Acquire(ctx context.Context) error {
-	if l.expiration <= 0 {
-		return fmt.Errorf("%w: lock expiration must be positive", ErrInvalidConfig)
+	if err := l.validateOperation(ctx, "acquire lock"); err != nil {
+		return err
 	}
 	ok, err := l.client.SetNX(ctx, l.key, l.value, l.expiration).Result()
 	if err != nil {
@@ -56,6 +58,16 @@ func (l *Lock) Acquire(ctx context.Context) error {
 
 // AcquireWithRetry 带重试的获取锁
 func (l *Lock) AcquireWithRetry(ctx context.Context, retryInterval time.Duration, maxRetries int) error {
+	if err := l.validateOperation(ctx, "acquire lock with retry"); err != nil {
+		return err
+	}
+	if maxRetries <= 0 {
+		return fmt.Errorf("%w: maximum retry attempts must be positive", ErrInvalidConfig)
+	}
+	if retryInterval < 0 {
+		return fmt.Errorf("%w: retry interval must not be negative", ErrInvalidConfig)
+	}
+
 	for i := 0; i < maxRetries; i++ {
 		err := l.Acquire(ctx)
 		if err == nil {
@@ -86,6 +98,10 @@ func (l *Lock) AcquireWithRetry(ctx context.Context, retryInterval time.Duration
 
 // Release 释放锁
 func (l *Lock) Release(ctx context.Context) error {
+	if err := l.validateOperation(ctx, "release lock"); err != nil {
+		return err
+	}
+
 	// Lua 脚本确保只释放自己持有的锁
 	script := `
 		if redis.call("get", KEYS[1]) == ARGV[1] then
@@ -109,6 +125,10 @@ func (l *Lock) Release(ctx context.Context) error {
 
 // Refresh 刷新锁的过期时间
 func (l *Lock) Refresh(ctx context.Context) error {
+	if err := l.validateOperation(ctx, "refresh lock"); err != nil {
+		return err
+	}
+
 	// Lua 脚本确保只刷新自己持有的锁
 	script := `
 		if redis.call("get", KEYS[1]) == ARGV[1] then
@@ -119,6 +139,9 @@ func (l *Lock) Refresh(ctx context.Context) error {
 	`
 
 	expireMs := l.expiration.Milliseconds()
+	if expireMs == 0 {
+		expireMs = 1
+	}
 	result, err := l.client.Eval(ctx, script, []string{l.key}, l.value, expireMs).Result()
 	if err != nil {
 		return fmt.Errorf("failed to refresh lock: %w", err)
@@ -133,9 +156,13 @@ func (l *Lock) Refresh(ctx context.Context) error {
 
 // TTL 获取锁的剩余时间
 func (l *Lock) TTL(ctx context.Context) (time.Duration, error) {
+	if err := l.validateOperation(ctx, "get lock TTL"); err != nil {
+		return 0, err
+	}
+
 	ttl, err := l.client.TTL(ctx, l.key).Result()
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("get lock TTL: %w", err)
 	}
 
 	if ttl < 0 {
@@ -143,6 +170,38 @@ func (l *Lock) TTL(ctx context.Context) (time.Duration, error) {
 	}
 
 	return ttl, nil
+}
+
+func (l *Lock) validateOperation(ctx context.Context, operation string) error {
+	if ctx == nil {
+		return fmt.Errorf("%w: %s requires a non-nil context", ErrInvalidContext, operation)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if l == nil || isNilUniversalClient(l.client) {
+		return fmt.Errorf("%w: Redis client is required", ErrInvalidConfig)
+	}
+	if strings.TrimSpace(l.key) == "" {
+		return fmt.Errorf("%w: lock key is required", ErrInvalidConfig)
+	}
+	if l.expiration <= 0 {
+		return fmt.Errorf("%w: lock expiration must be positive", ErrInvalidConfig)
+	}
+	return nil
+}
+
+func isNilUniversalClient(client redis.UniversalClient) bool {
+	if client == nil {
+		return true
+	}
+	value := reflect.ValueOf(client)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 // generateLockValue 生成锁的唯一值
@@ -158,16 +217,19 @@ func generateLockValue() string {
 
 // WithLock 使用锁执行函数（自动获取和释放）
 func WithLock(ctx context.Context, client redis.UniversalClient, key string, expiration time.Duration, fn func() error) (err error) {
+	if fn == nil {
+		return fmt.Errorf("%w: lock callback is required", ErrInvalidConfig)
+	}
 	lock := NewLock(client, key, expiration)
 
-	// 获取锁
+	// 获取锁前先完成所有输入校验，避免无效调用产生外部副作用。
 	if acquireErr := lock.Acquire(ctx); acquireErr != nil {
 		return acquireErr
 	}
 
 	// 确保释放锁
 	defer func() {
-		releaseCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 		defer cancel()
 		if releaseErr := lock.Release(releaseCtx); releaseErr != nil {
 			err = errors.Join(err, fmt.Errorf("release lock: %w", releaseErr))

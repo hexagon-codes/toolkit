@@ -30,8 +30,8 @@ type Tracer struct {
 	// serviceName 服务名称
 	serviceName string
 
-	// exporter 导出器
-	exporter Exporter
+	// generation 当前接收新导出的导出器代际
+	generation *exporterGeneration
 
 	// sampler 采样器
 	sampler Sampler
@@ -44,9 +44,11 @@ type Tracer struct {
 
 	mu sync.RWMutex
 
-	shutdownStarted bool
-	shutdownDone    chan struct{}
-	shutdownErr     error
+	shutdownStarted  bool
+	shutdownDone     chan struct{}
+	shutdownErr      error
+	retirements      map[*exporterGeneration]struct{}
+	retirementErrors retirementErrorState
 
 	errMu          sync.RWMutex
 	firstExportErr error
@@ -126,6 +128,7 @@ func NewTracer(opts ...Option) *Tracer {
 		sampler:      NewProbabilitySampler(config.SamplingRate),
 		config:       config,
 		shutdownDone: make(chan struct{}),
+		retirements:  make(map[*exporterGeneration]struct{}),
 	}
 
 	return t
@@ -133,9 +136,11 @@ func NewTracer(opts ...Option) *Tracer {
 
 // SetExporter 设置并接管导出器所有权。
 //
-// 调用开始后，调用方不得继续使用或关闭 exporter。替换时新导出器立即生效，
-// 旧导出器会被关闭；旧导出器的关闭错误会返回，但不会撤销替换。
-// Tracer 已关闭时，传入的导出器也会被关闭，避免其后台任务泄漏。
+// 调用开始即转移 exporter 所有权，无论本方法返回 nil 还是 error，调用方都不得
+// 继续使用或关闭 exporter。替换时新导出器立即生效，旧导出器会被关闭；旧导出器
+// 的关闭错误会返回，但不会撤销替换。Tracer 已关闭时，传入的导出器也会被关闭，
+// 避免其后台任务泄漏。ctx 只约束本次等待；超时或取消后，已接管导出器的退役仍会
+// 在后台继续，调用方不得重新关闭它。
 func (t *Tracer) SetExporter(ctx context.Context, exporter Exporter) error {
 	if isNilExporter(exporter) {
 		exporter = nil
@@ -143,27 +148,65 @@ func (t *Tracer) SetExporter(ctx context.Context, exporter Exporter) error {
 	t.mu.Lock()
 	if t.shutdownStarted {
 		t.mu.Unlock()
-		var shutdownErr error
-		if exporter != nil {
-			shutdownErr = exporter.Shutdown(ctx)
-		}
-		return errors.Join(ErrTracerShutdown, shutdownErr)
+		return errors.Join(ErrTracerShutdown, retireRejectedExporter(ctx, exporter))
 	}
-	if sameExporter(t.exporter, exporter) {
+	if sameExporter(exporterFromGeneration(t.generation), exporter) {
 		t.mu.Unlock()
 		return nil
 	}
-	previous := t.exporter
-	t.exporter = exporter
+	previous := t.generation
+	if exporter == nil {
+		t.generation = nil
+	} else {
+		t.generation = newExporterGeneration(exporter)
+	}
+	if previous != nil {
+		previous.beginDrain()
+		if t.retirements == nil {
+			t.retirements = make(map[*exporterGeneration]struct{})
+		}
+		t.retirements[previous] = struct{}{}
+	}
 	t.mu.Unlock()
 
 	if previous == nil {
 		return nil
 	}
-	if err := previous.Shutdown(ctx); err != nil {
+	previous.startRetirement(nil, t.reapRetirement)
+	_, err := previous.waitRetirement(ctx)
+	if err != nil {
 		return fmt.Errorf("shutdown previous exporter: %w", err)
 	}
 	return nil
+}
+
+func exporterFromGeneration(generation *exporterGeneration) Exporter {
+	if generation == nil {
+		return nil
+	}
+	return generation.exporter
+}
+
+func retireRejectedExporter(ctx context.Context, exporter Exporter) error {
+	if exporter == nil {
+		return nil
+	}
+	generation := newExporterGeneration(exporter)
+	generation.beginDrain()
+	generation.startRetirement(nil, nil)
+	_, err := generation.waitRetirement(ctx)
+	if err != nil {
+		return fmt.Errorf("shutdown rejected exporter: %w", err)
+	}
+	return nil
+}
+
+// reapRetirement 在代际完成后先摘除对象并记入有界错误历史，再允许等待者继续。
+func (t *Tracer) reapRetirement(generation *exporterGeneration, err error) {
+	t.mu.Lock()
+	delete(t.retirements, generation)
+	t.retirementErrors.add(err)
+	t.mu.Unlock()
 }
 
 func sameExporter(first, second Exporter) bool {
@@ -217,6 +260,10 @@ func (t *Tracer) StartSpan(ctx context.Context, name string, opts ...observe.Spa
 
 	// 采样决策
 	shouldSample := t.sampler.ShouldSample(traceID, name)
+	startTime := cfg.StartTime
+	if startTime.IsZero() {
+		startTime = time.Now()
+	}
 
 	// 创建 Span
 	span := &Span{
@@ -226,7 +273,7 @@ func (t *Tracer) StartSpan(ctx context.Context, name string, opts ...observe.Spa
 		parentSpanID: parentSpanID,
 		name:         name,
 		kind:         cfg.Kind,
-		startTime:    time.Now(),
+		startTime:    startTime,
 		attributes:   make(map[string]any),
 		events:       make([]SpanEvent, 0),
 		status:       observe.StatusCodeUnset,
@@ -244,13 +291,13 @@ func (t *Tracer) StartSpan(ctx context.Context, name string, opts ...observe.Spa
 	span.attributes["deployment.environment"] = t.config.Environment
 
 	// 关闭开始后不再接收新的记录型 Span，避免留下无法导出的活跃数据。
-	t.mu.RLock()
+	t.mu.Lock()
 	if t.shutdownStarted {
 		span.recording = false
 	} else {
 		t.spans.Store(spanID, span)
 	}
-	t.mu.RUnlock()
+	t.mu.Unlock()
 
 	// 更新 context
 	ctx = observe.ContextWithSpan(ctx, span)
@@ -272,52 +319,103 @@ func (t *Tracer) InjectTraceID(ctx context.Context, traceID string) context.Cont
 	return context.WithValue(ctx, traceIDKey{}, traceID)
 }
 
-// Shutdown 关闭追踪器
+// Shutdown 关闭追踪器。
+//
+// 首次调用会原子终止全部活跃 Span 并启动所有导出器代际的退役。ctx 只约束当前
+// 调用等待关闭结果的时间；到期后退役仍会继续，后续调用可继续等待同一结果。
 func (t *Tracer) Shutdown(ctx context.Context) error {
 	t.mu.Lock()
 	if t.shutdownDone == nil {
 		t.shutdownDone = make(chan struct{})
 	}
-	if t.shutdownStarted {
-		done := t.shutdownDone
+	if !t.shutdownStarted {
+		t.shutdownStarted = true
+		current := t.generation
+		t.generation = nil
+		if current != nil {
+			current.beginDrain()
+			if t.retirements == nil {
+				t.retirements = make(map[*exporterGeneration]struct{})
+			}
+			t.retirements[current] = struct{}{}
+		}
+
+		shutdownTime := time.Now()
+		spans := make([]*SpanData, 0)
+		t.spans.Range(func(key, value any) bool {
+			if span, ok := value.(*Span); ok {
+				if data, finalized := span.finalize(shutdownTime); finalized && span.recording && current != nil {
+					spans = append(spans, data)
+				}
+			}
+			t.spans.Delete(key)
+			return true
+		})
+
+		generations := make([]*exporterGeneration, 0, len(t.retirements))
+		for generation := range t.retirements {
+			generations = append(generations, generation)
+		}
 		t.mu.Unlock()
-		select {
-		case <-done:
-			t.mu.RLock()
-			err := t.shutdownErr
-			t.mu.RUnlock()
-			return err
-		case <-ctx.Done():
-			return ctx.Err()
+
+		for _, generation := range generations {
+			if generation == current {
+				generation.startRetirement(spans, t.reapRetirement)
+			} else {
+				generation.startRetirement(nil, t.reapRetirement)
+			}
 		}
+		go t.completeShutdown(generations)
+	} else {
+		t.mu.Unlock()
 	}
 
-	t.shutdownStarted = true
-	exporter := t.exporter
-	t.exporter = nil
-	spans := make([]*SpanData, 0)
-	t.spans.Range(func(_, value any) bool {
-		if span, ok := value.(*Span); ok {
-			spans = append(spans, span.toSpanData())
-		}
-		return true
-	})
-	t.mu.Unlock()
+	return t.waitShutdown(ctx)
+}
 
-	var flushErr, exporterShutdownErr error
-	if exporter != nil {
-		if len(spans) > 0 {
-			flushErr = exporter.ExportSpans(ctx, spans)
-		}
-		exporterShutdownErr = exporter.Shutdown(ctx)
+func (t *Tracer) completeShutdown(generations []*exporterGeneration) {
+	for _, generation := range generations {
+		_, _ = generation.waitRetirement(context.Background())
 	}
-	shutdownErr := errors.Join(t.exportErrorSnapshot(), flushErr, exporterShutdownErr)
+	exportErr := t.exportErrorSnapshot()
 
 	t.mu.Lock()
-	t.shutdownErr = shutdownErr
+	t.shutdownErr = errors.Join(exportErr, t.retirementErrors.snapshot())
 	close(t.shutdownDone)
 	t.mu.Unlock()
-	return shutdownErr
+}
+
+func (t *Tracer) waitShutdown(ctx context.Context) error {
+	t.mu.RLock()
+	done := t.shutdownDone
+	t.mu.RUnlock()
+	select {
+	case <-done:
+		return t.shutdownError()
+	default:
+	}
+	select {
+	case <-done:
+		return t.shutdownError()
+	case <-ctx.Done():
+		return errors.Join(
+			t.exportErrorSnapshot(),
+			t.retirementErrorSnapshot(),
+			fmt.Errorf("wait for tracer shutdown: %w", ctx.Err()),
+		)
+	}
+}
+
+func (t *Tracer) retirementErrorSnapshot() error {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.retirementErrors.snapshot()
+}
+
+func (t *Tracer) shutdownError() error {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.shutdownErr
 }
 
 type traceIDKey struct{}
@@ -464,22 +562,24 @@ func (s *Span) SetStatus(code observe.StatusCode, message string) {
 
 // End 结束 Span
 func (s *Span) End() {
-	s.mu.Lock()
-	if s.ended {
-		s.mu.Unlock()
+	s.tracer.mu.Lock()
+	data, finalized := s.finalize(time.Now())
+	if !finalized {
+		s.tracer.mu.Unlock()
 		return
 	}
-	s.ended = true
-	s.endTime = time.Now()
-	s.mu.Unlock()
-
-	// 删除与导出共享 exporter 生命周期读锁，替换和关闭会等待本次导出完成。
-	s.tracer.mu.RLock()
 	s.tracer.spans.Delete(s.spanID)
-	if s.tracer.exporter != nil && s.recording {
-		s.tracer.recordExportError(s.tracer.exporter.ExportSpans(context.Background(), []*SpanData{s.toSpanData()}))
+	var lease *exporterLease
+	if s.recording && s.tracer.generation != nil {
+		lease = s.tracer.generation.acquire()
 	}
-	s.tracer.mu.RUnlock()
+	s.tracer.mu.Unlock()
+
+	if lease == nil {
+		return
+	}
+	defer lease.release()
+	s.tracer.recordExportError(lease.generation.exporter.ExportSpans(context.Background(), []*SpanData{data}))
 }
 
 func (t *Tracer) recordExportError(err error) {
@@ -519,6 +619,21 @@ func (s *Span) IsRecording() bool {
 func (s *Span) toSpanData() *SpanData {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.toSpanDataLocked()
+}
+
+func (s *Span) finalize(endTime time.Time) (*SpanData, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ended {
+		return nil, false
+	}
+	s.ended = true
+	s.endTime = endTime
+	return s.toSpanDataLocked(), true
+}
+
+func (s *Span) toSpanDataLocked() *SpanData {
 
 	events := make([]SpanEvent, len(s.events))
 	copy(events, s.events)

@@ -256,6 +256,9 @@ func TestCredentialsProviderRuntimeValidationAndSafeErrors(t *testing.T) {
 			if !errors.Is(err, test.wantError) {
 				t.Fatalf("provider error = %v, want errors.Is(%v)", err, test.wantError)
 			}
+			if test.name == "provider failure" && !errors.Is(err, providerCause) {
+				t.Fatalf("provider error = %v, want original provider cause in the error chain", err)
+			}
 			for _, secret := range test.secrets {
 				if strings.Contains(err.Error(), secret) {
 					t.Fatalf("provider error leaked %q: %q", secret, err)

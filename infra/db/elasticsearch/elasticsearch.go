@@ -31,6 +31,8 @@ type Client struct {
 	transport *http.Transport
 	config    *Config
 	closed    atomic.Bool
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // Global singleton.
@@ -247,16 +249,21 @@ func (c *Client) Ping(ctx context.Context) (err error) {
 
 // Close 关闭 Elasticsearch 客户端及底层 HTTP 连接池。
 func (c *Client) Close() error {
-	if c.closed.Swap(true) {
-		return ErrAlreadyClosed
+	if c == nil {
+		return nil
 	}
-	closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	err := c.client.Close(closeCtx)
-	if c.transport != nil {
-		c.transport.CloseIdleConnections()
-	}
-	return err
+	c.closeOnce.Do(func() {
+		c.closed.Store(true)
+		if c.client != nil {
+			closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			c.closeErr = c.client.Close(closeCtx)
+		}
+		if c.transport != nil {
+			c.transport.CloseIdleConnections()
+		}
+	})
+	return c.closeErr
 }
 
 // Name returns the client name for the db.Client interface.

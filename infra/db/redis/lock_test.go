@@ -151,6 +151,88 @@ func TestLockAcquireRejectsNonPositiveExpiration(t *testing.T) {
 	}
 }
 
+func TestLockOperationsRejectNilContext(t *testing.T) {
+	mr, client := setupLockTest(t)
+	defer mr.Close()
+	defer client.Close()
+
+	lock := NewLock(client.UniversalClient, "nil-context-lock", time.Minute)
+	tests := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "acquire", run: func() error { return lock.Acquire(nil) }},                                          //nolint:staticcheck // 专门验证 nil context 防护。
+		{name: "acquire with retry", run: func() error { return lock.AcquireWithRetry(nil, time.Millisecond, 1) }}, //nolint:staticcheck // 专门验证 nil context 防护。
+		{name: "release", run: func() error { return lock.Release(nil) }},                                          //nolint:staticcheck // 专门验证 nil context 防护。
+		{name: "refresh", run: func() error { return lock.Refresh(nil) }},                                          //nolint:staticcheck // 专门验证 nil context 防护。
+		{name: "ttl", run: func() error {
+			_, err := lock.TTL(nil) //nolint:staticcheck // 专门验证 nil context 防护。
+			return err
+		}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.run(); !errors.Is(err, ErrInvalidContext) {
+				t.Fatalf("operation error = %v, want errors.Is(ErrInvalidContext)", err)
+			}
+		})
+	}
+}
+
+func TestLockRejectsInvalidConfigurationBeforeRedis(t *testing.T) {
+	mr, client := setupLockTest(t)
+	defer mr.Close()
+	defer client.Close()
+
+	tests := []struct {
+		name string
+		lock *Lock
+	}{
+		{name: "nil client", lock: NewLock(nil, "lock", time.Minute)},
+		{name: "typed nil client", lock: NewLock((*goredis.Client)(nil), "lock", time.Minute)},
+		{name: "blank key", lock: NewLock(client.UniversalClient, " \t", time.Minute)},
+		{name: "zero expiration", lock: NewLock(client.UniversalClient, "lock", 0)},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.lock.Acquire(context.Background()); !errors.Is(err, ErrInvalidConfig) {
+				t.Fatalf("Acquire() error = %v, want errors.Is(ErrInvalidConfig)", err)
+			}
+		})
+	}
+}
+
+func TestLockAcquireWithRetryRejectsInvalidPolicy(t *testing.T) {
+	mr, client := setupLockTest(t)
+	defer mr.Close()
+	defer client.Close()
+
+	lock := NewLock(client.UniversalClient, "invalid-retry-lock", time.Minute)
+	tests := []struct {
+		name          string
+		retryInterval time.Duration
+		maxRetries    int
+	}{
+		{name: "zero attempts", retryInterval: time.Millisecond, maxRetries: 0},
+		{name: "negative attempts", retryInterval: time.Millisecond, maxRetries: -1},
+		{name: "negative interval", retryInterval: -time.Millisecond, maxRetries: 1},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := lock.AcquireWithRetry(context.Background(), test.retryInterval, test.maxRetries)
+			if !errors.Is(err, ErrInvalidConfig) {
+				t.Fatalf("AcquireWithRetry() error = %v, want errors.Is(ErrInvalidConfig)", err)
+			}
+		})
+	}
+	if mr.Exists(lock.key) {
+		t.Fatal("AcquireWithRetry() wrote to Redis for an invalid retry policy")
+	}
+}
+
 func TestLockAcquireFailure(t *testing.T) {
 	mr, client := setupLockTest(t)
 	defer mr.Close()
@@ -552,6 +634,21 @@ func TestWithLockRejectsNonPositiveExpirationBeforeCallback(t *testing.T) {
 	}
 	if mr.Exists("invalid-with-lock") {
 		t.Fatal("WithLock() created a Redis key for an invalid expiration")
+	}
+}
+
+func TestWithLockRejectsNilCallbackBeforeAcquire(t *testing.T) {
+	mr, client := setupLockTest(t)
+	defer mr.Close()
+	defer client.Close()
+
+	const key = "nil-callback-lock"
+	err := WithLock(context.Background(), client.UniversalClient, key, time.Minute, nil)
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("WithLock() error = %v, want errors.Is(ErrInvalidConfig)", err)
+	}
+	if mr.Exists(key) {
+		t.Fatal("WithLock() acquired a Redis lock before rejecting a nil callback")
 	}
 }
 

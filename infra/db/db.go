@@ -7,6 +7,9 @@ package db
 import (
 	"context"
 	"errors"
+	"fmt"
+	"reflect"
+	"sort"
 	"sync"
 	"time"
 )
@@ -99,35 +102,38 @@ func NewManager(opts ...ManagerOption) *Manager {
 // Register registers a database client with the manager.
 // If a client with the same name exists, it will be replaced.
 func (m *Manager) Register(c Client) {
-	if c == nil {
+	if isNilClient(c) {
 		return
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	name := c.Name()
-	if old, exists := m.clients[name]; exists {
-		m.logger.Warn("replacing existing client", "name", name)
+	old, exists := m.clients[name]
+	m.clients[name] = c
+	logger := m.logger
+	m.mu.Unlock()
+
+	if exists && !sameClient(old, c) {
+		logger.Warn("replacing existing client", "name", name)
 		if err := old.Close(); err != nil {
-			m.logger.Error("failed to close replaced client", "name", name, "error", err)
+			logger.Error("failed to close replaced client", "name", name, "error", err)
 		}
 	}
-	m.clients[name] = c
-	m.logger.Info("registered client", "name", name)
+	logger.Info("registered client", "name", name)
 }
 
 // Unregister removes and closes a database client from the manager.
 func (m *Manager) Unregister(name string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	c, exists := m.clients[name]
 	if !exists {
+		m.mu.Unlock()
 		return nil
 	}
-
 	delete(m.clients, name)
-	m.logger.Info("unregistered client", "name", name)
+	logger := m.logger
+	m.mu.Unlock()
+
+	logger.Info("unregistered client", "name", name)
 	return c.Close()
 }
 
@@ -243,22 +249,56 @@ func (m *Manager) IsHealthy(ctx context.Context) bool {
 
 // Close closes all registered clients gracefully.
 // It attempts to close all clients even if some fail.
-// Returns the last error encountered, if any.
+// 返回可通过 errors.Is 检查的完整关闭错误链。
 func (m *Manager) Close() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	clients := m.clients
+	m.clients = make(map[string]Client)
+	logger := m.logger
+	m.mu.Unlock()
 
-	var lastErr error
-	for name, c := range m.clients {
+	names := make([]string, 0, len(clients))
+	for name := range clients {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var closeErr error
+	for _, name := range names {
+		c := clients[name]
 		if err := c.Close(); err != nil {
-			m.logger.Error("failed to close client", "name", name, "error", err)
-			lastErr = err
+			logger.Error("failed to close client", "name", name, "error", err)
+			closeErr = errors.Join(closeErr, fmt.Errorf("close database client %q: %w", name, err))
 		} else {
-			m.logger.Info("closed client", "name", name)
+			logger.Info("closed client", "name", name)
 		}
 	}
-	m.clients = make(map[string]Client)
-	return lastErr
+	return closeErr
+}
+
+// isNilClient 同时识别 nil 接口和包含 nil 指针的 Client。
+func isNilClient(client Client) bool {
+	if client == nil {
+		return true
+	}
+	value := reflect.ValueOf(client)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
+// sameClient 只比较可比较的动态类型，避免接口比较触发 panic。
+func sameClient(left, right Client) bool {
+	if isNilClient(left) || isNilClient(right) {
+		return isNilClient(left) && isNilClient(right)
+	}
+	leftType := reflect.TypeOf(left)
+	if leftType != reflect.TypeOf(right) || !leftType.Comparable() {
+		return false
+	}
+	return left == right
 }
 
 // Global manager instance.
@@ -270,9 +310,6 @@ var (
 // GlobalManager 返回全局数据库客户端管理器单例。
 // 使用 mutex + 双重检查锁定，与 SetGlobalManager 统一同步机制。
 func GlobalManager() *Manager {
-	if globalManager != nil {
-		return globalManager
-	}
 	globalManagerMu.Lock()
 	defer globalManagerMu.Unlock()
 	if globalManager == nil {

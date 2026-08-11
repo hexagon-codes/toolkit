@@ -34,6 +34,17 @@ func TestGlobalInitAfterCloseDoesNotReturnClosedInstance(t *testing.T) {
 	}
 }
 
+func TestConfigSnapshotDoesNotAliasCaller(t *testing.T) {
+	original := DefaultConfig("user:secret@tcp(db.internal:3306)/app")
+	snapshot := cloneConfig(original)
+	original.DSN = "mutated"
+	original.MaxOpenConns = 1
+
+	if snapshot.DSN == original.DSN || snapshot.MaxOpenConns == original.MaxOpenConns {
+		t.Fatal("cloneConfig() retained caller-owned configuration")
+	}
+}
+
 func TestTransactionPreservesCallbackAndRollbackErrors(t *testing.T) {
 	callbackErr := errors.New("callback sentinel")
 	rollbackErr := errors.New("rollback sentinel")

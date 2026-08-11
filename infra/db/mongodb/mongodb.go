@@ -21,10 +21,12 @@ var (
 
 // Client wraps the MongoDB client with additional functionality.
 type Client struct {
-	client   *mongo.Client
-	database *mongo.Database
-	config   *Config
-	closed   atomic.Bool
+	client    *mongo.Client
+	database  *mongo.Database
+	config    *Config
+	closed    atomic.Bool
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // Global singleton.
@@ -290,12 +292,19 @@ func (c *Client) Ping(ctx context.Context) error {
 
 // Close closes the MongoDB connection.
 func (c *Client) Close() error {
-	if c.closed.Swap(true) {
-		return ErrAlreadyClosed
+	if c == nil {
+		return nil
 	}
-	closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	return c.client.Disconnect(closeCtx)
+	c.closeOnce.Do(func() {
+		c.closed.Store(true)
+		if c.client == nil {
+			return
+		}
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		c.closeErr = c.client.Disconnect(closeCtx)
+	})
+	return c.closeErr
 }
 
 // Name returns the client name for the db.Client interface.

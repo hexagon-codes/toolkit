@@ -876,21 +876,21 @@ func TestOTLPExporterShutdownWaitsForBackgroundFlush(t *testing.T) {
 	}
 
 	shutdownDone := make(chan error, 1)
-	go func() { shutdownDone <- exporter.Shutdown(context.Background()) }()
-	prematureReturn := false
+	shutdownWait := &observedDoneContext{
+		Context:  context.Background(),
+		observed: make(chan struct{}),
+	}
+	go func() { shutdownDone <- exporter.Shutdown(shutdownWait) }()
+	waitForSignal(t, shutdownWait.observed, "Shutdown() did not enter the background flush wait")
 	select {
 	case <-shutdownDone:
-		prematureReturn = true
-	case <-time.After(20 * time.Millisecond):
+		close(releaseRequest)
+		t.Fatal("Shutdown() returned before the background flush completed")
+	default:
 	}
 	close(releaseRequest)
-	if !prematureReturn {
-		if err := <-shutdownDone; err != nil {
-			t.Fatalf("Shutdown() error = %v", err)
-		}
-	}
-	if prematureReturn {
-		t.Fatal("Shutdown() returned before the background flush completed")
+	if err := <-shutdownDone; err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
 	}
 }
 

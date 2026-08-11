@@ -194,12 +194,15 @@ type spanContextKey struct{}
 
 // ContextWithSpan 将 Span 存入 context
 func ContextWithSpan(ctx context.Context, span Span) context.Context {
+	if isNilInterface(span) {
+		return ctx
+	}
 	return context.WithValue(ctx, spanContextKey{}, span)
 }
 
 // SpanFromContext 从 context 获取 Span
 func SpanFromContext(ctx context.Context) Span {
-	if span, ok := ctx.Value(spanContextKey{}).(Span); ok {
+	if span, ok := ctx.Value(spanContextKey{}).(Span); ok && !isNilInterface(span) {
 		return span
 	}
 	return nil

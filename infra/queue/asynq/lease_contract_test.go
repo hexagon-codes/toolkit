@@ -38,6 +38,55 @@ func TestAcquirePollingLeaseFailsClosedOnRedisError(t *testing.T) {
 	}
 }
 
+func TestLeaseOperationsRespectManagerStopBoundary(t *testing.T) {
+	redisServer := miniredis.RunT(t)
+	manager, err := NewManager(context.Background(), managerTestConfig(redisServer.Addr()))
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+
+	lease, acquired, err := manager.AcquirePollingLease(context.Background(), "stopped-manager-task")
+	if err != nil || !acquired || lease == nil {
+		t.Fatalf("AcquirePollingLease() = (%v, %v, %v), want lease, true, nil", lease, acquired, err)
+	}
+	if err := manager.Stop(); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+
+	if _, _, err := manager.AcquirePollingLease(context.Background(), "new-task"); !errors.Is(err, ErrManagerStopped) {
+		t.Fatalf("AcquirePollingLease() after Stop error = %v, want ErrManagerStopped", err)
+	}
+	if err := lease.Refresh(context.Background()); !errors.Is(err, ErrManagerStopped) {
+		t.Fatalf("lease Refresh() after Stop error = %v, want ErrManagerStopped", err)
+	}
+	if err := lease.Release(context.Background()); !errors.Is(err, ErrManagerStopped) {
+		t.Fatalf("lease Release() after Stop error = %v, want ErrManagerStopped", err)
+	}
+}
+
+func TestLeaseOperationsRejectNilContext(t *testing.T) {
+	redisServer := miniredis.RunT(t)
+	manager, err := NewManager(context.Background(), managerTestConfig(redisServer.Addr()))
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	t.Cleanup(func() { _ = manager.Stop() })
+
+	if _, _, err := manager.AcquirePollingLease(nil, "nil-context-task"); !errors.Is(err, ErrInvalidContext) { //nolint:staticcheck // 专门验证 nil context 防护。
+		t.Fatalf("AcquirePollingLease(nil) error = %v, want ErrInvalidContext", err)
+	}
+	lease, acquired, err := manager.AcquirePollingLease(context.Background(), "lease-nil-context-task")
+	if err != nil || !acquired || lease == nil {
+		t.Fatalf("AcquirePollingLease() = (%v, %v, %v), want lease, true, nil", lease, acquired, err)
+	}
+	if err := lease.Refresh(nil); !errors.Is(err, ErrInvalidContext) { //nolint:staticcheck // 专门验证 nil context 防护。
+		t.Fatalf("lease Refresh(nil) error = %v, want ErrInvalidContext", err)
+	}
+	if err := lease.Release(nil); !errors.Is(err, ErrInvalidContext) { //nolint:staticcheck // 专门验证 nil context 防护。
+		t.Fatalf("lease Release(nil) error = %v, want ErrInvalidContext", err)
+	}
+}
+
 func TestPollingLeaseUsesTokenForRefreshAndRelease(t *testing.T) {
 	redisServer := miniredis.RunT(t)
 	manager, err := NewManager(context.Background(), managerTestConfig(redisServer.Addr()))

@@ -95,6 +95,9 @@ func TestNewUsesVerifiedTLSAndParsesResponses(t *testing.T) {
 	if err := client.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("second Close() error = %v, want idempotent success", err)
+	}
 	if _, err := client.Info(context.Background()); !errors.Is(err, ErrAlreadyClosed) {
 		t.Fatalf("Info() after Close error = %v", err)
 	}

@@ -37,10 +37,10 @@ return 0`)
 // refresh or release the key, preventing a stale worker from touching a later
 // owner's lock after TTL expiry.
 type Lease struct {
-	client redis.UniversalClient
-	key    string
-	token  string
-	ttl    time.Duration
+	manager *Manager
+	key     string
+	token   string
+	ttl     time.Duration
 }
 
 // AcquirePollingLease attempts to own a task's polling lease. A false result
@@ -72,17 +72,10 @@ func (m *Manager) internalKey(base string) string {
 
 func (m *Manager) acquireLease(ctx context.Context, key string, ttl time.Duration) (*Lease, bool, error) {
 	if ctx == nil {
-		return nil, false, fmt.Errorf("%w: nil context", ErrInvalidLease)
+		return nil, false, fmt.Errorf("%w: acquire lease requires a non-nil context", ErrInvalidContext)
 	}
 	if key == "" || ttl <= 0 {
 		return nil, false, fmt.Errorf("%w: key and positive TTL are required", ErrInvalidLease)
-	}
-	m.mu.RLock()
-	client := m.redisClient
-	closed := m.closed
-	m.mu.RUnlock()
-	if closed || client == nil {
-		return nil, false, ErrRedisClientUnavailable
 	}
 	token, err := newLeaseToken()
 	if err != nil {
@@ -91,6 +84,15 @@ func (m *Manager) acquireLease(ctx context.Context, key string, ttl time.Duratio
 
 	opCtx, cancel := context.WithTimeout(ctx, redisOpTimeout)
 	defer cancel()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.closed {
+		return nil, false, ErrManagerStopped
+	}
+	client := m.redisClient
+	if client == nil {
+		return nil, false, ErrRedisClientUnavailable
+	}
 	acquired, err := client.SetNX(opCtx, key, token, ttl).Result()
 	if err != nil {
 		return nil, false, fmt.Errorf("asynq: acquire Redis lease %q: %w", key, err)
@@ -98,58 +100,87 @@ func (m *Manager) acquireLease(ctx context.Context, key string, ttl time.Duratio
 	if !acquired {
 		return nil, false, nil
 	}
-	return &Lease{client: client, key: key, token: token, ttl: ttl}, true, nil
+	return &Lease{manager: m, key: key, token: token, ttl: ttl}, true, nil
 }
 
 // Refresh extends this lease only while its ownership token still matches.
 func (l *Lease) Refresh(ctx context.Context) error {
-	if l == nil || l.client == nil {
+	if ctx == nil {
+		return fmt.Errorf("%w: refresh lease requires a non-nil context", ErrInvalidContext)
+	}
+	if l == nil || l.manager == nil {
 		return ErrRedisClientUnavailable
 	}
-	if ctx == nil {
-		return fmt.Errorf("%w: nil context", ErrInvalidLease)
+	if l.key == "" || l.token == "" || l.ttl <= 0 {
+		return fmt.Errorf("%w: key, token, and positive TTL are required", ErrInvalidLease)
 	}
 	opCtx, cancel := context.WithTimeout(ctx, redisOpTimeout)
 	defer cancel()
-	result, err := refreshLeaseScript.Run(
-		opCtx,
-		l.client,
-		[]string{l.key},
-		l.token,
-		l.ttl.Milliseconds(),
-	).Int64()
-	if err != nil {
-		return fmt.Errorf("asynq: refresh Redis lease %q: %w", l.key, err)
+	ttlMillis := l.ttl.Milliseconds()
+	if ttlMillis == 0 {
+		ttlMillis = 1
 	}
-	if result != 1 {
-		return ErrLeaseLost
-	}
-	return nil
+	return l.manager.withLeaseClient(func(client redis.UniversalClient) error {
+		result, err := refreshLeaseScript.Run(
+			opCtx,
+			client,
+			[]string{l.key},
+			l.token,
+			ttlMillis,
+		).Int64()
+		if err != nil {
+			return fmt.Errorf("asynq: refresh Redis lease %q: %w", l.key, err)
+		}
+		if result != 1 {
+			return ErrLeaseLost
+		}
+		return nil
+	})
 }
 
 // Release deletes this lease only while its ownership token still matches.
 func (l *Lease) Release(ctx context.Context) error {
-	if l == nil || l.client == nil {
+	if ctx == nil {
+		return fmt.Errorf("%w: release lease requires a non-nil context", ErrInvalidContext)
+	}
+	if l == nil || l.manager == nil {
 		return ErrRedisClientUnavailable
 	}
-	if ctx == nil {
-		return fmt.Errorf("%w: nil context", ErrInvalidLease)
+	if l.key == "" || l.token == "" {
+		return fmt.Errorf("%w: key and token are required", ErrInvalidLease)
 	}
 	opCtx, cancel := context.WithTimeout(ctx, redisOpTimeout)
 	defer cancel()
-	result, err := releaseLeaseScript.Run(
-		opCtx,
-		l.client,
-		[]string{l.key},
-		l.token,
-	).Int64()
-	if err != nil {
-		return fmt.Errorf("asynq: release Redis lease %q: %w", l.key, err)
+	return l.manager.withLeaseClient(func(client redis.UniversalClient) error {
+		result, err := releaseLeaseScript.Run(
+			opCtx,
+			client,
+			[]string{l.key},
+			l.token,
+		).Int64()
+		if err != nil {
+			return fmt.Errorf("asynq: release Redis lease %q: %w", l.key, err)
+		}
+		if result != 1 {
+			return ErrLeaseLost
+		}
+		return nil
+	})
+}
+
+func (m *Manager) withLeaseClient(operation func(redis.UniversalClient) error) error {
+	if m == nil {
+		return ErrRedisClientUnavailable
 	}
-	if result != 1 {
-		return ErrLeaseLost
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.closed {
+		return ErrManagerStopped
 	}
-	return nil
+	if m.redisClient == nil {
+		return ErrRedisClientUnavailable
+	}
+	return operation(m.redisClient)
 }
 
 func newLeaseToken() (string, error) {

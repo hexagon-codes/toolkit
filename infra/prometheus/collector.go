@@ -11,7 +11,7 @@ type Factory struct {
 
 // NewFactory 创建指标工厂；工厂不持有 goroutine 或其他生命周期资源。
 func NewFactory(registry *Registry, namespace, subsystem string) (*Factory, error) {
-	if registry == nil {
+	if !registry.ready() {
 		return nil, ErrNilRegistry
 	}
 	return &Factory{registry: registry, namespace: namespace, subsystem: subsystem}, nil

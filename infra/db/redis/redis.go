@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
@@ -14,7 +15,17 @@ import (
 // Client Redis 客户端封装
 type Client struct {
 	goredis.UniversalClient
+	closeOnce sync.Once
+	closeErr  error
 }
+
+var incrByWithExpireScript = goredis.NewScript(`
+local existed = redis.call("EXISTS", KEYS[1])
+local value = redis.call("INCRBY", KEYS[1], ARGV[1])
+if existed == 0 then
+  redis.call("PEXPIRE", KEYS[1], ARGV[2])
+end
+return value`)
 
 // New 创建新的 Redis 客户端
 func New(ctx context.Context, config Config) (*Client, error) {
@@ -53,6 +64,9 @@ func (c *Client) Health(ctx context.Context) error {
 
 // GetWithDefault 获取值，不存在时返回默认值
 func (c *Client) GetWithDefault(ctx context.Context, key, defaultValue string) (string, error) {
+	if err := c.validateContext(ctx, "get value"); err != nil {
+		return "", err
+	}
 	val, err := c.Get(ctx, key).Result()
 	if err == nil {
 		return val, nil
@@ -65,6 +79,9 @@ func (c *Client) GetWithDefault(ctx context.Context, key, defaultValue string) (
 
 // SetWithExpire 设置值并指定过期时间
 func (c *Client) SetWithExpire(ctx context.Context, key string, value any, expiration time.Duration) error {
+	if err := c.validateContext(ctx, "set value"); err != nil {
+		return err
+	}
 	return c.Set(ctx, key, value, expiration).Err()
 }
 
@@ -75,60 +92,87 @@ func (c *Client) SetNX(ctx context.Context, key string, value any, expiration ti
 
 // SetNXEx SetNX 的封装
 func (c *Client) SetNXEx(ctx context.Context, key string, value any, expiration time.Duration) (bool, error) {
+	if err := c.validateContext(ctx, "set value if absent"); err != nil {
+		return false, err
+	}
 	return c.UniversalClient.SetNX(ctx, key, value, expiration).Result()
 }
 
 // MGetValues 批量获取（简化版）
 func (c *Client) MGetValues(ctx context.Context, keys ...string) ([]any, error) {
+	if err := c.validateContext(ctx, "get multiple values"); err != nil {
+		return nil, err
+	}
 	return c.UniversalClient.MGet(ctx, keys...).Result()
 }
 
 // MSetValues 批量设置（简化版）
 func (c *Client) MSetValues(ctx context.Context, values ...any) error {
+	if err := c.validateContext(ctx, "set multiple values"); err != nil {
+		return err
+	}
 	return c.UniversalClient.MSet(ctx, values...).Err()
 }
 
 // IncrByWithExpire 自增并设置过期时间（如果 key 不存在）
 func (c *Client) IncrByWithExpire(ctx context.Context, key string, value int64, expiration time.Duration) (int64, error) {
-	pipe := c.Pipeline()
-	incrCmd := pipe.IncrBy(ctx, key, value)
-	expireCmd := pipe.Expire(ctx, key, expiration)
-
-	if _, err := pipe.Exec(ctx); err != nil {
+	if err := c.validateContext(ctx, "increment value"); err != nil {
 		return 0, err
 	}
-
-	// 检查各步骤是否成功
-	if err := incrCmd.Err(); err != nil {
-		return 0, err
+	if expiration <= 0 {
+		return 0, fmt.Errorf("%w: expiration must be positive", ErrInvalidConfig)
 	}
-	if err := expireCmd.Err(); err != nil {
-		// Expire 失败但 IncrBy 成功，返回值但记录警告
-		// 这种情况很少发生，通常是 key 类型不匹配
-		return incrCmd.Val(), err
+	ttlMillis := expiration.Milliseconds()
+	if ttlMillis == 0 {
+		ttlMillis = 1
 	}
-
-	return incrCmd.Val(), nil
+	result, err := incrByWithExpireScript.Run(ctx, c.UniversalClient, []string{key}, value, ttlMillis).Int64()
+	if err != nil {
+		return 0, fmt.Errorf("increment Redis value: %w", err)
+	}
+	return result, nil
 }
 
 // ExistsCount 检查 key 是否存在并返回数量
 func (c *Client) ExistsCount(ctx context.Context, keys ...string) (int64, error) {
+	if err := c.validateContext(ctx, "check value existence"); err != nil {
+		return 0, err
+	}
 	return c.UniversalClient.Exists(ctx, keys...).Result()
 }
 
 // DeleteKeys 删除 key（简化版）
 func (c *Client) DeleteKeys(ctx context.Context, keys ...string) error {
+	if err := c.validateContext(ctx, "delete values"); err != nil {
+		return err
+	}
 	return c.Del(ctx, keys...).Err()
 }
 
 // SetExpireAt 设置过期时间戳
 func (c *Client) SetExpireAt(ctx context.Context, key string, tm time.Time) error {
+	if err := c.validateContext(ctx, "set expiration"); err != nil {
+		return err
+	}
 	return c.UniversalClient.ExpireAt(ctx, key, tm).Err()
 }
 
 // GetTTL 获取剩余过期时间
 func (c *Client) GetTTL(ctx context.Context, key string) (time.Duration, error) {
+	if err := c.validateContext(ctx, "get expiration"); err != nil {
+		return 0, err
+	}
 	return c.UniversalClient.TTL(ctx, key).Result()
+}
+
+func (c *Client) validateContext(ctx context.Context, operation string) error {
+	if c == nil || c.UniversalClient == nil {
+		return fmt.Errorf("redis client is nil")
+	}
+	if ctx == nil {
+		return fmt.Errorf("%w: %s requires a non-nil context", ErrInvalidContext, operation)
+	}
+	return nil
 }
 
 // Close 关闭客户端
@@ -136,7 +180,10 @@ func (c *Client) Close() error {
 	if c == nil || c.UniversalClient == nil {
 		return nil
 	}
-	return c.UniversalClient.Close()
+	c.closeOnce.Do(func() {
+		c.closeErr = c.UniversalClient.Close()
+	})
+	return c.closeErr
 }
 
 // Stats 返回连接池统计信息

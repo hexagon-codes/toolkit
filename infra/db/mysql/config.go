@@ -73,6 +73,15 @@ type Logger interface {
 // StdLogger 标准输出日志实现
 type StdLogger struct{}
 
+// cloneConfig 固定调用方配置快照，避免连接生命周期内继续共享可变结构体。
+func cloneConfig(config *Config) *Config {
+	if config == nil {
+		return nil
+	}
+	cloned := *config
+	return &cloned
+}
+
 // Printf 实现 Logger 接口
 func (l *StdLogger) Printf(format string, args ...any) {
 	// 默认不输出，避免污染日志

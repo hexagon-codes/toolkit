@@ -20,9 +20,11 @@ var (
 
 // Client wraps the ClickHouse connection with additional functionality.
 type Client struct {
-	conn   driver.Conn
-	config *Config
-	closed atomic.Bool
+	conn      driver.Conn
+	config    *Config
+	closed    atomic.Bool
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // Global singleton.
@@ -209,10 +211,16 @@ func (c *Client) Ping(ctx context.Context) error {
 
 // Close closes the ClickHouse connection.
 func (c *Client) Close() error {
-	if c.closed.Swap(true) {
-		return ErrAlreadyClosed
+	if c == nil {
+		return nil
 	}
-	return c.conn.Close()
+	c.closeOnce.Do(func() {
+		c.closed.Store(true)
+		if c.conn != nil {
+			c.closeErr = c.conn.Close()
+		}
+	})
+	return c.closeErr
 }
 
 // Name returns the client name for the db.Client interface.
