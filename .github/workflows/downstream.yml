@@ -1,47 +1,234 @@
 name: Downstream Contract
 
-# 接缝契约门禁：toolkit（L0）任何改动，必须让全部消费者（ai-core / hexagon / hexclaw）
-# 在 go.work 下 build+test 仍全绿。底座层影响面最广，门禁最严。
+# 接缝契约门禁：toolkit（L0）任何改动，必须覆盖全部已知消费者及嵌套模块。
+# Go 1.25 与 Go 1.26 消费者使用独立工作区，避免高版本 go.work 污染最低版本门禁。
 on:
   push:
     branches: [main]
+    tags:
+      - "v*"
   pull_request:
     branches: [main]
 
 permissions:
   contents: read
 
+concurrency:
+  group: downstream-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 确保下游契约门禁使用 setup-go 选定的工具链，不允许静默自动升级。
+  GOTOOLCHAIN: local
+  GOPRIVATE: github.com/hexagon-codes/*
+
 jobs:
   downstream:
-    name: ai-core + hexagon + hexclaw against this toolkit
-    # hexclaw exercises toolkit/os/sandbox for real code_exec coverage. Keep this
-    # aligned with sandbox-code-exec.yml's Linux runner where bubblewrap works.
+    name: ai-core + hexagon + examples + hexclaw
+    # HexClaw 会真实执行 toolkit/os/sandbox，因此与 sandbox-code-exec 的 Linux 运行器保持一致。
     runs-on: ubuntu-22.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with: { path: toolkit }
+        with:
+          path: toolkit
+          persist-credentials: false
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with: { repository: hexagon-codes/ai-core, path: ai-core }
+        with:
+          repository: hexagon-codes/ai-core
+          path: ai-core
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          persist-credentials: false
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with: { repository: hexagon-codes/hexagon, path: hexagon }
+        with:
+          repository: hexagon-codes/hexagon
+          path: hexagon
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          persist-credentials: false
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with: { repository: hexagon-codes/hexclaw, path: hexclaw }
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
-        with: { go-version: '1.25.x' }  # 浮动 1.25 最新补丁(见 ci.yml vuln job 注释)
-      - name: Install Linux sandbox dependencies
+        with:
+          repository: hexagon-codes/hexclaw
+          path: hexclaw
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          persist-credentials: false
+      - name: Verify checkout credentials are absent
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y bubblewrap util-linux
+          set -euo pipefail
+          pattern='^(http\..*\.extraheader|credential\..*|core\.askpass|url\..*\.insteadof)$'
+          if git config --global --name-only --get-regexp "$pattern"; then
+            echo "Global Git credential configuration must be absent before repository code runs." >&2
+            exit 1
+          fi
+          for repository in toolkit ai-core hexagon hexclaw; do
+            if git -C "$repository" config --local --name-only --get-regexp "$pattern"; then
+              echo "Git credential configuration must be absent before repository code runs: $repository" >&2
+              exit 1
+            fi
+          done
+          for name in PRIVATE_REPO_TOKEN GH_TOKEN GITHUB_TOKEN GIT_ASKPASS SSH_ASKPASS GIT_SSH GIT_SSH_COMMAND GIT_CONFIG_COUNT; do
+            if printenv "$name" >/dev/null 2>&1; then
+              echo "Credential environment must be absent before repository code runs: $name" >&2
+              exit 1
+            fi
+          done
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.25.12'
+          check-latest: false
+          cache: false
+      - name: Download private dependencies with ephemeral credentials
+        shell: bash
+        env:
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${PRIVATE_REPO_TOKEN:-}" ]]; then
+            echo "PRIVATE_REPO_TOKEN is required." >&2
+            exit 1
+          fi
+
+          credential="x-access-token:$PRIVATE_REPO_TOKEN"
+          encoded="$(printf '%s' "$credential" | base64 | tr -d '\r\n')"
+          unset PRIVATE_REPO_TOKEN credential
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0='http.https://github.com/hexagon-codes/.extraheader'
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $encoded"
+
+          cleanup_environment() {
+            unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 encoded
+          }
+          trap cleanup_environment EXIT
+          for repository in ai-core hexagon hexclaw; do
+            (cd "$repository" && GOWORK=off go mod download all)
+          done
+      - name: Verify dependency credentials are absent
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          pattern='^(http\..*\.extraheader|credential\..*|core\.askpass|url\..*\.insteadof)$'
+          if git config --global --name-only --get-regexp "$pattern"; then
+            echo "Global Git credential configuration remains after dependency download." >&2
+            exit 1
+          fi
+          for repository in toolkit ai-core hexagon hexclaw; do
+            if git -C "$repository" config --local --name-only --get-regexp "$pattern"; then
+              echo "Git credential configuration remains after dependency download: $repository" >&2
+              exit 1
+            fi
+          done
+          for name in PRIVATE_REPO_TOKEN GH_TOKEN GITHUB_TOKEN GIT_ASKPASS SSH_ASKPASS GIT_SSH GIT_SSH_COMMAND GIT_CONFIG_COUNT; do
+            if printenv "$name" >/dev/null 2>&1; then
+              echo "Credential environment remains after dependency download: $name" >&2
+              exit 1
+            fi
+          done
+      - name: Install Linux sandbox dependencies
+        run: ./toolkit/scripts/install-bubblewrap-ci.sh
       - name: go.work（下游用本 PR 的 toolkit）
-        run: go work init ./toolkit ./ai-core ./hexagon ./hexclaw
-      - name: Pre-download release deps（嵌套 go test 沙箱内 module cache 只读，须预先落盘）
+        run: go work init ./toolkit ./ai-core ./hexagon ./hexagon/examples ./hexclaw
+      - name: ai-core build + test
+        working-directory: ai-core
+        run: go build -mod=readonly ./... && go test -mod=readonly -count=1 ./...
+      - name: hexagon build + test
+        working-directory: hexagon
+        run: go build -mod=readonly ./... && go test -mod=readonly -count=1 ./...
+      - name: hexagon examples build + test
+        working-directory: hexagon/examples
+        run: go build -mod=readonly ./... && go test -mod=readonly -count=1 ./...
+      - name: hexclaw build + test
         working-directory: hexclaw
+        run: go build -mod=readonly ./... && go test -mod=readonly -count=1 ./...
+
+  legacy-downstream:
+    name: legacy-downstream against this toolkit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: toolkit
+          persist-credentials: false
+      - name: Verify checkout credentials are absent
+        shell: bash
+        run: |
+          set -euo pipefail
+          pattern='^(http\..*\.extraheader|credential\..*|core\.askpass|url\..*\.insteadof)$'
+          if git config --global --name-only --get-regexp "$pattern"; then
+            echo "Global Git credential configuration must be absent before repository code runs." >&2
+            exit 1
+          fi
+          if git -C toolkit config --local --name-only --get-regexp "$pattern"; then
+            echo "Git credential configuration must be absent before repository code runs: toolkit" >&2
+            exit 1
+          fi
+          for name in LEGACY_DOWNSTREAM_CODEUP_AUTH GH_TOKEN GITHUB_TOKEN GIT_ASKPASS SSH_ASKPASS GIT_SSH GIT_SSH_COMMAND GIT_CONFIG_COUNT; do
+            if printenv "$name" >/dev/null 2>&1; then
+              echo "Credential environment must be absent before repository code runs: $name" >&2
+              exit 1
+            fi
+          done
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.26.5'
+          check-latest: false
+          cache: false
+      - name: Checkout legacy-downstream with ephemeral credentials
+        shell: bash
+        env:
+          LEGACY_DOWNSTREAM_CODEUP_AUTH: ${{ secrets.LEGACY_DOWNSTREAM_CODEUP_AUTH }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${LEGACY_DOWNSTREAM_CODEUP_AUTH:-}" ]]; then
+            echo "LEGACY_DOWNSTREAM_CODEUP_AUTH is required." >&2
+            exit 1
+          fi
+
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0='http.https://codeup.aliyun.com/.extraheader'
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: Basic $LEGACY_DOWNSTREAM_CODEUP_AUTH"
+          unset LEGACY_DOWNSTREAM_CODEUP_AUTH
+          cleanup_environment() {
+            unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+          }
+          trap cleanup_environment EXIT
+          git clone --branch main --depth 1 --single-branch \
+            https://codeup.aliyun.com/6a5db08cf47ae675f13aa214/legacy-downstream.git legacy-downstream
+      - name: Verify legacy-downstream checkout credentials are absent
+        shell: bash
+        run: |
+          set -euo pipefail
+          pattern='^(http\..*\.extraheader|credential\..*|core\.askpass|url\..*\.insteadof)$'
+          if git config --global --name-only --get-regexp "$pattern"; then
+            echo "Global Git credential configuration remains after legacy-downstream checkout." >&2
+            exit 1
+          fi
+          for repository in toolkit legacy-downstream; do
+            if git -C "$repository" config --local --name-only --get-regexp "$pattern"; then
+              echo "Git credential configuration remains after checkout: $repository" >&2
+              exit 1
+            fi
+          done
+          for name in LEGACY_DOWNSTREAM_CODEUP_AUTH GH_TOKEN GITHUB_TOKEN GIT_ASKPASS SSH_ASKPASS GIT_SSH GIT_SSH_COMMAND GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+            if printenv "$name" >/dev/null 2>&1; then
+              echo "Credential environment remains after legacy-downstream checkout: $name" >&2
+              exit 1
+            fi
+          done
+      - name: Download legacy-downstream dependencies
+        working-directory: legacy-downstream
         env:
           GOWORK: "off"
         run: go mod download all
-      - name: ai-core build + test
-        run: (cd ai-core && go build ./... && go test ./...)
-      - name: hexagon build + test
-        run: (cd hexagon && go build ./... && go test ./...)
-      - name: hexclaw build + test
-        run: (cd hexclaw && go build ./... && go test ./...)
+      - name: Create Go 1.26 workspace
+        run: go work init ./toolkit ./legacy-downstream
+      - name: Build legacy-downstream
+        working-directory: legacy-downstream
+        run: go build -mod=readonly ./...
+      - name: Compile legacy-downstream tests without external calls
+        working-directory: legacy-downstream
+        run: go test -mod=readonly -run '^$' ./...
+      - name: Vet legacy-downstream
+        working-directory: legacy-downstream
+        run: go vet -mod=readonly ./...

@@ -1,15 +1,26 @@
 # IDE
 .idea/
 .vscode/
+.DS_Store
 *.swp
 *.swo
 *~
 tmp/*
 
-# Go test artifacts
+# Go 测试与性能分析产物
+*.test
+*.test.exe
 coverage.out
+coverage.txt
+coverage.html
+coverage.prof
+*.prof
 
-# Local Go example binaries
+# 本地 Go 示例二进制文件
 /multi
+
+# 本地构建产物
+/build/
+/dist/
 
 .claude/

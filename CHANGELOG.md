@@ -4,29 +4,84 @@
 
 ## [Unreleased]
 
+> 本节包含不兼容的公共 API 变更，下一次发布必须提升 minor 版本；在提交与 Tag 决策前保持 Unreleased。
+
 ### Changed
-- **BREAKING** `infra/otel`：公开类型统一为 `Tracer`、`Config`、`Option`、`Span`，构造函数统一为 `NewTracer`/`DefaultConfig`；`Tracer.SetExporter(ctx, exporter) error` 在调用时接管导出器所有权，替换时关闭旧导出器并返回关闭错误。
-- **BREAKING** `infra/prometheus`：指标类型统一为 `Counter`、`Gauge`、`Histogram`、`Summary`，移除 `Prometheus*` 类型名。
-- **BREAKING** `util/retry`：重试条件选项统一为 `If`、`IfHTTP`、`IfHTTPOrNetwork`，移除旧构造函数名。
+- **BREAKING** 构建基线：`go.mod` 的最低 Go 版本由 v0.2.6 的 1.25.7 提升至 1.25.12；仓库未声明 `toolchain`，因此这是最低编译版本要求，不是对本机 Go 可执行文件的额外固定。
+- **BREAKING** `os/sandbox`：`Sandbox.Exec` 由旧三参数形式改为 `Exec(ctx, Command)`，不保留旧 facade；`Command.Path`、`Args`、`Dir` 与 `Env` 分别表达可执行文件、参数、工作目录和完整环境。`Env == nil` 使用平台最小安全环境，非 nil 环境不会增量继承宿主变量。
+- **BREAKING** `os/sandbox`：移除 `Sandbox.ExecCode` 以及平台后端内建的 Python、JavaScript、Go 语言分派和临时源码文件管理；调用方负责准备语言产物，并统一通过结构化 `Exec` 提交可审计命令。Toolkit 不再把 `go run` 等多进程构建编排混入跨平台隔离层。
+- **BREAKING** `os/sandbox`：`Sandbox` 新增 `Close() error` 生命周期合同；关闭会先拒绝新操作、等待已经进入的操作收敛，再确定性释放平台资源，并保留后端关闭 panic 或多重错误的完整诊断链。
+- **BREAKING** `os/sandbox`：`Config.Network` 由内置 `bool` 改为 `NetworkMode`，仅保留 `NetworkDisabled` 与 `NetworkHost` 两种精确语义；移除 `Config.DenyLoopback`、`NetPolicy`、`NetProxy`、`NetProxyConfig`、`NewDefaultPolicy`、`NewNetProxy`、`ProxyEnvVars` 以及 Darwin/Linux/Windows proxy integration facade。Windows 同时移除旧 `SandboxMode`、字符串型 `NetworkMode`、`WindowsSandboxPolicy`、`DefaultWindowsPolicy` 和公开 Win32 ACL/Token/Job 常量族。Windows 后端现在会在 `New` 阶段拒绝 `NetworkHost` 和任何非空 `ReadablePaths`；v0.2.6 中使用 `Network: true` 或 `ReadablePaths` 的 Windows 配置升级后会在运行时构造失败，调用方必须改用 `NetworkDisabled` 并清空 `ReadablePaths`，需要宿主网络或只读宿主路径映射的负载应改由 macOS/Linux 后端承载。
+- **BREAKING** `os/sandbox`：移除 `LimitStatusWeak`，限制状态统一为 `not_requested`/`enforced`/`unsupported`，明确区分未请求配额、已真实执行和后端不支持；新增独立的 `LimitReport.ProcessContainment`，并将仅有执行前后 walk 检查的已请求 `Storage` 如实报告为 `unsupported`。
+- **BREAKING** `os/sandbox`：新增 `CapabilityProcessContainment` 与 `LimitReport.ProcessContainment`；macOS no-fork、Linux PID namespace 与 Windows Job Object 证明同一不可逃逸不变量，只有确认全部退出后才能报告 `enforced`。
+- **BREAKING** `os/sandbox`：`Config` 新增必填的 `RequiredCapabilities` 执行前安全合同，`RequiredCapabilities == 0` 会在工作区创建前被拒绝；新增 `UntrustedCodeIsolationCapabilities`，它只保证 filesystem、network、process-containment 与 output 隔离。Memory、Processes、Storage 限额的零值表示未请求且不设置上限，正值必须额外声明对应能力；`New` 在产生文件系统副作用前完成纯配置语义校验。
+- **BREAKING** `os/sandbox`：新增只供固定可信构建工具使用的 `TrustedBuildIsolationCapabilities` 与 `CapabilityProcessCreation`。macOS 选择该合同后允许工具链派生子进程，同时明确将 `ProcessContainment` 报告为 `unsupported`；构建沙箱不得执行不可信产物，产物必须在关闭构建沙箱并完成校验后交给新的严格沙箱执行。
+- **BREAKING** `blobstore`：TTL 元数据文件由 `<blob>.ttl` 改为 `<blob>.blobstore.ttl`，旧 sidecar 不会被读取或自动迁移；升级前必须重命名或重新生成现有 TTL 元数据，否则对应 blob 将被视为未设置 TTL。`NewStore` 现在拒绝空路径和文件系统根目录，将存储根目录规范化并收紧为 `0700`；扩展名仅接受 1–16 位 ASCII 字母或数字并统一为小写。文件访问改用 `os.Root` 防止符号链接逃逸，blob 文件使用 `0600`，TTL 更新与清理通过跨进程文件锁线性化；`SaveFromURL` 对超过 200 MiB 的响应返回错误，不再静默截断后落盘。
+- **BREAKING** `util/hash`：移除弱摘要公共 API `MD5`、`MD5Bytes`、`SHA1` 与 `SHA1Bytes`；内容摘要统一使用 `SHA256`/`SHA256Bytes` 或 `SHA512`/`SHA512Bytes`。
+- **BREAKING** `crypto/aes`：移除 CBC/CTR 公共 API `EncryptCBC`、`DecryptCBC`、`EncryptCBCString`、`DecryptCBCString`、`EncryptCTR`、`DecryptCTR` 及对应 `ErrInvalidBlockSize`、`ErrInvalidPadding`，加密调用统一迁移到 AEAD GCM。
+- **BREAKING** `crypto/rsa`：移除 PKCS#1 v1.5 加解密及签名 API `EncryptPKCS1v15*`、`DecryptPKCS1v15*`、`SignPKCS1v15`、`VerifyPKCS1v15`，分别迁移到 OAEP 和 PSS；`KeyPair.PrivateKeyToPEM`、`PublicKeyToPEM` 改为返回 `(string, error)`。
+- **BREAKING** `util/circuit`：`New`、`NewAIBreaker` 开始返回构造错误；`NewBreakerManager` 不再接受 `func() *Breaker` 工厂回调，改为 `NewBreakerManager(opts ...Option) (*BreakerManager, error)`。`OpenAIConfig`、`ClaudeConfig`、`GeminiConfig`、`AggressiveConfig`、`ConservativeConfig` 由共享变量改为返回独立选项切片的函数。移除 `Breaker.Allow/Success/Failure`，每次调用必须使用同一次 `Acquire() (*Permit, error)` 获得的许可并且只调用一次 `Permit.Complete(error) error`；`Reset`、`OnStateChange` 及 manager 的 `Get`/`Reset`/`ResetAll` 开始返回错误。
+- **BREAKING** `util/retry`：重试条件入口统一为 `If`、`IfHTTP` 与 `IfHTTPOrNetwork`，移除 `RetryIf`、`RetryIfHTTP`、`RetryIfHTTPOrNetwork`；所有 AI/网络/数据库预设策略由共享变量改为函数。移除 `ExponentialBackoffWithJitter`、`LinearBackoffWithJitter`、`WithOnRetryZeroBased`、`WithReturnLastError` 与 `WithUnwrapFinalError`；`OnRetry` 固定公开一基尝试次数，重试耗尽错误固定同时包装 `ErrMaxAttemptsReached` 与最终业务错误。
+- **BREAKING** `util/rate`：`NewTokenBucket`、`NewLeakyBucket`、`NewSlidingWindow`、`NewTokenBucketV2`、`NewTokenRateLimiter`、`NewMultiDimensionLimiter` 全部改为返回 `(*T, error)`。`TokenBucketV2` 移除 `ConsumeN`、`Reserve`、`ReserveN`、`TryAllowN`，`TokenRateLimiter` 移除 `ConsumeN`、`Reserve`、`TryAllowN`，统一使用 `AllowN`/`WaitN`。
+- **BREAKING** `net/sse`：`ReaderOption`、`ClientOption` 改为返回错误；`NewReader`、`NewReaderWithSize`、`NewReaderWithOptions`、`NewWriter`、`NewClient` 改为返回 `(*T, error)`，静态可信配置可使用对应 `MustNew*`。`Reader.Close` 改为返回关闭错误，`FormatEvent` 改为 `(string, error)`。移除客户端内建重连配置 `RetryInterval`、`MaxRetries`、`WithRetryInterval`、`WithMaxRetries` 与 `ErrConnectionFailed`；`Stream` 因持有取消函数而不再可比较。
+- **BREAKING** `net/sse`：`Reader` 默认增加单行 1 MiB、单事件 8 MiB 的硬上限；`Client` 拒绝非 `text/event-stream` 响应，其 `Timeout` 只约束连接、TLS 握手和响应头阶段，不限制长连接的完整生命周期。
+- **BREAKING** `net/httpx`：`Option`、`RawOption` 改为返回错误；`NewClient` 以及 `OpenAIClient`、`AzureOpenAIClient`、`ClaudeClient`、`GeminiClient`、`DeepSeekClient`、`QwenClient`、`DoubaoClient`、`MoonshotClient`、`ZhipuClient`、`BaichuanClient`、`SparkClient`、`CohereClient`、`MistralClient`、`VertexAIClient` 和 `CustomAIClient*` 等全部 AI 客户端构造函数开始返回错误。移除 `RawClient`，改用 `NewRawClient`/`MustNewRawClient`；移除 `WithTransport`，原生客户端 transport 注入使用 `WithRawTransport`。
+- **BREAKING** `net/httpx`：`NewPool(PoolConfig)`、`NewRetryPool(*Pool, RetryConfig)`、`NewRateLimitedPool`、`NewCircuitBreakerPool`、`NewHostPool(HostPoolConfig)` 全部开始返回错误，`DefaultPoolConfig` 与 `DefaultRetryConfig` 由变量改为函数。移除私有熔断状态机的 `CircuitBreakerConfig`、`CircuitBreakerState` 与状态常量，统一使用 `util/circuit`；`CircuitBreakerPool.Reset`、`HostPool.GetPool`、`HostPool.SetHostConfig`、`SetGlobalPool` 开始返回错误，`RateLimitedPool.Close` 不再返回错误。`PoolStats` 移除连接数、等待及响应时间公开字段，统计读取统一使用 `GetStats() PoolStatsSnapshot`。
+- **BREAKING** `net/httpx`：客户端和 `RetryPool` 只重试幂等方法或携带 `Idempotency-Key` 的请求；需要重试的请求体必须可重放，否则返回 `ErrRequestBodyNotReplayable`。普通响应超过 `maxBodySize` 时改为返回 `ErrResponseBodyTooLarge`，不再静默截断；流式 SSE 单事件默认上限为 1 MiB。
+- **BREAKING** 数据库生命周期：`clickhouse.Reset`、`elasticsearch.Reset`、`mongodb.Reset` 开始返回资源关闭错误。
+- **BREAKING** 数据库 TLS：ClickHouse 移除 `Config.InsecureSkipVerify`，`WithTLS(bool)` 改为无参数 `WithTLS()` 并始终启用证书校验；Elasticsearch 移除 `Config.InsecureSkipVerify` 与 `WithInsecureSkipVerify`，自定义信任链仅通过 `CACert`/`WithCACert` 配置。
 - **BREAKING** `infra/db/mysql`：`QueryWithTimeout` 与 `QueryRowWithTimeout` 显式返回 `context.CancelFunc`，调用方必须在消费完 `Rows`/`Row` 后取消上下文；移除旧 `Ex` 变体。
-- **BREAKING** `net/ip`：可能触发网络访问的函数改为 context-first API。
-- **BREAKING** `util/poolx`：全局提交函数返回调度错误，`SubmitFuncCtx` 改为 context-first；`Parallel` 只等待成功提交的任务。
-- **BREAKING** `lang/errorx`：`MultiError.Append`/`AppendResult` 不再返回接收者，错误聚合改为有界保留并拒绝循环引用；并行执行统一返回 `error`、按输入顺序聚合并限制默认并发；`SafeGo(func()) <-chan error` 返回唯一一次完成结果，`Result.UnwrapOrElse(func(error) T) (T, error)` 对 nil 回调返回可诊断错误。`lang/syncx.OnceErr.Value` 返回顺序改为 `(value, initialized, error)`，数据库单例 `Reset` 开始返回关闭错误。
+- **BREAKING** `infra/db/redis`：Redis 拓扑、ACL、TLS 与连接池配置统一由 `infra/redisconn.Config`/`Mode` 拥有，旧 `Config`/`Mode` 改为该包的别名；`DefaultConfig` 改为 `DefaultConfig(mode, addrs...) Config`，`New` 改为 `New(ctx, Config)` 并在返回前验证连接。移除 `DefaultClusterConfig`、`Init`、`GetGlobal`、`Logger`、`StdLogger` 等进程全局 API；`Client.GetWithDefault` 改为返回 `(string, error)`，只在 Redis key 不存在时返回默认值。
+- **BREAKING** `infra/queue/asynq`：`Config` 改为持有唯一的 `redisconn.Config`，移除顶层 `RedisAddrs`、`Username`、`Password`；`DefaultConfig(redisConfig) Config`、`NewManager(ctx, Config)`、`InitManager(ctx, Config)` 改为显式配置和 context-first。移除 `ConfigProvider`、`RedisConfig`、`RedisClient`、`DefaultConfigProvider`、`InitManagerFromConfig`、`InitWithRedisConfig`、`Set/GetConfigProvider`、`Set/GetRedisClient` 等重复配置和全局 Redis facade；调用方必须把 Redis 拓扑、凭据、TLS 与连接池配置迁入 `redisconn.Config`，由 `Manager` 独占 Redis 客户端及其生命周期。
+- **BREAKING** `infra/queue/asynq`：`InitQueueNames` 已删除，调用方应删除初始化调用，通过 `Config.QueuePrefix` 配置命名空间，并使用 `Config.QueueName`/`Manager.QueueName` 派生队列名。`NewCircuitBreaker` 与 `NewRateLimiter` 分别改为返回 `(*CircuitBreaker, error)` 与 `(*RateLimiter, error)`，调用方必须处理配置校验错误。`InitPolling` 改为 `InitPolling(ctx, PollingConfig, Config, WorkerDependencies) (func() error, error)`，`PollingConfig` 移除 `RedisAddr` 与 `Concurrency`；handler、middleware、schedule 注册开始返回错误。`InitMetrics` 改为 `InitMetrics(queueNames []string)`，`UpdateQueueMetrics` 改为 `UpdateQueueMetrics(ctx, manager) error`，`StartMetricsUpdater` 改为 `StartMetricsUpdater(ctx, manager, interval) error`；backpressure、rate-limit 和 circuit manager 的配置、启动、查询、清理与重置操作开始返回错误。
+- **BREAKING** `infra/queue/asynq`：熔断器移除 `Allow`、`RecordSuccess`、`RecordFailure`，改用 `Acquire` 与同一次 `CircuitPermit.Complete`，状态类型统一为 `util/circuit.State`；移除全局 channel/platform breaker getter 和旧 `SetConfig`，删除 `CircuitBreakerStats.ConsecutiveErrors`。轮询/迁移锁的包级函数及任务轮询全局标记被移除，统一使用 `Manager.AcquirePollingLease`/`AcquireMigrationLease` 返回的 `Lease`。队列名由变量改为常量，`PollingLockTTL` 改为 `time.Duration`；移除 `StateCancelled`，统一使用 `StateCanceled`/`CANCELED`；`HealthChecker` 不再可比较。
+- **BREAKING** `infra/observe`/`infra/prometheus`：指标标签由 `...string` 改为 `...observe.Tag`，`Metrics.Counter/Gauge/Histogram/Timer` 及 Prometheus registry/adapter 构造与操作开始返回错误；`NewExporter` 改为返回 `(*Exporter, error)`，调用方必须处理运行时收集器注册和工厂构造错误；`Counter.Add` 返回错误，`Gauge` 不再实现 `Counter`。移除 `Prometheus*` 类型、`Collector`、`NewCollector` 与 `Exporter.Collector`，`DefaultBuckets`/`DefaultQuantiles` 由变量改为函数，`Registry.Gather` 返回 `(string, error)`，`Exporter.Shutdown` 改为 `Shutdown(ctx) error`。
+- **BREAKING** `infra/otel`：移除 `OTelTracer`、`OTelConfig`、`OTelOption`、`OTelSpan`、`NewOTelTracer`、`DefaultOTelConfig`、`WithEndpoint` 与 `WithBatchConfig`，统一使用 `Tracer`、`Config`、`Option`、`Span`、`NewTracer` 与 `DefaultConfig`。`NewOTLPExporter` 改为返回 `(*OTLPExporter, error)`；`Tracer.SetExporter(ctx, exporter) error` 接管 exporter 生命周期并返回旧 exporter 的关闭错误。
+- **BREAKING** `lang/errorx`：`MultiError.Append`/`AppendResult` 不再返回接收者，错误聚合改为有界保留并拒绝循环引用；并行执行统一返回 `error`、按输入顺序聚合并限制默认并发；`SafeGo(func()) <-chan error` 返回唯一一次完成结果，`Result.UnwrapOrElse(func(error) T) (T, error)` 对 nil 回调返回可诊断错误。`lang/syncx.OnceErr.Value` 返回顺序改为 `(value, initialized, error)`。
 - **BREAKING** `lang/contextx`：`Run(ctx, func(context.Context) error)` 与 `RunTimeout(parent, timeout, func(context.Context) error)` 改为同步协作取消；`NewPool(ctx, size) (*Pool, error)` 校验 nil context 与非正数容量。
-- **BREAKING** `cache/multi`：`NewCache(layers, opts...) (*Cache, error)` 与 `Builder.Build() (*Cache, error)` 统一校验空层、nil 层及无效选项，不再通过 panic 或无效实例表达配置错误。
-- **BREAKING** `net/httpx`：`NewHostPool(HostPoolConfig) (*HostPool, error)` 要求显式提供单主机池配置与 `MaxHosts` 容量上限；`RemoveHost` 同时关闭目标池并释放配置和实例容量。
-- **BREAKING** `infra/queue/asynq`：取消状态统一采用 `StateCanceled`/`CANCELED`，不再接受旧拼写。
-- **BREAKING** `event`：`New`、`Subscribe`、`SubscribeAll`、`Publish` 与 `PublishSync` 显式返回配置或生命周期错误；`Close` 仅启动非阻塞关闭流程，`Shutdown(ctx)` 负责等待活跃处理器完成；panic 回调自身的 panic 会被隔离。
+- **BREAKING** `cache/multi`：`Option` 由 `func(*Options)` 改为 `func(*Options) error`；`NewCache(layers, opts...) (*Cache, error)` 与 `Builder.Build() (*Cache, error)` 统一校验空层、nil 层及无效选项，不再通过 panic 或无效实例表达配置错误。
+- **BREAKING** `event`：`BusOption` 由 `func(*Bus)` 改为 `func(*Bus) error`；`New`、`Subscribe`、`SubscribeAll`、`Publish` 与 `PublishSync` 显式返回配置或生命周期错误；`Close` 仅启动非阻塞关闭流程，`Shutdown(ctx)` 负责等待活跃处理器完成；panic 回调自身的 panic 会被隔离。
+- **BREAKING** `util/poolx`：`Go`、`GoWait`、`GoBatch`、`Parallel`、`SetDefaultPool` 开始返回调度错误；`GoCtx` 在 v0.2.6 已返回 `error`，本次不兼容变更是回调由 `func()` 改为 `func(context.Context)`。`SubmitWithContext` 回调同样改为 `func(context.Context)`，`SubmitFuncCtx` 改为 context-first。`NewMultiPool`、`NewObjectPool` 开始返回构造错误。移除任务级 `Timeout` 字段、`WithTaskTimeout`、`HookOnTimeout`、`HookBuilder.OnTimeout` 与 `StealingScheduler.Steal`；删除 timeout hook 后，`HookOnWorkerStart`、`HookOnWorkerStop`、`HookOnScaleUp`、`HookOnScaleDown` 的数值发生重排，依赖枚举数值的调用方必须迁移。
+- **BREAKING** `net/ip`：`GetLocalIP`、`GetOutboundIP`、`ResolveHost`、`ReverseLookup` 全部改为 context-first 签名。
 - **BREAKING** `util/file`：默认文件权限收紧为 `0600`、目录权限收紧为 `0750`；写入与复制改为同目录临时文件、文件同步、原子替换和父目录同步协议，空删除路径与 nil 遍历回调会返回错误。
 
 ### Fixed
-- 补齐数据库、HTTP/SSE、沙箱代理、文件复制和可观测性链路中的资源关闭与错误传播，避免关闭错误或异步导出错误被静默丢弃。
+- 补齐数据库、HTTP/SSE、文件复制和可观测性链路中的资源关闭与错误传播，避免关闭错误或异步导出错误被静默丢弃。
 - OTLP 批量导出失败时重新入队未发送 span，并在 `Shutdown` 汇总异步导出错误。
 - MySQL 超时查询不再在调用方读取结果前提前取消派生上下文。
+- `crypto/sign`：未知 `HMACHash` 不再静默降级为 SHA-256，而是使签名失败；时间窗口验证拒绝负时间戳、非正 `maxAge` 和整数溢出，nonce 验证拒绝空 nonce、nil/typed-nil checker；`TimestampSigner` 复制并独占调用方提供的密钥字节。
+- `util/rand`：Unicode 字符集改为按 rune 采样，整数随机区间改用无溢出计算，完整 `int`/`int64` 范围不再触发区间溢出。
 
 ### Tests
 - 新增 MySQL 8.4 与 Redis 7.4 具名 ACL 的隔离容器集成测试脚本，并纳入 CI。
 - CI 全量 lint 门禁改为检查整个仓库。
+
+## [0.2.6] - 2026-07-04
+
+`os/sandbox` 安全加固版本。相对 v0.2.3，导出 API 仅包含兼容性新增，但默认资源限额和 Linux 沙箱后端降级策略发生了用户可见变化。
+
+### Added
+- `os/sandbox`：`Config` 新增 `DenyLoopback`、`MaxOutputBytes`、`MaxStderrBytes`、`MaxWorkspaceBytes`、`MaxArtifactBytes`、`MaxMemoryBytes` 与 `MaxProcesses`。
+- `os/sandbox`：新增 `LimitStatus`、`LimitReport`、`LimitStatusEnforced`、`LimitStatusUnsupported` 与 `LimitStatusWeak`，用于报告资源限制及文件系统隔离的实际强度。
+- `os/sandbox`：`ExecResult` 新增 `StdoutBytes`、`StderrBytes`、`StdoutTruncated`、`StderrTruncated` 与 `Limits`。
+- `os/sandbox`：新增可通过 `errors.Is` 判断的 `ErrStorageLimitExceeded` 与 `ErrFilesystemContainmentUnavailable`。
+- `os/sandbox`：Windows 构建新增公开 ACL 常量 `DENY_ACCESS` 与 `TRUSTEE_IS_SID`。
+
+### Changed
+- 构建基线：最低 Go 版本从 1.25.5 提升至 1.25.7。
+- `os/sandbox`：零值资源配置会应用安全默认值：stdout 64 KiB、stderr 64 KiB、工作区 1 GiB、单产物 50 MiB、内存 256 MiB、进程数 64。
+- `os/sandbox`：Linux 优先使用 bubblewrap；仅有 unshare 且配置了 `DeniedPaths` 时 fail-closed，未声明机密路径时才允许以 `LimitStatusWeak` 运行；没有可用隔离后端时不再退化为裸进程执行。
+- `os/sandbox`：macOS Seatbelt 在 `Network=true` 且 `DenyLoopback=true` 时拒绝回环访问；Linux 此版本尚不能落实 `DenyLoopback`，调用方不得依赖该字段隔离本机端口。
+- `os/sandbox`：Windows 使用真实进程等待结果、退出码、有界 stdout/stderr 和超时终止结果，资源限制状态通过 `LimitReport` 返回。
+
+### Fixed
+- `os/sandbox`：存储限额违规保留已经产生的 `ExecResult`，并保持 `ErrStorageLimitExceeded` 错误链。
+- `os/sandbox`：工作区检查允许文件在并发执行期间消失，不再把正常清理竞态误判为扫描失败。
+- `os/sandbox`：修复 Windows 非零退出码、输出截断统计以及超时后进程等待行为。
+
+### Tests
+- 新增跨平台沙箱隔离、资源限制、输出截断、存储限额、回环网络和 Linux 后端 fail-closed 回归测试。
+- 新增独立的 sandbox code-exec CI 工作流，并固定 Linux 沙箱 Runner 为 Ubuntu 22.04。
 
 ## [0.2.3] - 2026-06-28
 向后兼容的 PATCH 版本（新增 `lang/stringx` 按字节封顶截断能力，无导出 API 破坏）。

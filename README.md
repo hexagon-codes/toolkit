@@ -4,7 +4,7 @@
 
 一个生产级 Go 通用工具包，采用领域驱动设计理念。
 
-[![Go Version](https://img.shields.io/badge/Go-%3E%3D%201.25-blue)](https://golang.org/)
+[![Go Version](https://img.shields.io/badge/Go-%3E%3D%201.25.12-blue)](https://go.dev/)
 
 ## 特性
 
@@ -23,7 +23,7 @@
 ## 快速开始
 
 ```bash
-go get github.com/hexagon-codes/toolkit@v0.1.0
+go get github.com/hexagon-codes/toolkit@v0.3.0
 ```
 
 ### 类型转换
@@ -1221,6 +1221,72 @@ s.Any(func(n int) bool { return n > 10 })
 s.All(func(n int) bool { return n > 0 })
 ```
 
+### 结构化命令沙箱
+
+`Sandbox.Exec` 仅接受结构化的 `sandbox.Command`，不会把命令和参数拼成 shell
+文本。`Path` 表示可执行文件路径，`Args` 按原始 argv 元素传递；`Dir` 为空时使用
+沙箱工作区，非空时必须位于工作区内。
+
+Toolkit 不负责语言识别、临时源码文件或构建流程；调用方应先准备可执行产物，再通过
+结构化 `Exec` 提交命令。这样隔离层不会把 `go run` 等多进程编排误当成单次载荷执行。
+
+`Env == nil` 时由平台提供最小安全环境；`Env` 非 nil 时表示完整环境，而不是在
+宿主环境上增量覆盖。需要显式环境时，调用方必须给出全部必要变量。
+
+```go
+sb, err := sandbox.New(sandbox.Config{
+    Workspace:            workspace,
+    RequiredCapabilities: sandbox.UntrustedCodeIsolationCapabilities,
+})
+if err != nil {
+    return err
+}
+
+result, execErr := sb.Exec(ctx, sandbox.Command{
+    Path: executablePath,
+    Args: []string{"structured-command"},
+    Dir:  workspace,
+    Env:  nil,
+})
+if err := errors.Join(execErr, sb.Close()); err != nil {
+    return err
+}
+fmt.Print(result.Stdout)
+```
+
+完整的跨平台可编译示例见 `examples/os/sandbox`。
+
+### 威胁模型与能力合同
+
+沙箱用于保护宿主免受沙箱载荷侵害。宿主进程、调用方提供的配置，以及载荷启动前
+完成的工作区 staging 属于可信边界；本合同不承诺抵抗已经在宿主上以同 UID 任意
+执行的恶意进程，因为该进程本身已经拥有相应用户数据的访问权限。这个边界不豁免
+沙箱载荷自身的逃逸防护：工作区根链接、指向工作区外对象的静态 hardlink，以及在
+最终 preflight 复核时已经发生且可观察到的路径身份变更仍必须失败关闭。可信调用方
+或已取得同 UID 宿主执行能力的进程在最终复核后继续并发修改路径，不属于本合同。
+
+`RequiredCapabilities` 是必填的执行前合同，`RequiredCapabilities == 0` 会在创建工作区
+前被 `New` 拒绝。执行不可信代码应从 `UntrustedCodeIsolationCapabilities` 开始，它只保证
+filesystem、network、process-containment 和 output 隔离，不声称提供 Memory、Processes
+或 Storage 抗拒绝服务配额。`MaxMemoryBytes`、`MaxProcesses`、`MaxWorkspaceBytes` 和
+`MaxArtifactBytes` 为 0 时表示未请求且不设置上限；设置正值时必须分别追加
+`CapabilityMemory`、`CapabilityProcesses` 或 `CapabilityStorage`。输出使用安全的有界默认值，
+因此隔离集合始终包含 `CapabilityOutput`。后端无法证明任一必需能力时，必须在载荷启动前拒绝。
+`LimitReport` 只记录本次执行事实：可选配额分别以 `not_requested`、`enforced` 或
+`unsupported` 表示未请求、已真实执行或后端不支持；平台可用能力应通过
+`sandbox.AvailableCapabilities(ctx, sb)` 查询。
+
+固定且可信的构建工具处理已暂存源码时，可以单独创建要求
+`TrustedBuildIsolationCapabilities` 的沙箱。该集合增加 `CapabilityProcessCreation`，并刻意
+不要求 `CapabilityProcessContainment`；macOS 因而允许工具链派生子进程，但会如实报告后代
+收容为 `unsupported`。此合同绝不能用于执行不可信产物：构建结束后必须关闭构建沙箱，再用
+要求 `UntrustedCodeIsolationCapabilities` 的新沙箱执行已经校验的产物。
+
+`CapabilityProcessContainment` 的统一合同是：从载荷启动到 `Exec` 返回，根进程及其后代
+要么不能产生，要么始终位于不可逃逸的生命周期边界；只有确认全部退出后才能报告
+`enforced`。macOS 通过严格 no-fork、Linux 通过 PID namespace、Windows 通过 Job Object
+分别证明同一不变量。任一证明不成立时，必须在任何载荷副作用发生前拒绝。
+
 ## 近期更新
 
 - **infra/redisconn**: 新增 Single / Cluster / Sentinel 统一 Redis 连接工厂，支持 ACL 账号密码、Sentinel 双凭据、TLS、动态凭据与启动探活；项目级策略主动拒绝 password-only
@@ -1288,7 +1354,7 @@ toolkit/
 │   └── ssrf/          # URL 级 SSRF 校验
 │
 ├── os/                 # 操作系统能力
-│   └── sandbox/       # 命令沙箱（网络策略/代理）
+│   └── sandbox/       # 命令沙箱（文件系统/网络/进程/输出隔离）
 │
 ├── util/               # 工具组件
 │   ├── circuit/       # 熔断器（AI 预设/多实例管理）
@@ -1296,7 +1362,7 @@ toolkit/
 │   ├── encoding/      # 编码（Base64/Hex/URL）
 │   ├── env/           # 环境变量
 │   ├── file/          # 文件操作
-│   ├── hash/          # 哈希（MD5/SHA/Bcrypt）
+│   ├── hash/          # 哈希（SHA-256/SHA-512/bcrypt）
 │   ├── idgen/         # ID 生成（Snowflake/NanoID）
 │   ├── json/          # JSON 辅助
 │   ├── lease/         # 分布式互斥租约（FencingToken）

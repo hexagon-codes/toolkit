@@ -4,7 +4,7 @@
 
 A production-grade Go general-purpose toolkit with domain-driven design principles.
 
-[![Go Version](https://img.shields.io/badge/Go-%3E%3D%201.25-blue)](https://golang.org/)
+[![Go Version](https://img.shields.io/badge/Go-%3E%3D%201.25.12-blue)](https://go.dev/)
 
 ## Features
 
@@ -23,7 +23,7 @@ A production-grade Go general-purpose toolkit with domain-driven design principl
 ## Quick Start
 
 ```bash
-go get github.com/hexagon-codes/toolkit@v0.1.0
+go get github.com/hexagon-codes/toolkit@v0.3.0
 ```
 
 ### Type Conversion
@@ -1221,6 +1221,88 @@ s.Any(func(n int) bool { return n > 10 })
 s.All(func(n int) bool { return n > 0 })
 ```
 
+### Structured Command Sandbox
+
+`Sandbox.Exec` accepts only a structured `sandbox.Command`; it does not join the
+executable and arguments into shell text. `Path` identifies the executable,
+`Args` preserves individual argv elements, and `Dir` defaults to the sandbox
+workspace and otherwise must remain inside it.
+
+Toolkit does not own language detection, temporary source files, or build
+pipelines. Callers prepare executable artifacts first and submit them through
+structured `Exec`, so the isolation layer never treats multi-process drivers
+such as `go run` as a single payload execution.
+
+When `Env == nil`, the platform supplies a minimal safe environment. A non-nil
+`Env` is the complete process environment, not an overlay on the host
+environment, so callers must provide every required variable explicitly.
+
+```go
+sb, err := sandbox.New(sandbox.Config{
+    Workspace:            workspace,
+    RequiredCapabilities: sandbox.UntrustedCodeIsolationCapabilities,
+})
+if err != nil {
+    return err
+}
+
+result, execErr := sb.Exec(ctx, sandbox.Command{
+    Path: executablePath,
+    Args: []string{"structured-command"},
+    Dir:  workspace,
+    Env:  nil,
+})
+if err := errors.Join(execErr, sb.Close()); err != nil {
+    return err
+}
+fmt.Print(result.Stdout)
+```
+
+See `examples/os/sandbox` for a complete cross-platform buildable example.
+
+### Threat Model and Capability Contract
+
+The sandbox protects the host from its payload. The host process, caller-supplied
+configuration, and workspace staging completed before execution are trusted. It
+does not promise protection from a malicious process that already has arbitrary
+execution as the same UID on the host, because that process already has the
+corresponding user's data access. This boundary does not excuse escapes by the
+payload itself: workspace-root links, static hardlinks to objects outside the
+workspace, and path identity changes already present and observable at the final
+preflight must still fail closed. Continued concurrent path mutation after the
+final preflight by the trusted caller or a process with same-UID host execution
+is outside this contract.
+
+`RequiredCapabilities` is a mandatory pre-execution contract. `New` rejects
+`RequiredCapabilities == 0` before creating the workspace. Untrusted execution
+starts with `UntrustedCodeIsolationCapabilities`, which guarantees only
+filesystem, network, process-containment, and output isolation; it does not claim
+Memory, Processes, or Storage denial-of-service quotas. Zero for
+`MaxMemoryBytes`, `MaxProcesses`, `MaxWorkspaceBytes`, or `MaxArtifactBytes`
+means that the limit was not requested and remains unlimited. A positive value
+requires `CapabilityMemory`, `CapabilityProcesses`, or `CapabilityStorage`, as
+applicable. Output keeps a safe bounded default, so the isolation set always
+includes `CapabilityOutput`. If a backend cannot prove every required capability,
+it must reject the request before payload startup.
+`LimitReport` records only facts about this execution: optional quotas use
+`not_requested`, `enforced`, or `unsupported`, while platform availability remains
+available through `sandbox.AvailableCapabilities(ctx, sb)`.
+
+A fixed, trusted build tool processing already-staged source may use a separate
+sandbox that requires `TrustedBuildIsolationCapabilities`. This set adds
+`CapabilityProcessCreation` and intentionally omits
+`CapabilityProcessContainment`; macOS therefore permits toolchain children while
+reporting descendant containment as `unsupported`. This contract must never run
+an untrusted artifact. Close the build sandbox first, then execute the verified
+artifact in a new sandbox requiring `UntrustedCodeIsolationCapabilities`.
+
+`CapabilityProcessContainment` has one cross-platform contract: from payload
+startup until `Exec` returns, the root process and every descendant either cannot
+be created or remain inside a non-escapable lifecycle boundary; the result may be
+`enforced` only after every process is confirmed exited. macOS proves this with
+strict no-fork, Linux with a PID namespace, and Windows with a Job Object. If any
+proof is unavailable, the backend must reject before any payload side effect.
+
 ## Recent Changes
 
 - **infra/redisconn**: Added one Redis connection factory for Single, Cluster, and Sentinel with ACL username/password, separate Sentinel credentials, TLS, dynamic credentials, and startup probing; project policy intentionally rejects password-only configuration
@@ -1288,7 +1370,7 @@ toolkit/
 │   └── ssrf/          # URL-level SSRF validation
 │
 ├── os/                 # Operating system capabilities
-│   └── sandbox/       # Command sandbox (network policy/proxy)
+│   └── sandbox/       # Command sandbox (filesystem/network/process/output isolation)
 │
 ├── util/               # Utility components
 │   ├── circuit/       # Circuit breaker (AI presets/multi-instance management)
@@ -1296,7 +1378,7 @@ toolkit/
 │   ├── encoding/      # Encoding (Base64/Hex/URL)
 │   ├── env/           # Environment variables
 │   ├── file/          # File operations
-│   ├── hash/          # Hashing (MD5/SHA/Bcrypt)
+│   ├── hash/          # Hashing (SHA-256/SHA-512/bcrypt)
 │   ├── idgen/         # ID generation (Snowflake/NanoID)
 │   ├── json/          # JSON helpers
 │   ├── lease/         # Distributed mutex lease (FencingToken)

@@ -1,7 +1,7 @@
 name: API Compatibility
 
-# 用 gorelease 对照上一个 tag 检测导出 API 的破坏式变更，提示 SemVer 应升 major/minor。
-# v0.x 阶段为提示性（不硬失败）；v1.0 后改为破坏式变更即 CI 红。
+# 用 gorelease 对照上一个 tag 检测导出 API，并验证明确的候选版本满足 SemVer。
+# v0.x 允许在 minor 版本中包含有意破坏，但工具、网络、加载和版本验证失败都必须阻断。
 on:
   pull_request:
     branches: [main]
@@ -9,15 +9,54 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: api-compat-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 确保 API 门禁使用 setup-go 选定的工具链，不允许静默自动升级。
+  GOTOOLCHAIN: local
+  API_BASE_VERSION: "v0.2.6"
+  API_RELEASE_VERSION: "v0.3.0"
+  API_BREAKING_BASELINE: ".github/workflows/api-breaking-v0.3.0.txt"
+  API_BREAKING_CHECKER: ".github/workflows/check-api-breaking.py"
+
 jobs:
   gorelease:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify checkout credentials are absent
+        shell: bash
+        run: |
+          set -euo pipefail
+          pattern='^(http\..*\.extraheader|credential\..*|core\.askpass|url\..*\.insteadof)$'
+          for scope in --local --global; do
+            if git config "$scope" --name-only --get-regexp "$pattern"; then
+              echo "Git credential configuration must be absent before repository code runs: $scope" >&2
+              exit 1
+            fi
+          done
+          for name in GH_TOKEN GITHUB_TOKEN GIT_ASKPASS SSH_ASKPASS GIT_SSH GIT_SSH_COMMAND GIT_CONFIG_COUNT; do
+            if printenv "$name" >/dev/null 2>&1; then
+              echo "Credential environment must be absent before repository code runs: $name" >&2
+              exit 1
+            fi
+          done
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
-        with: { go-version: '1.25.x' }  # 浮动 1.25 最新补丁(见 ci.yml vuln job 注释)
+        with:
+          go-version: '1.25.12'
+          check-latest: false
       - name: Install gorelease
         run: go install golang.org/x/exp/cmd/gorelease@v0.0.0-20260727155853-b88d891fe743
       - name: Check API compatibility
-        run: gorelease || echo "::warning::gorelease 报告了 API 变更，请确认 SemVer 版本号相应升级"
+        shell: bash
+        run: |
+          set -euo pipefail
+          report_path="$RUNNER_TEMP/gorelease-report.txt"
+          gorelease -base="$API_BASE_VERSION" -version="$API_RELEASE_VERSION" | tee "$report_path"
+          python3 "$API_BREAKING_CHECKER" "$report_path" "$API_BREAKING_BASELINE"

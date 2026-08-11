@@ -1,0 +1,476 @@
+# github.com/hexagon-codes/toolkit/blobstore
+## incompatible changes
+Blobstore.Close: added
+Store: old is comparable, new is not
+
+# github.com/hexagon-codes/toolkit/cache/multi
+## incompatible changes
+(*Builder).Build: changed from func() *Cache to func() (*Cache, error)
+NewCache: changed from func([]LayerConfig, ...Option) *Cache to func([]LayerConfig, ...Option) (*Cache, error)
+Option: changed from func(*Options) to func(*Options) error
+
+# github.com/hexagon-codes/toolkit/crypto/aes
+## incompatible changes
+DecryptCBC: removed
+DecryptCBCString: removed
+DecryptCTR: removed
+EncryptCBC: removed
+EncryptCBCString: removed
+EncryptCTR: removed
+ErrInvalidBlockSize: removed
+ErrInvalidPadding: removed
+
+# github.com/hexagon-codes/toolkit/crypto/rsa
+## incompatible changes
+(*KeyPair).PrivateKeyToPEM: changed from func() string to func() (string, error)
+(*KeyPair).PublicKeyToPEM: changed from func() string to func() (string, error)
+DecryptPKCS1v15: removed
+DecryptPKCS1v15String: removed
+EncryptPKCS1v15: removed
+EncryptPKCS1v15String: removed
+SignPKCS1v15: removed
+VerifyPKCS1v15: removed
+
+# github.com/hexagon-codes/toolkit/event
+## incompatible changes
+(*Bus).Publish: changed from func(Event) to func(Event) error
+(*Bus).PublishSync: changed from func(Event) to func(Event) error
+(*Bus).Subscribe: changed from func(string, Handler) func() to func(string, Handler) (func(), error)
+(*Bus).SubscribeAll: changed from func(Handler) func() to func(Handler) (func(), error)
+BusOption: changed from func(*Bus) to func(*Bus) error
+New: changed from func(...BusOption) *Bus to func(...BusOption) (*Bus, error)
+
+# github.com/hexagon-codes/toolkit/infra/db/clickhouse
+## incompatible changes
+Config.InsecureSkipVerify: removed
+Reset: changed from func() to func() error
+WithTLS: changed from func(bool) Option to func() Option
+
+# github.com/hexagon-codes/toolkit/infra/db/elasticsearch
+## incompatible changes
+Config.InsecureSkipVerify: removed
+Reset: changed from func() to func() error
+WithInsecureSkipVerify: removed
+
+# github.com/hexagon-codes/toolkit/infra/db/mongodb
+## incompatible changes
+Reset: changed from func() to func() error
+
+# github.com/hexagon-codes/toolkit/infra/db/mysql
+## incompatible changes
+(*DB).QueryRowWithTimeout: changed from func(context.Context, time.Duration, string, ...any) *database/sql.Row to func(context.Context, time.Duration, string, ...any) (*database/sql.Row, context.CancelFunc)
+(*DB).QueryRowWithTimeoutEx: removed
+(*DB).QueryWithTimeout: changed from func(context.Context, time.Duration, string, ...any) (*database/sql.Rows, error) to func(context.Context, time.Duration, string, ...any) (*database/sql.Rows, context.CancelFunc, error)
+(*DB).QueryWithTimeoutEx: removed
+
+# github.com/hexagon-codes/toolkit/infra/db/redis
+## incompatible changes
+(*Client).GetWithDefault: changed from func(context.Context, string, string) string to func(context.Context, string, string) (string, error)
+Config: changed from Config to github.com/hexagon-codes/toolkit/infra/redisconn.Config
+DefaultClusterConfig: removed
+DefaultConfig: changed from func(string) *Config to func(Mode, ...string) Config
+GetGlobal: removed
+Init: removed
+Logger: removed
+Mode: changed from Mode to github.com/hexagon-codes/toolkit/infra/redisconn.Mode
+ModeCluster: changed from Mode to github.com/hexagon-codes/toolkit/infra/redisconn.Mode
+ModeSentinel: changed from Mode to github.com/hexagon-codes/toolkit/infra/redisconn.Mode
+ModeSingle: changed from Mode to github.com/hexagon-codes/toolkit/infra/redisconn.Mode
+New: changed from func(*Config) (*Client, error) to func(context.Context, Config) (*Client, error)
+StdLogger: removed
+
+# github.com/hexagon-codes/toolkit/infra/observe
+## incompatible changes
+Counter.Add: changed from func(float64) to func(float64) error
+Gauge: no longer implements Counter
+Metrics.Counter: changed from func(string, ...string) Counter to func(string, ...Tag) (Counter, error)
+Metrics.Gauge: changed from func(string, ...string) Gauge to func(string, ...Tag) (Gauge, error)
+Metrics.Histogram: changed from func(string, ...string) Histogram to func(string, ...Tag) (Histogram, error)
+Metrics.Timer: changed from func(string, ...string) Timer to func(string, ...Tag) (Timer, error)
+
+# github.com/hexagon-codes/toolkit/infra/otel
+## incompatible changes
+DefaultOTelConfig: removed
+NewOTLPExporter: changed from func(string, ...OTLPExporterOption) *OTLPExporter to func(string, ...OTLPExporterOption) (*OTLPExporter, error)
+NewOTelTracer: removed
+OTelConfig.BatchSize: removed
+OTelConfig.BatchTimeout: removed
+OTelConfig.Endpoint: removed
+OTelConfig.Headers: removed
+OTelConfig.Insecure: removed
+OTelConfig.MaxQueueSize: removed
+OTelConfig: removed
+OTelOption: removed
+OTelSpan: removed
+OTelTracer: removed
+WithBatchConfig: removed
+WithEndpoint: removed
+
+# github.com/hexagon-codes/toolkit/infra/prometheus
+## incompatible changes
+(*Exporter).Collector: removed
+(*Exporter).Shutdown: changed from func() error to func(context.Context) error
+(*MetricsAdapter).Counter: changed from func(string, ...string) github.com/hexagon-codes/toolkit/infra/observe.Counter to func(string, ...github.com/hexagon-codes/toolkit/infra/observe.Tag) (github.com/hexagon-codes/toolkit/infra/observe.Counter, error)
+(*MetricsAdapter).Gauge: changed from func(string, ...string) github.com/hexagon-codes/toolkit/infra/observe.Gauge to func(string, ...github.com/hexagon-codes/toolkit/infra/observe.Tag) (github.com/hexagon-codes/toolkit/infra/observe.Gauge, error)
+(*MetricsAdapter).Histogram: changed from func(string, ...string) github.com/hexagon-codes/toolkit/infra/observe.Histogram to func(string, ...github.com/hexagon-codes/toolkit/infra/observe.Tag) (github.com/hexagon-codes/toolkit/infra/observe.Histogram, error)
+(*MetricsAdapter).Timer: changed from func(string, ...string) github.com/hexagon-codes/toolkit/infra/observe.Timer to func(string, ...github.com/hexagon-codes/toolkit/infra/observe.Tag) (github.com/hexagon-codes/toolkit/infra/observe.Timer, error)
+(*PrometheusCounter).Add: changed from func(float64, ...string) to func(float64, ...string) error
+(*PrometheusCounter).Inc: changed from func(...string) to func(...string) error
+(*PrometheusCounter).String: removed
+(*PrometheusGauge).Add: changed from func(float64, ...string) to func(float64, ...string) error
+(*PrometheusGauge).Dec: changed from func(...string) to func(...string) error
+(*PrometheusGauge).Inc: changed from func(...string) to func(...string) error
+(*PrometheusGauge).Set: changed from func(float64, ...string) to func(float64, ...string) error
+(*PrometheusGauge).String: removed
+(*PrometheusHistogram).Observe: changed from func(float64, ...string) to func(float64, ...string) error
+(*PrometheusHistogram).String: removed
+(*PrometheusSummary).Observe: changed from func(float64, ...string) to func(float64, ...string) error
+(*PrometheusSummary).String: removed
+(*Registry).Counter: changed from func(string, string, ...string) *PrometheusCounter to func(string, string, ...string) (*Counter, error)
+(*Registry).Gather: changed from func() string to func() (string, error)
+(*Registry).Gauge: changed from func(string, string, ...string) *PrometheusGauge to func(string, string, ...string) (*Gauge, error)
+(*Registry).Histogram: changed from func(string, string, []float64, ...string) *PrometheusHistogram to func(string, string, []float64, ...string) (*Histogram, error)
+(*Registry).Summary: changed from func(string, string, map[float64]float64, ...string) *PrometheusSummary to func(string, string, map[float64]float64, ...string) (*Summary, error)
+Collector: removed
+DefaultBuckets: changed from var to func
+DefaultQuantiles: changed from var to func
+NewCollector: removed
+NewExporter: changed from func(...ExporterOption) *Exporter to func(...ExporterOption) (*Exporter, error)
+NewMetricsAdapter: changed from func(*Registry, string, string) *MetricsAdapter to func(*Registry, string, string) (*MetricsAdapter, error)
+PrometheusCounter: removed
+PrometheusGauge: removed
+PrometheusHistogram: removed
+PrometheusSummary: removed
+
+# github.com/hexagon-codes/toolkit/infra/queue/asynq
+## incompatible changes
+(*BackpressureController).SetConfig: changed from func(BackpressureConfig) to func(BackpressureConfig) error
+(*BackpressureController).Start: changed from func() to func() error
+(*ChannelCircuitBreakerManager).Allow: removed
+(*ChannelCircuitBreakerManager).CleanupIdle: changed from func(time.Duration) int to func(time.Duration) (int, error)
+(*ChannelCircuitBreakerManager).GetBreaker: changed from func(int) *CircuitBreaker to func(int) (*CircuitBreaker, error)
+(*ChannelCircuitBreakerManager).IsOpen: changed from func(int) bool to func(int) (bool, error)
+(*ChannelCircuitBreakerManager).RecordFailure: removed
+(*ChannelCircuitBreakerManager).RecordSuccess: removed
+(*ChannelCircuitBreakerManager).Reset: changed from func(int) to func(int) error
+(*ChannelCircuitBreakerManager).ResetAll: changed from func() to func() error
+(*ChannelCircuitBreakerManager).SetConfig: removed
+(*CircuitBreaker).Allow: removed
+(*CircuitBreaker).RecordFailure: removed
+(*CircuitBreaker).RecordSuccess: removed
+(*CircuitBreaker).Reset: changed from func() to func() error
+(*CircuitBreaker).State: changed from func() CircuitState to func() CircuitState
+(*GlobalRateLimitManager).AllowChannel: changed from func(int) bool to func(int) (bool, error)
+(*GlobalRateLimitManager).AllowPlatform: changed from func(string) bool to func(string) (bool, error)
+(*GlobalRateLimitManager).GetLimiter: changed from func(string, int, int) *RateLimiter to func(string, int, int) (*RateLimiter, error)
+(*Manager).RegisterHandler: changed from func(string, github.com/hibiken/asynq.HandlerFunc) to func(string, github.com/hibiken/asynq.HandlerFunc) error
+(*Manager).RegisterHandlerWithMiddleware: changed from func(string, github.com/hibiken/asynq.HandlerFunc) to func(string, github.com/hibiken/asynq.HandlerFunc) error
+(*Manager).RegisterSchedule: changed from func(string, *github.com/hibiken/asynq.Task, ...github.com/hibiken/asynq.Option) to func(string, *github.com/hibiken/asynq.Task, ...github.com/hibiken/asynq.Option) error
+(*Manager).WithMiddleware: changed from func(MiddlewareFunc) to func(MiddlewareFunc) error
+(*PlatformCircuitBreakerManager).Allow: removed
+(*PlatformCircuitBreakerManager).CleanupIdle: changed from func(time.Duration) int to func(time.Duration) (int, error)
+(*PlatformCircuitBreakerManager).GetBreaker: changed from func(string) *CircuitBreaker to func(string) (*CircuitBreaker, error)
+(*PlatformCircuitBreakerManager).IsOpen: changed from func(string) bool to func(string) (bool, error)
+(*PlatformCircuitBreakerManager).RecordFailure: removed
+(*PlatformCircuitBreakerManager).RecordSuccess: removed
+AcquireMigrationLock: removed
+CircuitBreakerConfig.OnStateChange: changed from func(string, CircuitState, CircuitState) to func(string, CircuitState, CircuitState)
+CircuitBreakerStats.ConsecutiveErrors: removed
+CircuitState: changed from CircuitState to github.com/hexagon-codes/toolkit/util/circuit.State
+Config.Password: removed
+Config.RedisAddrs: removed
+Config.Username: removed
+ConfigProvider: removed
+DefaultConfig: changed from func() *Config to func(github.com/hexagon-codes/toolkit/infra/redisconn.Config) Config
+DefaultConfigProvider: removed
+ExtendPollingLock: removed
+GetChannelBreakerManager: removed
+GetConfigProvider: removed
+GetPlatformBreakerManager: removed
+GetRedisClient: removed
+HealthChecker: old is comparable, new is not
+InitManager: changed from func(*Config) (*Manager, error) to func(context.Context, Config) (*Manager, error)
+InitManagerFromConfig: removed
+InitMetrics: changed from func() to func([]string)
+InitPolling: changed from func(PollingConfig, WorkerDependencies) (func(), error) to func(context.Context, PollingConfig, Config, WorkerDependencies) (func() error, error)
+InitQueueNames: removed
+InitWithRedisConfig: removed
+IsTaskPolling: removed
+MarkTaskAsPolling: removed
+NewCircuitBreaker: changed from func(string, CircuitBreakerConfig) *CircuitBreaker to func(string, CircuitBreakerConfig) (*CircuitBreaker, error)
+NewManager: changed from func(*Config) (*Manager, error) to func(context.Context, Config) (*Manager, error)
+NewRateLimiter: changed from func(int, int) *RateLimiter to func(int, int) (*RateLimiter, error)
+PollingConfig.Concurrency: removed
+PollingConfig.RedisAddr: removed
+PollingLockTTL: changed from untyped int to time.Duration
+QueueCritical: changed from var to const
+QueueDeadLetter: changed from var to const
+QueueDefault: changed from var to const
+QueueHigh: changed from var to const
+QueueLow: changed from var to const
+QueueScheduled: changed from var to const
+RedisClient: removed
+RedisConfig: removed
+ReleaseMigrationLock: removed
+ReleasePollingLock: removed
+SetConfigProvider: removed
+SetRedisClient: removed
+StartMetricsUpdater: changed from func(context.Context, time.Duration) to func(context.Context, *Manager, time.Duration) error
+StateCancelled: removed
+StateClosed: changed from CircuitState to github.com/hexagon-codes/toolkit/util/circuit.State
+StateHalfOpen: changed from CircuitState to github.com/hexagon-codes/toolkit/util/circuit.State
+StateOpen: changed from CircuitState to github.com/hexagon-codes/toolkit/util/circuit.State
+UpdateQueueMetrics: changed from func(context.Context) error to func(context.Context, *Manager) error
+
+# github.com/hexagon-codes/toolkit/lang/contextx
+## incompatible changes
+NewPool: changed from func(context.Context, int) *Pool to func(context.Context, int) (*Pool, error)
+Run: changed from func(context.Context, func() error) error to func(context.Context, func(context.Context) error) error
+RunTimeout: changed from func(time.Duration, func() error) error to func(context.Context, time.Duration, func(context.Context) error) error
+
+# github.com/hexagon-codes/toolkit/lang/errorx
+## incompatible changes
+(*MultiError).Append: changed from func(...error) *MultiError to func(...error)
+(*MultiError).AppendResult: changed from func(any, error) *MultiError to func(any, error)
+Go: changed from func(...func() error) *MultiError to func(...func() error) error
+GoWithLimit: changed from func(int, ...func() error) *MultiError to func(int, ...func() error) error
+Result[T].UnwrapOrElse: changed from func(func(error) T) T to func(func(error) T) (T, error)
+Result[T].UnwrapOrElse: changed from func(func(error) T) T to func(func(error) T) (T, error)
+Result[T].UnwrapOrElse: changed from func(func(error) T) T to func(func(error) T) (T, error)
+Result[T].UnwrapOrElse: changed from func(func(error) T) T to func(func(error) T) (T, error)
+Result[T].UnwrapOrElse: changed from func(func(error) T) T to func(func(error) T) (T, error)
+Result[T].UnwrapOrElse: changed from func(func(error) T) T to func(func(error) T) (T, error)
+Result[U].UnwrapOrElse: changed from func(func(error) U) U to func(func(error) U) (U, error)
+Result[U].UnwrapOrElse: changed from func(func(error) U) U to func(func(error) U) (U, error)
+SafeGo: changed from func(func(), func(error)) to func(func()) <-chan error
+
+# github.com/hexagon-codes/toolkit/lang/syncx
+## incompatible changes
+(*OnceErr[T]).Value: changed from func() (T, error, bool) to func() (T, bool, error)
+
+# github.com/hexagon-codes/toolkit/net/httpx
+## incompatible changes
+(*CircuitBreakerPool).Reset: changed from func() to func() error
+(*CircuitBreakerPool).State: changed from func() CircuitBreakerState to func() github.com/hexagon-codes/toolkit/util/circuit.State
+(*Client).ChatCompletion: changed from func(*AIRequest) (*AIResponse, error) to func(context.Context, *AIRequest) (*AIResponse, error)
+(*Client).ChatCompletionStream: changed from func(*AIRequest) (*StreamResponse, error) to func(context.Context, *AIRequest) (*StreamResponse, error)
+(*Client).R: changed from func() *Request to func(context.Context) *Request
+(*HostPool).GetPool: changed from func(string) *Pool to func(string) (*Pool, error)
+(*HostPool).SetHostConfig: changed from func(string, PoolConfig) to func(string, PoolConfig) error
+(*RateLimitedPool).Close: changed from func() error to func()
+(*Request).SetContext: removed
+(*StreamResponse).CollectData: changed from func() ([]string, error) to func(...CollectionOption) ([]string, error)
+(*StreamResponse).CollectJSON: changed from func(func() any) ([]any, error) to func(func() any, ...CollectionOption) ([]any, error)
+(*StreamResponse).CollectOpenAIContent: changed from func() (string, error) to func(...CollectionOption) (string, error)
+AzureOpenAIClient: changed from func(string, string, string) *Client to func(string, string, string) (*Client, error)
+BaichuanClient: changed from func(string) *Client to func(string) (*Client, error)
+CircuitBreakerConfig: removed
+CircuitBreakerState: removed
+CircuitClosed: removed
+CircuitHalfOpen: removed
+CircuitOpen: removed
+ClaudeClient: changed from func(string) *Client to func(string) (*Client, error)
+ClaudeClientWithVersion: changed from func(string, string) *Client to func(string, string) (*Client, error)
+CohereClient: changed from func(string) *Client to func(string) (*Client, error)
+CustomAIClient: changed from func(string, string) *Client to func(string, string) (*Client, error)
+CustomAIClientWithHeaders: changed from func(string, map[string]string) *Client to func(string, map[string]string) (*Client, error)
+DeepSeekClient: changed from func(string) *Client to func(string) (*Client, error)
+DefaultPoolConfig: changed from var to func
+DefaultRetryConfig: changed from var to func
+Delete: changed from func(string) (*Response, error) to func(context.Context, string) (*Response, error)
+DoubaoClient: changed from func(string) *Client to func(string) (*Client, error)
+GeminiClient: changed from func(string) *Client to func(string) (*Client, error)
+Get: changed from func(string) (*Response, error) to func(context.Context, string) (*Response, error)
+GetWithContext: removed
+MistralClient: changed from func(string) *Client to func(string) (*Client, error)
+MoonshotClient: changed from func(string) *Client to func(string) (*Client, error)
+NewCircuitBreakerPool: changed from func(*Pool, CircuitBreakerConfig) *CircuitBreakerPool to func(*Pool, ...github.com/hexagon-codes/toolkit/util/circuit.Option) (*CircuitBreakerPool, error)
+NewClient: changed from func(...Option) *Client to func(...Option) (*Client, error)
+NewHostPool: changed from func(...PoolConfig) *HostPool to func(HostPoolConfig) (*HostPool, error)
+NewPool: changed from func(...PoolConfig) *Pool to func(PoolConfig) (*Pool, error)
+NewRateLimitedPool: changed from func(*Pool, int) *RateLimitedPool to func(*Pool, int) (*RateLimitedPool, error)
+NewRetryPool: changed from func(*Pool, ...RetryConfig) *RetryPool to func(*Pool, RetryConfig) (*RetryPool, error)
+OpenAIClient: changed from func(string) *Client to func(string) (*Client, error)
+OpenAIClientWithOrg: changed from func(string, string) *Client to func(string, string) (*Client, error)
+Option: changed from func(*Client) to func(*Client) error
+PoolStats.AvgResponseTime: removed
+PoolStats.IdleConnections: removed
+PoolStats.MaxResponseTime: removed
+PoolStats.TotalConnections: removed
+PoolStats.WaitCount: removed
+PoolStats.WaitDuration: removed
+Post: changed from func(string, any) (*Response, error) to func(context.Context, string, any) (*Response, error)
+PostForm: changed from func(string, map[string]string) (*Response, error) to func(context.Context, string, map[string]string) (*Response, error)
+PostWithContext: removed
+Put: changed from func(string, any) (*Response, error) to func(context.Context, string, any) (*Response, error)
+QwenClient: changed from func(string) *Client to func(string) (*Client, error)
+RawClient: removed
+RawOption: changed from func(*rawConfig) to func(*rawConfig) error
+SetGlobalPool: changed from func(*Pool) to func(*Pool) error
+SparkClient: changed from func(string) *Client to func(string) (*Client, error)
+VertexAIClient: changed from func(string, string, string) *Client to func(string, string, string) (*Client, error)
+WithTransport: removed
+ZhipuClient: changed from func(string) *Client to func(string) (*Client, error)
+
+# github.com/hexagon-codes/toolkit/net/ip
+## incompatible changes
+GetLocalIP: changed from func() (string, error) to func(context.Context) (string, error)
+GetOutboundIP: changed from func() (string, error) to func(context.Context) (string, error)
+ResolveHost: changed from func(string) ([]string, error) to func(context.Context, string) ([]string, error)
+ReverseLookup: changed from func(string) ([]string, error) to func(context.Context, string) ([]string, error)
+
+# github.com/hexagon-codes/toolkit/net/sse
+## incompatible changes
+(*Reader).Close: changed from func() to func() error
+ClientConfig.MaxRetries: removed
+ClientConfig.RetryInterval: removed
+ClientOption: changed from func(*ClientConfig) to func(*ClientConfig) error
+CollectOpenAIStream: changed from func(io.Reader) ([]T, error) to func(io.Reader, CollectConfig) ([]T, error)
+ErrConnectionFailed: removed
+FormatEvent: changed from func(*Event) string to func(*Event) (string, error)
+NewClient: changed from func(string, ...ClientOption) *Client to func(string, ...ClientOption) (*Client, error)
+NewReader: changed from func(io.Reader) *Reader to func(io.Reader) (*Reader, error)
+NewReaderWithOptions: changed from func(io.Reader, ...ReaderOption) *Reader to func(io.Reader, ...ReaderOption) (*Reader, error)
+NewReaderWithSize: changed from func(io.Reader, int) *Reader to func(io.Reader, int) (*Reader, error)
+NewWriter: changed from func(net/http.ResponseWriter) *Writer to func(net/http.ResponseWriter) (*Writer, error)
+ReaderOption: changed from func(*Reader) to func(*Reader) error
+Stream: old is comparable, new is not
+WithMaxRetries: removed
+WithRetryInterval: removed
+
+# github.com/hexagon-codes/toolkit/net/ssrf
+## incompatible changes
+ValidateURL: changed from func(string) error to func(context.Context, string) error
+
+# github.com/hexagon-codes/toolkit/os/sandbox
+## incompatible changes
+Config.DenyLoopback: removed
+Config.Network: changed from bool to NetworkMode
+DarwinProxyIntegration: removed
+LimitStatusWeak: removed
+NetPolicy: removed
+NetProxy: removed
+NetProxyConfig: removed
+NewDarwinProxyIntegration: removed
+NewDefaultPolicy: removed
+NewNetProxy: removed
+ProxyEnvVars: removed
+Sandbox.Close: added
+Sandbox.Exec: changed from func(context.Context, string, []string) (*ExecResult, error) to func(context.Context, Command) (*ExecResult, error)
+Sandbox.ExecCode: removed
+
+# github.com/hexagon-codes/toolkit/util/circuit
+## incompatible changes
+(*Breaker).Allow: removed
+(*Breaker).Failure: removed
+(*Breaker).OnStateChange: changed from func(func(from State, to State)) to func(func(from State, to State)) error
+(*Breaker).Reset: changed from func() to func() error
+(*Breaker).Success: removed
+(*BreakerManager).Get: changed from func(string) *Breaker to func(string) (*Breaker, error)
+(*BreakerManager).Reset: changed from func(string) to func(string) error
+(*BreakerManager).ResetAll: changed from func() to func() error
+AggressiveConfig: changed from var to func
+ClaudeConfig: changed from var to func
+ConservativeConfig: changed from var to func
+GeminiConfig: changed from var to func
+New: changed from func(...Option) *Breaker to func(...Option) (*Breaker, error)
+NewAIBreaker: changed from func([]Option, ...Option) *Breaker to func([]Option, ...Option) (*Breaker, error)
+NewBreakerManager: changed from func(func() *Breaker) *BreakerManager to func(...Option) (*BreakerManager, error)
+OpenAIConfig: changed from var to func
+
+# github.com/hexagon-codes/toolkit/util/config
+## incompatible changes
+(*Config).LoadEnv: changed from func(string) to func(string) error
+SetGlobal: changed from func(*Config) to func(*Config) error
+
+# github.com/hexagon-codes/toolkit/util/encoding
+## incompatible changes
+JoinURL: changed from func(string, ...string) string to func(string, ...string) (string, error)
+
+# github.com/hexagon-codes/toolkit/util/hash
+## incompatible changes
+MD5: removed
+MD5Bytes: removed
+SHA1: removed
+SHA1Bytes: removed
+
+# github.com/hexagon-codes/toolkit/util/idgen
+## incompatible changes
+Snowflake: old is comparable, new is not
+
+# github.com/hexagon-codes/toolkit/util/lease
+## incompatible changes
+ErrNotHolder: changed from *leaseError to error
+
+# github.com/hexagon-codes/toolkit/util/pagination
+## incompatible changes
+(*Pagination).GetPageNumbers: changed from func(int) []int to func(int) []int64
+(*Pagination).GetRange: changed from func() (int, int) to func() (int64, int64)
+(*Pagination).NextPage: changed from func() int to func() int64
+(*Pagination).PrevPage: changed from func() int to func() int64
+New: changed from func(int, int, int64) *Pagination to func(int64, int, int64) *Pagination
+NewWithOffset: changed from func(int, int, int64) *Pagination to func(int64, int, int64) *Pagination
+Pagination.Offset: changed from int to int64
+Pagination.Page: changed from int to int64
+Pagination.TotalPages: changed from int to int64
+
+# github.com/hexagon-codes/toolkit/util/poolx
+## incompatible changes
+(*HookBuilder).OnTimeout: removed
+(*Pool).SubmitWithContext: changed from func(context.Context, func()) error to func(context.Context, func(context.Context)) error
+(*StealingScheduler).Steal: removed
+Go: changed from func(func()) to func(func()) error
+GoBatch: changed from func([]func()) int to func([]func()) (int, error)
+GoCtx: changed from func(context.Context, func()) error to func(context.Context, func(context.Context)) error
+GoWait: changed from func(func()) to func(func()) error
+HookOnScaleDown: value changed from 10 to 9
+HookOnScaleUp: value changed from 9 to 8
+HookOnTimeout: removed
+HookOnWorkerStart: value changed from 7 to 6
+HookOnWorkerStop: value changed from 8 to 7
+NewMultiPool: changed from func(int, int32, LoadBalancingStrategy, ...Option) *MultiPool to func(int, int32, LoadBalancingStrategy, ...Option) (*MultiPool, error)
+NewObjectPool: changed from func(func() T, func(*T)) *ObjectPool[T] to func(func() T, func(*T)) (*ObjectPool[T], error)
+Parallel: changed from func(...func()) to func(...func()) error
+SetDefaultPool: changed from func(*Pool) to func(*Pool) error
+SubmitFuncCtx: changed from func(*Pool, context.Context, func(context.Context) (T, error)) *Future[T] to func(context.Context, *Pool, func(context.Context) (T, error)) *Future[T]
+TaskInfo.Timeout: removed
+TaskOptions.Timeout: removed
+WithTaskTimeout: removed
+
+# github.com/hexagon-codes/toolkit/util/rate
+## incompatible changes
+(*TokenBucketV2).ConsumeN: removed
+(*TokenBucketV2).Reserve: removed
+(*TokenBucketV2).ReserveN: removed
+(*TokenBucketV2).TryAllowN: removed
+(*TokenRateLimiter).ConsumeN: removed
+(*TokenRateLimiter).Reserve: removed
+(*TokenRateLimiter).TryAllowN: removed
+NewLeakyBucket: changed from func(int, time.Duration) *LeakyBucket to func(int, time.Duration) (*LeakyBucket, error)
+NewMultiDimensionLimiter: changed from func(...LimiterV2) *MultiDimensionLimiter to func(...LimiterV2) (*MultiDimensionLimiter, error)
+NewSlidingWindow: changed from func(int, time.Duration) *SlidingWindow to func(int, time.Duration) (*SlidingWindow, error)
+NewTokenBucket: changed from func(int, float64) *TokenBucket to func(int, float64) (*TokenBucket, error)
+NewTokenBucketV2: changed from func(int, float64) *TokenBucketV2 to func(int, float64) (*TokenBucketV2, error)
+NewTokenRateLimiter: changed from func(int, int) *TokenRateLimiter to func(int, int) (*TokenRateLimiter, error)
+
+# github.com/hexagon-codes/toolkit/util/retry
+## incompatible changes
+AIAPIStrategy: changed from var to func
+AggressiveStrategy: changed from var to func
+ClaudeStrategy: changed from var to func
+Config.RetryIf: removed
+ConservativeStrategy: changed from var to func
+DatabaseStrategy: changed from var to func
+DeepSeekStrategy: changed from var to func
+ExponentialBackoffWithJitter: removed
+GeminiStrategy: changed from var to func
+LinearBackoffWithJitter: removed
+NetworkErrorStrategy: changed from var to func
+OpenAIStrategy: changed from var to func
+QwenStrategy: changed from var to func
+RetryIf: removed
+RetryIfHTTP: removed
+RetryIfHTTPOrNetwork: removed
+WithOnRetryZeroBased: removed
+WithReturnLastError: removed
+WithUnwrapFinalError: removed
