@@ -93,13 +93,13 @@ func prepareWindowsWorkspace(cfg Config) (_ *windowsWorkspace, resultErr error) 
 		return nil, fmt.Errorf("inspect Windows workspace handle: %w", err)
 	}
 	if identity.attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		return nil, fmt.Errorf("Windows sandbox workspace must not be a reparse point")
+		return nil, fmt.Errorf("windows sandbox workspace must not be a reparse point")
 	}
 	if identity.attributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
-		return nil, fmt.Errorf("Windows sandbox workspace must be a directory")
+		return nil, fmt.Errorf("windows sandbox workspace must be a directory")
 	}
 	if !guardIdentity.sameObjectAndContent(identity) {
-		return nil, fmt.Errorf("Windows sandbox workspace changed while opening the root")
+		return nil, fmt.Errorf("windows sandbox workspace changed while opening the root")
 	}
 
 	canonicalPath, err := canonicalWindowsPathFromHandle(rootFile)
@@ -107,13 +107,13 @@ func prepareWindowsWorkspace(cfg Config) (_ *windowsWorkspace, resultErr error) 
 		return nil, fmt.Errorf("resolve Windows workspace handle: %w", err)
 	}
 	if pathErr := validateWindowsPath(canonicalPath); pathErr != nil {
-		return nil, fmt.Errorf("Windows sandbox workspace must use a local DOS path: %w", pathErr)
+		return nil, fmt.Errorf("windows sandbox workspace must use a local DOS path: %w", pathErr)
 	}
 	if !strings.EqualFold(filepath.Clean(guardCanonicalPath), filepath.Clean(canonicalPath)) {
-		return nil, fmt.Errorf("Windows sandbox workspace path changed while opening the root")
+		return nil, fmt.Errorf("windows sandbox workspace path changed while opening the root")
 	}
 	if isFilesystemRoot(canonicalPath) {
-		return nil, fmt.Errorf("Windows sandbox workspace must not be a filesystem root")
+		return nil, fmt.Errorf("windows sandbox workspace must not be a filesystem root")
 	}
 
 	ownerSID, err := currentWindowsUserSID()
@@ -141,7 +141,7 @@ func prepareWindowsWorkspace(cfg Config) (_ *windowsWorkspace, resultErr error) 
 			return nil, fmt.Errorf("audit Windows workspace root: %w", err)
 		}
 		if !rootHasIdentity {
-			return nil, fmt.Errorf("Windows sandbox workspace must be empty before first initialization")
+			return nil, fmt.Errorf("windows sandbox workspace must be empty before first initialization")
 		}
 	}
 
@@ -204,10 +204,10 @@ func (w *windowsWorkspace) close() error {
 // 在任何 canonicalize 或 os.Root 跟随链接前拒绝 symlink、junction 和其他 reparse point。
 func openWindowsWorkspaceRootGuard(path string) (*os.File, windowsFileIdentity, string, error) {
 	if err := validateWindowsPath(path); err != nil {
-		return nil, windowsFileIdentity{}, "", fmt.Errorf("Windows sandbox workspace path is invalid: %w", err)
+		return nil, windowsFileIdentity{}, "", fmt.Errorf("windows sandbox workspace path is invalid: %w", err)
 	}
 	if !filepath.IsAbs(path) {
-		return nil, windowsFileIdentity{}, "", fmt.Errorf("Windows sandbox workspace path must be absolute")
+		return nil, windowsFileIdentity{}, "", fmt.Errorf("windows sandbox workspace path must be absolute")
 	}
 	pathW, err := windows.UTF16PtrFromString(filepath.Clean(path))
 	if err != nil {
@@ -234,10 +234,10 @@ func openWindowsWorkspaceRootGuard(path string) (*os.File, windowsFileIdentity, 
 		return nil, windowsFileIdentity{}, "", errors.Join(fmt.Errorf("inspect raw Windows workspace root: %w", err), file.Close())
 	}
 	if identity.attributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
-		return nil, windowsFileIdentity{}, "", errors.Join(fmt.Errorf("Windows sandbox workspace must be a directory"), file.Close())
+		return nil, windowsFileIdentity{}, "", errors.Join(fmt.Errorf("windows sandbox workspace must be a directory"), file.Close())
 	}
 	if identity.attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		return nil, windowsFileIdentity{}, "", errors.Join(fmt.Errorf("Windows sandbox workspace root must not be a reparse point"), file.Close())
+		return nil, windowsFileIdentity{}, "", errors.Join(fmt.Errorf("windows sandbox workspace root must not be a reparse point"), file.Close())
 	}
 	canonicalPath, err := canonicalWindowsPathFromHandle(file)
 	if err != nil {
@@ -305,11 +305,11 @@ func (w *windowsWorkspace) walk(visit func(string, *os.File, windowsFileIdentity
 			return fmt.Errorf("inspect Windows workspace entry %q: %w", relativePath, err)
 		}
 		if identity.attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-			return fmt.Errorf("Windows workspace entry %q is a reparse point", relativePath)
+			return fmt.Errorf("windows workspace entry %q is a reparse point", relativePath)
 		}
 		isDirectory := identity.attributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0
 		if !isDirectory && identity.links != 1 {
-			return fmt.Errorf("Windows workspace entry %q has %d hard links; exactly one is required", relativePath, identity.links)
+			return fmt.Errorf("windows workspace entry %q has %d hard links; exactly one is required", relativePath, identity.links)
 		}
 		if visitErr := visit(relativePath, file, identity); visitErr != nil {
 			return visitErr
@@ -339,7 +339,7 @@ func (w *windowsWorkspace) walk(visit func(string, *os.File, windowsFileIdentity
 // 不只是“无法逃逸”，而是完全不接受 symlink、junction 或其他 reparse point。
 func rejectWindowsRootReparsePoint(root *os.Root, relativePath string) error {
 	if root == nil {
-		return fmt.Errorf("Windows workspace root is unavailable")
+		return fmt.Errorf("windows workspace root is unavailable")
 	}
 	info, err := root.Lstat(relativePath)
 	if err != nil {
@@ -347,10 +347,10 @@ func rejectWindowsRootReparsePoint(root *os.Root, relativePath string) error {
 	}
 	attributes, ok := info.Sys().(*syscall.Win32FileAttributeData)
 	if !ok || attributes == nil {
-		return fmt.Errorf("Windows root entry attributes are unavailable")
+		return fmt.Errorf("windows root entry attributes are unavailable")
 	}
 	if attributes.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		return fmt.Errorf("Windows root entry is a reparse point")
+		return fmt.Errorf("windows root entry is a reparse point")
 	}
 	return nil
 }
@@ -939,7 +939,7 @@ func windowsPathWithin(base, candidate string) bool {
 // validateWindowsPath 拒绝会绕开常规 Win32 文件名解析的路径形式。
 func validateWindowsPath(path string) error {
 	if strings.ContainsAny(path, "\x00\r\n\"") {
-		return fmt.Errorf("Windows path contains unsupported characters")
+		return fmt.Errorf("windows path contains unsupported characters")
 	}
 	if hasWindowsAlternateDataStream(path) {
 		return fmt.Errorf("alternate data streams are not allowed: %s", path)

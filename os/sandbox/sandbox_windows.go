@@ -96,7 +96,7 @@ func (s *windowsSandbox) execLocked(
 	requested Command,
 ) (*ExecResult, bool, error) {
 	if s.poisoned != nil {
-		return nil, false, fmt.Errorf("Windows sandbox is unavailable after an unconfirmed process-containment shutdown: %w", s.poisoned)
+		return nil, false, fmt.Errorf("windows sandbox is unavailable after an unconfirmed process-containment shutdown: %w", s.poisoned)
 	}
 	command, err := s.prepareCommand(requested)
 	if err != nil {

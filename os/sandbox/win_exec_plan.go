@@ -161,7 +161,7 @@ func finalizeWindowsExecutablePlan(
 		return nil, fmt.Errorf("inspect frozen Windows executable: %w", err)
 	}
 	if !expectedIdentity.sameObjectAndContent(identity) {
-		return nil, fmt.Errorf("Windows executable changed while being frozen")
+		return nil, fmt.Errorf("windows executable changed while being frozen")
 	}
 	canonicalPath, err := canonicalWindowsPathFromHandle(file)
 	if err != nil {
@@ -180,7 +180,7 @@ func finalizeWindowsExecutablePlan(
 			return nil, err
 		}
 		if !windowsPathWithinAny(trustedRoots, canonicalPath) {
-			return nil, fmt.Errorf("Windows executable is outside trusted runtime roots: %s", canonicalPath)
+			return nil, fmt.Errorf("windows executable is outside trusted runtime roots: %s", canonicalPath)
 		}
 	}
 	plan := &windowsExecutablePlan{
@@ -196,21 +196,21 @@ func finalizeWindowsExecutablePlan(
 
 func (p *windowsExecutablePlan) revalidate() error {
 	if p == nil || p.file == nil {
-		return fmt.Errorf("Windows executable plan is closed")
+		return fmt.Errorf("windows executable plan is closed")
 	}
 	identity, err := inspectWindowsFileHandle(p.file)
 	if err != nil {
 		return fmt.Errorf("revalidate executable handle: %w", err)
 	}
 	if !p.identity.sameObjectAndContent(identity) {
-		return fmt.Errorf("Windows executable changed after validation")
+		return fmt.Errorf("windows executable changed after validation")
 	}
 	canonicalPath, err := canonicalWindowsPathFromHandle(p.file)
 	if err != nil {
 		return fmt.Errorf("revalidate executable path: %w", err)
 	}
 	if !strings.EqualFold(filepath.Clean(canonicalPath), filepath.Clean(p.applicationName)) {
-		return fmt.Errorf("Windows executable path changed after validation")
+		return fmt.Errorf("windows executable path changed after validation")
 	}
 	return nil
 }
@@ -228,7 +228,7 @@ func (p *windowsExecutablePlan) close() error {
 
 func resolveWindowsWorkingDirectory(workspace *windowsWorkspace, commandDir string) (*windowsDirectoryPlan, error) {
 	if workspace == nil || workspace.root == nil {
-		return nil, fmt.Errorf("Windows workspace is not initialized")
+		return nil, fmt.Errorf("windows workspace is not initialized")
 	}
 	if commandDir != "" {
 		if err := validateWindowsPath(commandDir); err != nil {
@@ -238,6 +238,10 @@ func resolveWindowsWorkingDirectory(workspace *windowsWorkspace, commandDir stri
 	relativePath := "."
 	if commandDir != "" {
 		if filepath.IsAbs(commandDir) {
+			// 8.3 短名（如 RUNNER~1）与 workspace 长名不匹配，先解析目录的真实路径。
+			if resolved := canonicalWindowsDirectoryPath(commandDir); resolved != "" {
+				commandDir = resolved
+			}
 			var err error
 			relativePath, err = filepath.Rel(workspace.canonicalPath, filepath.Clean(commandDir))
 			if err != nil {
@@ -307,7 +311,7 @@ func resolveWindowsWorkingDirectory(workspace *windowsWorkspace, commandDir stri
 
 func (p *windowsDirectoryPlan) revalidate() error {
 	if p == nil || p.file == nil {
-		return fmt.Errorf("Windows working directory plan is closed")
+		return fmt.Errorf("windows working directory plan is closed")
 	}
 	identity, err := inspectWindowsFileHandle(p.file)
 	if err != nil {
@@ -427,4 +431,39 @@ func windowsPathWithinAny(roots []string, candidate string) bool {
 		}
 	}
 	return false
+}
+
+// canonicalWindowsDirectoryPath 按路径打开目录并返回 GetFinalPathNameByHandle
+// 解析后的真实路径（展开 8.3 短名）；失败返回空串。
+func canonicalWindowsDirectoryPath(path string) string {
+	pathPointer, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return ""
+	}
+	handle, err := windows.CreateFile(
+		pathPointer,
+		windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windowsReparseFlag,
+		0,
+	)
+	if err != nil {
+		return ""
+	}
+	defer func() {
+		_ = windows.CloseHandle(handle)
+	}()
+	buffer := make([]uint16, 512)
+	for {
+		length, err := windows.GetFinalPathNameByHandle(handle, &buffer[0], uint32(len(buffer)), 0)
+		if err != nil {
+			return ""
+		}
+		if int(length) < len(buffer) {
+			return strings.TrimPrefix(windows.UTF16ToString(buffer[:length]), `\?\`)
+		}
+		buffer = make([]uint16, length+1)
+	}
 }

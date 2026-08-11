@@ -15,7 +15,7 @@ import (
 // 不继承宿主 PATH、用户配置、凭据或任意环境变量。
 func cleanWindowsEnv(workspace *windowsWorkspace, applicationName string) ([]string, error) {
 	if workspace == nil || workspace.root == nil {
-		return nil, fmt.Errorf("Windows workspace is not initialized")
+		return nil, fmt.Errorf("windows workspace is not initialized")
 	}
 	systemDirectory, err := windows.GetSystemDirectory()
 	if err != nil {
