@@ -3,6 +3,7 @@ package aes
 import (
 	"bytes"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -67,7 +68,7 @@ func TestEncryptDecryptGCM(t *testing.T) {
 }
 
 func TestEncryptDecryptGCMString(t *testing.T) {
-	key := "0123456789abcdef0123456789abcdef" // 32 bytes
+	key := strings.Repeat("a", 32)
 	plaintext := "Hello, World!"
 
 	ciphertext, err := EncryptGCMString(plaintext, key)

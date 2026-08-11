@@ -190,6 +190,9 @@ func NewTimestampSignerWithHash(key []byte, hashType HMACHash) *TimestampSigner 
 
 // Sign 签名（消息 + 时间戳）
 func (s *TimestampSigner) Sign(message string, timestamp int64) string {
+	if s == nil {
+		return ""
+	}
 	data := message + ":" + formatInt64(timestamp)
 	return HMACHex([]byte(data), s.key, s.hashType)
 }
@@ -198,6 +201,9 @@ func (s *TimestampSigner) Sign(message string, timestamp int64) string {
 // 注意：此方法不检查时间戳过期，可能受重放攻击
 // 推荐使用 VerifyWithExpiry 进行时间戳验证
 func (s *TimestampSigner) Verify(message string, timestamp int64, signature string) bool {
+	if s == nil {
+		return false
+	}
 	expected := s.Sign(message, timestamp)
 	if expected == "" {
 		return false
@@ -213,6 +219,9 @@ func (s *TimestampSigner) Verify(message string, timestamp int64, signature stri
 //   - 拒绝来自未来的时间戳（防止绕过过期检查）
 //   - 仅允许过去 maxAge 秒内的签名
 func (s *TimestampSigner) VerifyWithExpiry(message string, timestamp int64, signature string, maxAge int64) bool {
+	if s == nil {
+		return false
+	}
 	if !timestampWithinAge(timestamp, maxAge, time.Now().Unix()) {
 		return false
 	}
@@ -274,7 +283,10 @@ func NewAPISigner(appKey, appSecret string) *APISigner {
 // 签名算法：HMAC-SHA256(canonicalString, appSecret)
 // 规范化字符串对每个字段做长度前缀编码，确保不同请求不会拼接出相同的签名串。
 func (s *APISigner) Sign(params map[string]string, timestamp int64, nonce string) string {
-	signStr := canonicalSignString(params, timestamp, nonce)
+	if s == nil {
+		return ""
+	}
+	signStr := canonicalSignString(s.appKey, params, timestamp, nonce)
 
 	// 计算签名
 	return HMACSHA256Hex([]byte(signStr), []byte(s.appSecret))
@@ -284,6 +296,9 @@ func (s *APISigner) Sign(params map[string]string, timestamp int64, nonce string
 // 注意：此方法不检查时间戳过期，可能受重放攻击
 // 推荐使用 VerifyWithExpiry 进行时间戳验证
 func (s *APISigner) Verify(params map[string]string, timestamp int64, nonce, signature string) bool {
+	if s == nil {
+		return false
+	}
 	expected := s.Sign(params, timestamp, nonce)
 	return hmac.Equal([]byte(expected), []byte(signature))
 }
@@ -299,6 +314,9 @@ func (s *APISigner) Verify(params map[string]string, timestamp int64, nonce, sig
 //   - 拒绝来自未来的时间戳（防止绕过过期检查）
 //   - 仅允许过去 maxAge 秒内的签名
 func (s *APISigner) VerifyWithExpiry(params map[string]string, timestamp int64, nonce, signature string, maxAge int64) bool {
+	if s == nil {
+		return false
+	}
 	if !timestampWithinAge(timestamp, maxAge, time.Now().Unix()) {
 		return false
 	}
@@ -312,7 +330,7 @@ func timestampWithinAge(timestamp, maxAge, now int64) bool {
 		return false
 	}
 	if timestamp > now {
-		return timestamp-now <= 1
+		return false
 	}
 	return now-timestamp <= maxAge
 }
@@ -331,7 +349,7 @@ type NonceChecker interface {
 //   - nonceChecker: nonce 检查器（需要调用方实现，通常使用 Redis SET NX）
 //   - maxAge: 签名的最大有效期（秒）
 func (s *APISigner) VerifyWithNonceCheck(params map[string]string, timestamp int64, nonce, signature string, maxAge int64, nonceChecker NonceChecker) bool {
-	if nonce == "" || nonceCheckerIsNil(nonceChecker) {
+	if s == nil || nonce == "" || nonceCheckerIsNil(nonceChecker) {
 		return false
 	}
 	if timestamp < 0 || maxAge <= 0 || maxAge > math.MaxInt64-timestamp {
@@ -364,7 +382,7 @@ func nonceCheckerIsNil(checker NonceChecker) bool {
 // 每个字段（参数 key、参数 value、timestamp、nonce）都带长度前缀，
 // 因此任何字段的内容都无法越过边界与相邻字段拼接成相同的串，
 // 不同请求一定产生不同的签名串。
-func canonicalSignString(params map[string]string, timestamp int64, nonce string) string {
+func canonicalSignString(appKey string, params map[string]string, timestamp int64, nonce string) string {
 	keys := make([]string, 0, len(params))
 	for k := range params {
 		keys = append(keys, k)
@@ -377,6 +395,7 @@ func canonicalSignString(params map[string]string, timestamp int64, nonce string
 		b.WriteByte(':')
 		b.WriteString(s)
 	}
+	writeField(appKey)
 	for _, k := range keys {
 		writeField(k)
 		writeField(params[k])

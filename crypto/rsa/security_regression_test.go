@@ -180,15 +180,15 @@ func TestNilKeyPairMethodsReturnErrors(t *testing.T) {
 	}
 }
 
-func TestDecryptOAEPPreservesVagueStandardError(t *testing.T) {
+func TestDecryptOAEPCollapsesUnderlyingError(t *testing.T) {
 	keyPair, err := GenerateKeyPair(2048)
 	if err != nil {
 		t.Fatalf("GenerateKeyPair failed: %v", err)
 	}
 
 	_, err = DecryptOAEP(make([]byte, keyPair.PublicKey.Size()), keyPair.PrivateKey)
-	if !errors.Is(err, ErrDecryptionFailed) || !errors.Is(err, stdrsa.ErrDecryption) {
-		t.Fatalf("DecryptOAEP error = %v, want both decryption errors", err)
+	if err != ErrDecryptionFailed || errors.Is(err, stdrsa.ErrDecryption) {
+		t.Fatalf("DecryptOAEP error = %v, want only ErrDecryptionFailed", err)
 	}
 }
 

@@ -271,7 +271,8 @@ func DecryptOAEP(ciphertext []byte, privateKey *rsa.PrivateKey) ([]byte, error) 
 	hash := sha256.New()
 	plaintext, err := rsa.DecryptOAEP(hash, rand.Reader, privateKey, ciphertext, nil)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrDecryptionFailed, err)
+		// 对所有密文格式、长度与填充失败仅暴露一个公共错误，避免形成解密 oracle。
+		return nil, ErrDecryptionFailed
 	}
 	return plaintext, nil
 }
