@@ -38,7 +38,7 @@
 | Windows | Windows/Linux 交叉 build、vet 通过；当前候选提交的 Windows Server 2022 原生 28 项 `windows_security` 只能在推送后由 CI 证明。 |
 | 集成与安全 | MySQL 8.4、Redis 7.4 ACL 集成通过；`govulncheck` 无可达或导入漏洞；敏感信息与二进制范围扫描通过。 |
 | API 与工作流 | 4 个 workflow 的 actionlint、cicheck、API checker 及 34 段 breaking baseline 校验通过；远端 CI 状态仍以当前提交推送后的结果为准。 |
-| 下游 | legacy-downstream、HexClaw、Hexagon、ai-core 对当前 Toolkit API 的编译与定向合同通过。 |
+| 下游 | HexClaw、Hexagon、ai-core 对当前 Toolkit API 的编译与定向合同通过。 |
 | Desktop | Ollama 固定归档的 PAX/AppleDouble 处理已完成 RED→GREEN，相关解包与敏感边界测试 50/50 通过，真实固定归档 49 个成员成功解析且未发布元数据伪文件。正式 package-local、verify 与 DMG 挂载结果以最终会话报告为准。 |
 | 文档示例 | 中英文 README 的 API 签名与本轮新增注释已按当前合同更新；CHANGELOG 已固化 `v0.3.0` 发布记录。 |
 

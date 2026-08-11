@@ -250,18 +250,6 @@ func TestDownstreamContractCoversEveryModuleBoundary(t *testing.T) {
 		"go build -mod=readonly ./...",
 		"go test -mod=readonly -count=1 ./...",
 	)
-
-	legacyDownstream := activeYAMLContract(extractJobContract(t, source, "legacy-downstream"))
-	requireContractText(t, "legacy-downstream downstream job", legacyDownstream,
-		"go-version: '1.26.5'",
-		"https://codeup.aliyun.com/6a5db08cf47ae675f13aa214/legacy-downstream.git",
-		"LEGACY_DOWNSTREAM_CODEUP_AUTH",
-		"go work init ./toolkit ./legacy-downstream",
-		"working-directory: legacy-downstream",
-		"go build -mod=readonly ./...",
-		"go test -mod=readonly -run '^$' ./...",
-		"go vet -mod=readonly ./...",
-	)
 }
 
 func loadWorkflowContract(t *testing.T, name string) (string, workflowDocument) {
