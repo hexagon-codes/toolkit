@@ -349,7 +349,11 @@ func trustedWindowsExecutableRoots() ([]string, error) {
 		registry.QUERY_VALUE|registry.WOW64_64KEY,
 	)
 	if err == nil {
-		defer key.Close()
+		defer func() {
+			if keyErr := key.Close(); keyErr != nil {
+				fmt.Fprintf(os.Stderr, "sandbox: close registry key: %v\n", keyErr)
+			}
+		}()
 		for _, valueName := range []string{"ProgramFilesDir", "ProgramFilesDir (x86)"} {
 			value, _, valueErr := key.GetStringValue(valueName)
 			if valueErr == nil && value != "" {
@@ -393,7 +397,11 @@ func canonicalTrustedWindowsDirectory(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer file.Close()
+	defer func() {
+		if fileErr := file.Close(); fileErr != nil {
+			fmt.Fprintf(os.Stderr, "sandbox: close trusted directory handle: %v\n", fileErr)
+		}
+	}()
 	identity, err := inspectWindowsFileHandle(file)
 	if err != nil {
 		return "", err

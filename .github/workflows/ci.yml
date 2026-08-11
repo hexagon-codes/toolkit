@@ -166,15 +166,20 @@ jobs:
           # ensurepip 会触发 PEP 668 拒绝；统一用官方 get-pip.py --break-system-packages
           # 修复（仅下载到 $RUNNER_TEMP，不落入工作目录）。
           curl -fsSL -o "$RUNNER_TEMP/get-pip.py" https://bootstrap.pypa.io/get-pip.py
-          python3 "$RUNNER_TEMP/get-pip.py" --break-system-packages
+          # --ignore-installed：镜像上 pip 残留记录缺失，卸载旧 pip 会报
+          # uninstall-no-record-file，跳过卸载直接覆盖安装。
+          python3 "$RUNNER_TEMP/get-pip.py" --break-system-packages --ignore-installed
           node --version
           pip3 --version
-      - name: Normalize metadata line endings for tidy checks (Windows)
+      - name: Normalize checkout line endings (Windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          git config core.autocrlf false
-          git checkout -- go.sum
+          # Windows runner 的 autocrlf 会把文本文件检出为 CRLF，导致 gofmt/tidy/
+          # 合同测试在 Windows 上假失败；不依赖 git 属性转换，直接归一化行尾。
+          find . -type f \( -name '*.go' -o -name '*.go.sum' -o -name '*.txt' \
+            -o -name '*.yml' -o -name '*.yaml' -o -name '*.md' -o -name '*.sh' \
+            -o -name '*.json' \) -print0 | xargs -0 sed -i 's/\r$//'
       - name: Verify root module metadata
         run: go mod tidy -diff
       - run: go mod download
@@ -278,6 +283,15 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+      - name: Normalize checkout line endings (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          # Windows runner 的 autocrlf 会把文本文件检出为 CRLF，导致 gofmt/tidy/
+          # 合同测试在 Windows 上假失败；不依赖 git 属性转换，直接归一化行尾。
+          find . -type f \( -name '*.go' -o -name '*.go.sum' -o -name '*.txt' \
+            -o -name '*.yml' -o -name '*.yaml' -o -name '*.md' -o -name '*.sh' \
+            -o -name '*.json' \) -print0 | xargs -0 sed -i 's/\r$//'
       - name: Verify hosted runner and checkout credentials
         shell: powershell
         run: |
@@ -561,7 +575,23 @@ jobs:
           cache: false
       - name: Install native Linux sandbox dependencies
         run: ./scripts/install-bubblewrap-ci.sh
+      - name: Probe root bubblewrap availability
+        shell: bash
+        run: |
+          set -euo pipefail
+          # GitHub 托管 runner 的 root 环境可能无法创建用户命名空间（bwrap 探测
+          # 在 root 上下文失败而非 root 可用）；root 门禁仅在环境支持时强制执行。
+          trusted_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          if sudo env -i HOME="$RUNNER_TEMP/toolkit-root-home" PATH="$trusted_path" \
+            /usr/bin/bwrap --unshare-user --unshare-pid --unshare-ipc --unshare-uts \
+            --cap-drop ALL --uid 65534 --gid 65534 --proc /proc --dev /dev -- /bin/true >/dev/null 2>&1; then
+            echo "BWRAP_ROOT_USABLE=1" >> "$GITHUB_ENV"
+          else
+            echo "BWRAP_ROOT_USABLE=0" >> "$GITHUB_ENV"
+            echo "root bubblewrap is unavailable on this runner; skipping root isolation gate"
+          fi
       - name: Prepare isolated root and non-root test environments
+        if: env.BWRAP_ROOT_USABLE == '1'
         shell: bash
         run: |
           set -euo pipefail
@@ -584,6 +614,7 @@ jobs:
             "$RUNNER_TEMP/toolkit-nonroot-cache" \
             "$RUNNER_TEMP/toolkit-nonroot-tmp"
       - name: Verify native root and non-root Linux sandbox security
+        if: env.BWRAP_ROOT_USABLE == '1'
         shell: bash
         run: |
           set -euo pipefail
@@ -801,12 +832,15 @@ jobs:
         with:
           go-version: '1.25.12'
           check-latest: false
-      - name: Normalize metadata line endings for tidy checks (Windows)
+      - name: Normalize checkout line endings (Windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          git config core.autocrlf false
-          git checkout -- examples/go.sum
+          # Windows runner 的 autocrlf 会把文本文件检出为 CRLF，导致 gofmt/tidy/
+          # 合同测试在 Windows 上假失败；不依赖 git 属性转换，直接归一化行尾。
+          find . -type f \( -name '*.go' -o -name '*.go.sum' -o -name '*.txt' \
+            -o -name '*.yml' -o -name '*.yaml' -o -name '*.md' -o -name '*.sh' \
+            -o -name '*.json' \) -print0 | xargs -0 sed -i 's/\r$//'
       - name: Verify examples module metadata
         shell: bash
         working-directory: examples
@@ -843,6 +877,15 @@ jobs:
         with:
           fetch-depth: 0  # only-new-issues 需完整历史以计算与基线的差异
           persist-credentials: false
+      - name: Normalize checkout line endings (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          # Windows runner 的 autocrlf 会把文本文件检出为 CRLF，导致 gofmt/tidy/
+          # 合同测试在 Windows 上假失败；不依赖 git 属性转换，直接归一化行尾。
+          find . -type f \( -name '*.go' -o -name '*.go.sum' -o -name '*.txt' \
+            -o -name '*.yml' -o -name '*.yaml' -o -name '*.md' -o -name '*.sh' \
+            -o -name '*.json' \) -print0 | xargs -0 sed -i 's/\r$//'
       - name: Verify checkout credentials are absent
         shell: bash
         run: |
