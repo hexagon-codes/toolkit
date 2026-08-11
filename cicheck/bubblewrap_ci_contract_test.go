@@ -438,6 +438,9 @@ func validateBubblewrapWorkflows(sources map[string]string) error {
 func requireInstallerStep(job workflowJob, requirement installerRequirement) (int, error) {
 	indices := make([]int, 0, 1)
 	for index, step := range job.steps {
+		if !isShellWorkflowStep(step) {
+			continue
+		}
 		commands, err := parseShell(step.run)
 		if err != nil {
 			return -1, fmt.Errorf("parse installer step %s:%s: %w", requirement.workflow, requirement.job, err)

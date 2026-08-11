@@ -178,7 +178,7 @@ jobs:
           # Windows runner 的 autocrlf 会把文本文件检出为 CRLF，导致 gofmt/tidy/
           # 合同测试在 Windows 上假失败；不依赖 git 属性转换，直接归一化行尾。
           Get-ChildItem -Recurse -File | Where-Object {
-            $_.Extension -in @('.go', '.go.sum', '.txt', '.yml', '.yaml', '.md', '.sh', '.json')
+            $_.Extension -in @('.go', '.mod', '.sum', '.txt', '.yml', '.yaml', '.md', '.sh', '.json')
           } | ForEach-Object {
             $content = [System.IO.File]::ReadAllText($_.FullName)
             if ($content.Contains("`r`n")) {
@@ -333,7 +333,7 @@ jobs:
           # Windows runner 的 autocrlf 会把文本文件检出为 CRLF，导致 gofmt/tidy/
           # 合同测试在 Windows 上假失败；不依赖 git 属性转换，直接归一化行尾。
           Get-ChildItem -Recurse -File | Where-Object {
-            $_.Extension -in @('.go', '.go.sum', '.txt', '.yml', '.yaml', '.md', '.sh', '.json')
+            $_.Extension -in @('.go', '.mod', '.sum', '.txt', '.yml', '.yaml', '.md', '.sh', '.json')
           } | ForEach-Object {
             $content = [System.IO.File]::ReadAllText($_.FullName)
             if ($content.Contains("`r`n")) {
@@ -857,7 +857,7 @@ jobs:
           # Windows runner 的 autocrlf 会把文本文件检出为 CRLF，导致 gofmt/tidy/
           # 合同测试在 Windows 上假失败；不依赖 git 属性转换，直接归一化行尾。
           Get-ChildItem -Recurse -File | Where-Object {
-            $_.Extension -in @('.go', '.go.sum', '.txt', '.yml', '.yaml', '.md', '.sh', '.json')
+            $_.Extension -in @('.go', '.mod', '.sum', '.txt', '.yml', '.yaml', '.md', '.sh', '.json')
           } | ForEach-Object {
             $content = [System.IO.File]::ReadAllText($_.FullName)
             if ($content.Contains("`r`n")) {
@@ -925,7 +925,7 @@ jobs:
           # Windows runner 的 autocrlf 会把文本文件检出为 CRLF，导致 gofmt/tidy/
           # 合同测试在 Windows 上假失败；不依赖 git 属性转换，直接归一化行尾。
           Get-ChildItem -Recurse -File | Where-Object {
-            $_.Extension -in @('.go', '.go.sum', '.txt', '.yml', '.yaml', '.md', '.sh', '.json')
+            $_.Extension -in @('.go', '.mod', '.sum', '.txt', '.yml', '.yaml', '.md', '.sh', '.json')
           } | ForEach-Object {
             $content = [System.IO.File]::ReadAllText($_.FullName)
             if ($content.Contains("`r`n")) {
