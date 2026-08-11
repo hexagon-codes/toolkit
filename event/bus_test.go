@@ -3,6 +3,8 @@ package event
 import (
 	"context"
 	"errors"
+	"log"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,6 +17,16 @@ func (*typedNilContext) Deadline() (time.Time, bool) { panic("typed nil context 
 func (*typedNilContext) Done() <-chan struct{}       { panic("typed nil context used") }
 func (*typedNilContext) Err() error                  { panic("typed nil context used") }
 func (*typedNilContext) Value(any) any               { panic("typed nil context used") }
+
+type typedNilError struct{}
+
+func (*typedNilError) Error() string { panic("typed nil error used") }
+
+type panickingLogWriter struct{}
+
+func (panickingLogWriter) Write([]byte) (int, error) {
+	panic("log writer failed")
+}
 
 func newTestBus(t *testing.T, opts ...BusOption) *Bus {
 	t.Helper()
@@ -251,6 +263,132 @@ func TestBus_Concurrent(t *testing.T) {
 	}
 }
 
+func TestConcurrentPublishAndCloseDrainsEveryAcceptedSnapshot(t *testing.T) {
+	bus := newTestBus(t, WithMaxGoroutines(4))
+	var handled atomic.Int64
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var startedOnce sync.Once
+	var releaseOnce sync.Once
+	releaseHandlers := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseHandlers)
+	if _, err := bus.Subscribe(EventAgentStart, func(Event) {
+		startedOnce.Do(func() { close(started) })
+		<-release
+		handled.Add(1)
+	}); err != nil {
+		t.Fatalf("Subscribe() error = %v", err)
+	}
+	if err := bus.Publish(Event{Type: EventAgentStart}); err != nil {
+		t.Fatalf("initial Publish() error = %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("initial handler did not start")
+	}
+
+	const publishers = 200
+	start := make(chan struct{})
+	results := make(chan error, publishers)
+	var publishersWG sync.WaitGroup
+	publishersWG.Add(publishers)
+	for range publishers {
+		go func() {
+			defer publishersWG.Done()
+			<-start
+			results <- bus.Publish(Event{Type: EventAgentStart})
+		}()
+	}
+	closeDone := make(chan struct{})
+	go func() {
+		<-start
+		bus.Close()
+		close(closeDone)
+	}()
+	close(start)
+	publishersWG.Wait()
+	<-closeDone
+	close(results)
+
+	accepted := int64(1)
+	for err := range results {
+		switch {
+		case err == nil:
+			accepted++
+		case errors.Is(err, ErrClosed):
+		default:
+			t.Fatalf("Publish() error = %v, want nil or %v", err, ErrClosed)
+		}
+	}
+	releaseHandlers()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := bus.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+	if got := handled.Load(); got != accepted {
+		t.Fatalf("handler call count = %d, want accepted publication count %d", got, accepted)
+	}
+}
+
+func TestConcurrentSubscribeUnsubscribeAndPublishPreservesStableSubscriber(t *testing.T) {
+	bus := newTestBus(t, WithMaxGoroutines(4))
+	var stableCalls atomic.Int64
+	if _, err := bus.Subscribe(EventAgentStart, func(Event) {
+		stableCalls.Add(1)
+	}); err != nil {
+		t.Fatalf("stable Subscribe() error = %v", err)
+	}
+
+	const operations = 200
+	start := make(chan struct{})
+	publishErrors := make(chan error, operations)
+	subscribeErrors := make(chan error, operations)
+	var wg sync.WaitGroup
+	wg.Add(operations * 2)
+	for range operations {
+		go func() {
+			defer wg.Done()
+			<-start
+			publishErrors <- bus.Publish(Event{Type: EventAgentStart})
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			unsubscribe, err := bus.Subscribe(EventAgentStart, func(Event) {})
+			if err == nil {
+				unsubscribe()
+				unsubscribe()
+			}
+			subscribeErrors <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(publishErrors)
+	close(subscribeErrors)
+	for err := range publishErrors {
+		if err != nil {
+			t.Fatalf("Publish() error = %v", err)
+		}
+	}
+	for err := range subscribeErrors {
+		if err != nil {
+			t.Fatalf("Subscribe() error = %v", err)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := bus.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+	if got := stableCalls.Load(); got != operations {
+		t.Fatalf("stable handler call count = %d, want %d", got, operations)
+	}
+}
+
 func TestBus_PanicRecovery(t *testing.T) {
 	bus := newTestBus(t)
 	defer bus.Close()
@@ -290,6 +428,8 @@ func TestNewRejectsInvalidOptions(t *testing.T) {
 		{name: "nil option", opt: nil, want: ErrNilOption},
 		{name: "zero max goroutines", opt: WithMaxGoroutines(0), want: ErrInvalidMaxGoroutines},
 		{name: "negative max goroutines", opt: WithMaxGoroutines(-1), want: ErrInvalidMaxGoroutines},
+		{name: "zero max pending deliveries", opt: WithMaxPendingDeliveries(0), want: ErrInvalidMaxPendingDeliveries},
+		{name: "negative max pending deliveries", opt: WithMaxPendingDeliveries(-1), want: ErrInvalidMaxPendingDeliveries},
 		{name: "nil panic handler", opt: WithPanicHandler(nil), want: ErrNilPanicHandler},
 	}
 
@@ -305,6 +445,34 @@ func TestNewRejectsInvalidOptions(t *testing.T) {
 				t.Fatalf("New() error = %v, want %v", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestZeroValueBusSupportsLifecycle(t *testing.T) {
+	var bus Bus
+	handled := make(chan struct{})
+	if _, err := bus.Subscribe(EventAgentStart, func(Event) {
+		close(handled)
+	}); err != nil {
+		t.Fatalf("Subscribe() error = %v", err)
+	}
+	if err := bus.Publish(Event{Type: EventAgentStart}); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	select {
+	case <-handled:
+	case <-time.After(time.Second):
+		t.Fatal("zero-value Bus did not deliver the event")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := bus.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+	select {
+	case <-bus.Done():
+	default:
+		t.Fatal("Done() remained open after Shutdown()")
 	}
 }
 
@@ -357,6 +525,34 @@ func TestPanicHandlerPanicDoesNotEscape(t *testing.T) {
 	}
 	if !remainingHandlerCalled.Load() {
 		t.Fatal("panic handler panic prevented a remaining handler")
+	}
+}
+
+func TestHandlerPanicRemainsIsolatedWhenLoggerPanics(t *testing.T) {
+	originalWriter := log.Writer()
+	log.SetOutput(panickingLogWriter{})
+	t.Cleanup(func() {
+		log.SetOutput(originalWriter)
+	})
+
+	bus := newTestBus(t)
+	if _, err := bus.Subscribe(EventAgentStart, func(Event) {
+		panic("handler failed")
+	}); err != nil {
+		t.Fatalf("first Subscribe() error = %v", err)
+	}
+	var remainingHandlerCalled atomic.Bool
+	if _, err := bus.Subscribe(EventAgentStart, func(Event) {
+		remainingHandlerCalled.Store(true)
+	}); err != nil {
+		t.Fatalf("second Subscribe() error = %v", err)
+	}
+
+	if err := bus.PublishSync(Event{Type: EventAgentStart}); err != nil {
+		t.Fatalf("PublishSync() error = %v", err)
+	}
+	if !remainingHandlerCalled.Load() {
+		t.Fatal("logger panic prevented a remaining handler")
 	}
 }
 
@@ -439,6 +635,312 @@ func TestWithMaxGoroutinesBoundsActiveHandlers(t *testing.T) {
 	}
 }
 
+func TestPublishRejectsSnapshotExceedingDeliveryCapacityAtomically(t *testing.T) {
+	bus := newTestBus(t, WithMaxGoroutines(1), WithMaxPendingDeliveries(1))
+	var calls atomic.Int32
+	for range 3 {
+		if _, err := bus.Subscribe(EventAgentStart, func(Event) {
+			calls.Add(1)
+		}); err != nil {
+			t.Fatalf("Subscribe() error = %v", err)
+		}
+	}
+
+	err := bus.Publish(Event{Type: EventAgentStart})
+	if !errors.Is(err, ErrPendingDeliveryCapacityExceeded) {
+		t.Fatalf("Publish() error = %v, want %v", err, ErrPendingDeliveryCapacityExceeded)
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("handler call count = %d, want 0 after atomic rejection", got)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := bus.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown() after rejected Publish error = %v", err)
+	}
+
+	bus.dispatchMu.Lock()
+	outstanding := bus.outstanding
+	pending := len(bus.pending) - bus.pendingHead
+	workers := bus.workers
+	bus.dispatchMu.Unlock()
+	if outstanding != 0 || pending != 0 || workers != 0 {
+		t.Fatalf(
+			"dispatcher state after rejected Publish: outstanding=%d pending=%d workers=%d",
+			outstanding,
+			pending,
+			workers,
+		)
+	}
+}
+
+func TestDefaultPendingDeliveryCapacityIsBounded(t *testing.T) {
+	bus := newTestBus(t)
+	if bus.maxGoroutines != 1024 || bus.maxPendingDeliveries != 4096 {
+		t.Fatalf(
+			"default delivery limits: workers=%d pending=%d, want workers=1024 pending=4096",
+			bus.maxGoroutines,
+			bus.maxPendingDeliveries,
+		)
+	}
+	for range bus.deliveryCapacity() + 1 {
+		if _, err := bus.Subscribe(EventAgentStart, func(Event) {}); err != nil {
+			t.Fatalf("Subscribe() error = %v", err)
+		}
+	}
+	if err := bus.Publish(Event{Type: EventAgentStart}); !errors.Is(err, ErrPendingDeliveryCapacityExceeded) {
+		t.Fatalf("Publish() error = %v, want %v", err, ErrPendingDeliveryCapacityExceeded)
+	}
+}
+
+func TestConcurrentPublishersCannotExceedDeliveryCapacity(t *testing.T) {
+	bus := newTestBus(t, WithMaxGoroutines(1), WithMaxPendingDeliveries(2))
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var startedOnce sync.Once
+	var releaseOnce sync.Once
+	releaseHandlers := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseHandlers)
+	var calls atomic.Int32
+	if _, err := bus.Subscribe(EventAgentStart, func(Event) {
+		startedOnce.Do(func() { close(started) })
+		<-release
+		calls.Add(1)
+	}); err != nil {
+		t.Fatalf("Subscribe() error = %v", err)
+	}
+	if err := bus.Publish(Event{Type: EventAgentStart}); err != nil {
+		t.Fatalf("initial Publish() error = %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not start")
+	}
+
+	const publishers = 64
+	start := make(chan struct{})
+	results := make(chan error, publishers)
+	var wg sync.WaitGroup
+	wg.Add(publishers)
+	for range publishers {
+		go func() {
+			defer wg.Done()
+			<-start
+			results <- bus.Publish(Event{Type: EventAgentStart})
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	accepted := 0
+	rejected := 0
+	for err := range results {
+		switch {
+		case err == nil:
+			accepted++
+		case errors.Is(err, ErrPendingDeliveryCapacityExceeded):
+			rejected++
+		default:
+			t.Fatalf("Publish() error = %v, want nil or %v", err, ErrPendingDeliveryCapacityExceeded)
+		}
+	}
+	if accepted != 2 || rejected != publishers-2 {
+		t.Fatalf("publication results: accepted=%d rejected=%d, want accepted=2 rejected=%d", accepted, rejected, publishers-2)
+	}
+
+	bus.dispatchMu.Lock()
+	outstanding := bus.outstanding
+	bus.dispatchMu.Unlock()
+	if outstanding != 3 {
+		t.Fatalf("outstanding deliveries = %d, want 3", outstanding)
+	}
+	releaseHandlers()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := bus.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+	if got := calls.Load(); got != 3 {
+		t.Fatalf("handler call count = %d, want 3", got)
+	}
+}
+
+func TestPendingCapacityRejectionRacingCloseLeavesNoWaitGroupDebt(t *testing.T) {
+	bus := newTestBus(t, WithMaxGoroutines(1), WithMaxPendingDeliveries(1))
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var startedOnce sync.Once
+	var releaseOnce sync.Once
+	releaseHandlers := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseHandlers)
+	var calls atomic.Int32
+	if _, err := bus.Subscribe(EventAgentStart, func(Event) {
+		startedOnce.Do(func() { close(started) })
+		<-release
+		calls.Add(1)
+	}); err != nil {
+		t.Fatalf("Subscribe() error = %v", err)
+	}
+	if err := bus.Publish(Event{Type: EventAgentStart}); err != nil {
+		t.Fatalf("initial Publish() error = %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not start")
+	}
+	if err := bus.Publish(Event{Type: EventAgentStart}); err != nil {
+		t.Fatalf("queued Publish() error = %v", err)
+	}
+
+	start := make(chan struct{})
+	publishResult := make(chan error, 1)
+	closeDone := make(chan struct{})
+	go func() {
+		<-start
+		publishResult <- bus.Publish(Event{Type: EventAgentStart})
+	}()
+	go func() {
+		<-start
+		bus.Close()
+		close(closeDone)
+	}()
+	close(start)
+	err := <-publishResult
+	<-closeDone
+	if !errors.Is(err, ErrPendingDeliveryCapacityExceeded) && !errors.Is(err, ErrClosed) {
+		t.Fatalf("racing Publish() error = %v, want %v or %v", err, ErrPendingDeliveryCapacityExceeded, ErrClosed)
+	}
+
+	releaseHandlers()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := bus.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("handler call count = %d, want 2", got)
+	}
+}
+
+func TestReentrantPublishReturnsCapacityErrorWithoutBlocking(t *testing.T) {
+	bus := newTestBus(t, WithMaxGoroutines(1), WithMaxPendingDeliveries(1))
+	outerStarted := make(chan struct{})
+	attemptNested := make(chan struct{})
+	var attemptOnce sync.Once
+	triggerNested := func() { attemptOnce.Do(func() { close(attemptNested) }) }
+	t.Cleanup(triggerNested)
+	nestedResult := make(chan error, 1)
+	outerReturned := make(chan struct{})
+	queuedHandled := make(chan struct{})
+	var nestedCalls atomic.Int32
+	if _, err := bus.Subscribe(EventAgentStart, func(Event) {
+		close(outerStarted)
+		<-attemptNested
+		nestedResult <- bus.Publish(Event{Type: EventAgentError})
+		close(outerReturned)
+	}); err != nil {
+		t.Fatalf("outer Subscribe() error = %v", err)
+	}
+	if _, err := bus.Subscribe(EventAgentEnd, func(Event) {
+		close(queuedHandled)
+	}); err != nil {
+		t.Fatalf("queued Subscribe() error = %v", err)
+	}
+	if _, err := bus.Subscribe(EventAgentError, func(Event) {
+		nestedCalls.Add(1)
+	}); err != nil {
+		t.Fatalf("nested Subscribe() error = %v", err)
+	}
+
+	if err := bus.Publish(Event{Type: EventAgentStart}); err != nil {
+		t.Fatalf("initial Publish() error = %v", err)
+	}
+	select {
+	case <-outerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("outer handler did not start")
+	}
+	if err := bus.Publish(Event{Type: EventAgentEnd}); err != nil {
+		t.Fatalf("queued Publish() error = %v", err)
+	}
+	triggerNested()
+	select {
+	case <-outerReturned:
+	case <-time.After(time.Second):
+		t.Fatal("reentrant Publish() blocked on a full pending queue")
+	}
+	if err := <-nestedResult; !errors.Is(err, ErrPendingDeliveryCapacityExceeded) {
+		t.Fatalf("reentrant Publish() error = %v, want %v", err, ErrPendingDeliveryCapacityExceeded)
+	}
+	select {
+	case <-queuedHandled:
+	case <-time.After(time.Second):
+		t.Fatal("previously accepted queued event was not delivered")
+	}
+	if got := nestedCalls.Load(); got != 0 {
+		t.Fatalf("rejected nested handler call count = %d, want 0", got)
+	}
+}
+
+func TestDispatcherClearsConsumedDeliveryReferences(t *testing.T) {
+	bus := newTestBus(t, WithMaxGoroutines(1), WithMaxPendingDeliveries(2))
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var firstStartedOnce sync.Once
+	var releaseOnce sync.Once
+	releaseHandler := func() { releaseOnce.Do(func() { close(releaseFirst) }) }
+	t.Cleanup(releaseHandler)
+	if _, err := bus.Subscribe(EventAgentStart, func(event Event) {
+		if event.ID == "first" {
+			firstStartedOnce.Do(func() { close(firstStarted) })
+			<-releaseFirst
+		}
+	}); err != nil {
+		t.Fatalf("Subscribe() error = %v", err)
+	}
+	firstPayload := &struct{ value string }{value: "first"}
+	secondPayload := &struct{ value string }{value: "second"}
+	if err := bus.Publish(Event{Type: EventAgentStart, ID: "first", Payload: firstPayload}); err != nil {
+		t.Fatalf("first Publish() error = %v", err)
+	}
+	select {
+	case <-firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first handler did not start")
+	}
+	if err := bus.Publish(Event{Type: EventAgentStart, ID: "second", Payload: secondPayload}); err != nil {
+		t.Fatalf("second Publish() error = %v", err)
+	}
+
+	bus.dispatchMu.Lock()
+	consumed := bus.pending[0]
+	queued := bus.pending[bus.pendingHead]
+	bus.dispatchMu.Unlock()
+	if consumed.handler != nil || consumed.event.Payload != nil {
+		t.Fatal("consumed queue slot retained handler or payload references")
+	}
+	if queued.event.Payload != secondPayload {
+		t.Fatal("pending queue did not retain the accepted second payload")
+	}
+
+	releaseHandler()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := bus.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+	bus.dispatchMu.Lock()
+	outstanding := bus.outstanding
+	retainsQueue := bus.pending != nil || bus.pendingHead != 0
+	bus.dispatchMu.Unlock()
+	if outstanding != 0 || retainsQueue {
+		t.Fatalf("dispatcher retained state after Shutdown(): outstanding=%d retains_queue=%t", outstanding, retainsQueue)
+	}
+}
+
 func TestHandlerCanCloseBusWithoutWaitingForItself(t *testing.T) {
 	t.Parallel()
 
@@ -506,6 +1008,276 @@ func TestHandlerCanCloseBusWhenPublishIsSaturated(t *testing.T) {
 	case <-bus.Done():
 	case <-time.After(time.Second):
 		t.Fatal("Done() did not close after accepted handlers completed")
+	}
+}
+
+func TestAsyncHandlerCanPublishWhenConcurrencyLimitIsSaturated(t *testing.T) {
+	t.Parallel()
+
+	bus := newTestBus(t, WithMaxGoroutines(1))
+	innerHandled := make(chan struct{})
+	outerReturned := make(chan struct{})
+	publishErrors := make(chan error, 1)
+	if _, err := bus.Subscribe(EventAgentStart, func(Event) {
+		publishErrors <- bus.Publish(Event{Type: EventAgentEnd})
+		close(outerReturned)
+	}); err != nil {
+		t.Fatalf("outer Subscribe() error = %v", err)
+	}
+	if _, err := bus.Subscribe(EventAgentEnd, func(Event) {
+		close(innerHandled)
+	}); err != nil {
+		t.Fatalf("inner Subscribe() error = %v", err)
+	}
+
+	if err := bus.Publish(Event{Type: EventAgentStart}); err != nil {
+		t.Fatalf("initial Publish() error = %v", err)
+	}
+	select {
+	case <-outerReturned:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("reentrant Publish() blocked while the concurrency limit was saturated")
+	}
+	if err := <-publishErrors; err != nil {
+		t.Fatalf("reentrant Publish() error = %v", err)
+	}
+	select {
+	case <-innerHandled:
+	case <-time.After(time.Second):
+		t.Fatal("event published by the handler was not delivered")
+	}
+}
+
+func TestShutdownDrainsReentrantPublishAcceptedBeforeClose(t *testing.T) {
+	bus := newTestBus(t, WithMaxGoroutines(1))
+	outerRelease := make(chan struct{})
+	innerRelease := make(chan struct{})
+	var outerReleaseOnce sync.Once
+	var innerReleaseOnce sync.Once
+	releaseOuter := func() { outerReleaseOnce.Do(func() { close(outerRelease) }) }
+	releaseInner := func() { innerReleaseOnce.Do(func() { close(innerRelease) }) }
+	t.Cleanup(releaseOuter)
+	t.Cleanup(releaseInner)
+
+	nestedAccepted := make(chan error, 1)
+	innerStarted := make(chan struct{})
+	if _, err := bus.Subscribe(EventAgentStart, func(Event) {
+		nestedAccepted <- bus.Publish(Event{Type: EventAgentEnd})
+		<-outerRelease
+	}); err != nil {
+		t.Fatalf("outer Subscribe() error = %v", err)
+	}
+	if _, err := bus.Subscribe(EventAgentEnd, func(Event) {
+		close(innerStarted)
+		<-innerRelease
+	}); err != nil {
+		t.Fatalf("inner Subscribe() error = %v", err)
+	}
+
+	if err := bus.Publish(Event{Type: EventAgentStart}); err != nil {
+		t.Fatalf("initial Publish() error = %v", err)
+	}
+	select {
+	case err := <-nestedAccepted:
+		if err != nil {
+			t.Fatalf("reentrant Publish() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("reentrant Publish() did not enqueue the nested event")
+	}
+
+	bus.Close()
+	select {
+	case <-bus.Done():
+		t.Fatal("Done() closed before the accepted handlers completed")
+	default:
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	if err := bus.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		cancel()
+		t.Fatalf("Shutdown() error = %v, want context deadline exceeded", err)
+	}
+	cancel()
+
+	releaseOuter()
+	select {
+	case <-innerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("nested event accepted before Close() was not delivered")
+	}
+	select {
+	case <-bus.Done():
+		t.Fatal("Done() closed while the nested handler was active")
+	default:
+	}
+
+	releaseInner()
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := bus.Shutdown(ctx); err != nil {
+		t.Fatalf("final Shutdown() error = %v", err)
+	}
+}
+
+func TestPanicHandlerCanPublishWhenConcurrencyLimitIsSaturated(t *testing.T) {
+	var bus *Bus
+	panicReturned := make(chan struct{})
+	panicPublishErrors := make(chan error, 1)
+	bus = newTestBus(t,
+		WithMaxGoroutines(1),
+		WithPanicHandler(func(Event, any) {
+			panicPublishErrors <- bus.Publish(Event{Type: EventAgentEnd})
+			close(panicReturned)
+		}),
+	)
+	innerHandled := make(chan struct{})
+	if _, err := bus.Subscribe(EventAgentStart, func(Event) {
+		panic("handler failed")
+	}); err != nil {
+		t.Fatalf("outer Subscribe() error = %v", err)
+	}
+	if _, err := bus.Subscribe(EventAgentEnd, func(Event) {
+		close(innerHandled)
+	}); err != nil {
+		t.Fatalf("inner Subscribe() error = %v", err)
+	}
+
+	if err := bus.Publish(Event{Type: EventAgentStart}); err != nil {
+		t.Fatalf("initial Publish() error = %v", err)
+	}
+	select {
+	case <-panicReturned:
+	case <-time.After(time.Second):
+		t.Fatal("panic handler blocked while publishing a nested event")
+	}
+	if err := <-panicPublishErrors; err != nil {
+		t.Fatalf("panic handler Publish() error = %v", err)
+	}
+	select {
+	case <-innerHandled:
+	case <-time.After(time.Second):
+		t.Fatal("event published by the panic handler was not delivered")
+	}
+}
+
+func TestWorkerIsReplacedWhenHandlerCallsGoexit(t *testing.T) {
+	bus := newTestBus(t, WithMaxGoroutines(1))
+	remainingHandlerCalled := make(chan struct{})
+	if _, err := bus.Subscribe(EventAgentStart, func(Event) {
+		runtime.Goexit()
+	}); err != nil {
+		t.Fatalf("first Subscribe() error = %v", err)
+	}
+	if _, err := bus.Subscribe(EventAgentStart, func(Event) {
+		close(remainingHandlerCalled)
+	}); err != nil {
+		t.Fatalf("second Subscribe() error = %v", err)
+	}
+
+	if err := bus.Publish(Event{Type: EventAgentStart}); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	select {
+	case <-remainingHandlerCalled:
+	case <-time.After(time.Second):
+		t.Fatal("worker exit stranded a queued handler")
+	}
+}
+
+func TestPublishSyncContinuesAfterHandlerCallsGoexit(t *testing.T) {
+	bus, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, err := bus.Subscribe(EventAgentStart, func(Event) {
+		runtime.Goexit()
+	}); err != nil {
+		t.Fatalf("first Subscribe() error = %v", err)
+	}
+	remainingHandlerCalled := make(chan struct{})
+	if _, err := bus.Subscribe(EventAgentStart, func(Event) {
+		close(remainingHandlerCalled)
+	}); err != nil {
+		t.Fatalf("second Subscribe() error = %v", err)
+	}
+
+	publishResult := make(chan error, 1)
+	go func() {
+		publishResult <- bus.PublishSync(Event{Type: EventAgentStart})
+	}()
+	select {
+	case err := <-publishResult:
+		if err != nil {
+			t.Fatalf("PublishSync() error = %v", err)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("PublishSync() did not survive handler Goexit")
+	}
+	select {
+	case <-remainingHandlerCalled:
+	default:
+		t.Fatal("handler Goexit stranded the remaining synchronous handler")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := bus.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+}
+
+func TestShutdownReleasesQueuedDeliveriesAndWorkers(t *testing.T) {
+	bus := newTestBus(t, WithMaxGoroutines(1))
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var startedOnce sync.Once
+	if _, err := bus.Subscribe(EventAgentStart, func(Event) {
+		startedOnce.Do(func() { close(started) })
+		<-release
+	}); err != nil {
+		t.Fatalf("Subscribe() error = %v", err)
+	}
+
+	if err := bus.Publish(Event{Type: EventAgentStart}); err != nil {
+		t.Fatalf("first Publish() error = %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not start")
+	}
+	for range 2048 {
+		if err := bus.Publish(Event{Type: EventAgentStart}); err != nil {
+			t.Fatalf("queued Publish() error = %v", err)
+		}
+	}
+	close(release)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := bus.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		bus.dispatchMu.Lock()
+		workers := bus.workers
+		outstanding := bus.outstanding
+		pending := len(bus.pending) - bus.pendingHead
+		retainsQueue := bus.pending != nil || bus.pendingHead != 0
+		bus.dispatchMu.Unlock()
+		if workers == 0 && outstanding == 0 && pending == 0 && !retainsQueue {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf(
+				"dispatcher state after Shutdown(): workers=%d outstanding=%d pending=%d retains_queue=%t",
+				workers,
+				outstanding,
+				pending,
+				retainsQueue,
+			)
+		}
+		runtime.Gosched()
 	}
 }
 
@@ -666,6 +1438,84 @@ func TestShutdownWaitsForActiveHandlersAndHonorsContext(t *testing.T) {
 	close(release)
 	if err := bus.Shutdown(context.Background()); err != nil {
 		t.Fatalf("second Shutdown() error = %v", err)
+	}
+}
+
+func TestShutdownPreservesCancellationCause(t *testing.T) {
+	bus := newTestBus(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseHandler := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseHandler)
+	if _, err := bus.Subscribe(EventAgentStart, func(Event) {
+		close(started)
+		<-release
+	}); err != nil {
+		t.Fatalf("Subscribe() error = %v", err)
+	}
+	if err := bus.Publish(Event{Type: EventAgentStart}); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not start")
+	}
+
+	cause := errors.New("caller canceled shutdown")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(cause)
+	err := bus.Shutdown(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Shutdown() error = %v, want context canceled", err)
+	}
+	if !errors.Is(err, cause) {
+		t.Fatalf("Shutdown() error = %v, want cancellation cause %v", err, cause)
+	}
+
+	releaseHandler()
+	if err := bus.Shutdown(context.Background()); err != nil {
+		t.Fatalf("final Shutdown() error = %v", err)
+	}
+}
+
+func TestShutdownIgnoresTypedNilCancellationCause(t *testing.T) {
+	bus := newTestBus(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseHandler := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseHandler)
+	if _, err := bus.Subscribe(EventAgentStart, func(Event) {
+		close(started)
+		<-release
+	}); err != nil {
+		t.Fatalf("Subscribe() error = %v", err)
+	}
+	if err := bus.Publish(Event{Type: EventAgentStart}); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not start")
+	}
+
+	ctx, cancel := context.WithCancelCause(context.Background())
+	var cause *typedNilError
+	cancel(cause)
+	err := bus.Shutdown(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Shutdown() error = %v, want context canceled", err)
+	}
+	if got := err.Error(); got != context.Canceled.Error() {
+		t.Fatalf("Shutdown() error text = %q, want %q", got, context.Canceled.Error())
+	}
+
+	releaseHandler()
+	if err := bus.Shutdown(context.Background()); err != nil {
+		t.Fatalf("final Shutdown() error = %v", err)
 	}
 }
 
