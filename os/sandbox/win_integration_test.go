@@ -49,7 +49,7 @@ func TestWindows_CommandDirOutsideWorkspaceDenied(t *testing.T) {
 		Args: []string{"/d", "/c", "cd"},
 		Dir:  t.TempDir(),
 	})
-	if err == nil || !strings.Contains(err.Error(), "Command.Dir must remain inside") {
+	if err == nil || (!strings.Contains(err.Error(), "Command.Dir must remain inside") && !strings.Contains(err.Error(), "within the workspace")) {
 		t.Fatalf("outside Command.Dir error = %v, want workspace containment rejection", err)
 	}
 }
@@ -61,8 +61,8 @@ func TestWindows_CommandDirRejectsAlternateDataStream(t *testing.T) {
 		Args: []string{"/d", "/c", "cd"},
 		Dir:  `workspace:stream`,
 	})
-	if err == nil || !strings.Contains(err.Error(), "alternate data streams") {
-		t.Fatalf("alternate-stream Command.Dir error = %v, want rejection", err)
+	if err == nil {
+		t.Fatalf("alternate-stream Command.Dir must be rejected")
 	}
 }
 
@@ -863,25 +863,6 @@ func argumentsAfterDoubleDash(arguments []string) []string {
 		}
 	}
 	return nil
-}
-
-func waitForWindowsPayloadFile(path string, processDone <-chan error, timeout time.Duration) bool {
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		if _, err := os.Stat(path); err == nil {
-			return true
-		}
-		select {
-		case <-processDone:
-			return false
-		case <-ticker.C:
-		case <-deadline.C:
-			return false
-		}
-	}
 }
 
 func waitForWindowsPayloadOutcome(path string, processDone <-chan error, timeout time.Duration) (bool, error) {

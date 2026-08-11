@@ -453,7 +453,9 @@ func canonicalWindowsDirectoryPath(path string) string {
 		return ""
 	}
 	defer func() {
-		_ = windows.CloseHandle(handle)
+		if closeErr := windows.CloseHandle(handle); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "sandbox: close canonical directory handle: %v\n", closeErr)
+		}
 	}()
 	buffer := make([]uint16, 512)
 	for {
@@ -462,7 +464,7 @@ func canonicalWindowsDirectoryPath(path string) string {
 			return ""
 		}
 		if int(length) < len(buffer) {
-			return strings.TrimPrefix(windows.UTF16ToString(buffer[:length]), `\?\`)
+			return strings.TrimPrefix(windows.UTF16ToString(buffer[:length]), `\\?\`)
 		}
 		buffer = make([]uint16, length+1)
 	}

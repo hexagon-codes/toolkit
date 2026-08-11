@@ -13,7 +13,7 @@ import (
 // 该检查不能阻止运行中的瞬时增长，因此能力报告必须保持 Unsupported。
 func enforceWindowsWorkspaceLimits(workspace *windowsWorkspace, cfg Config) error {
 	if workspace == nil || workspace.root == nil {
-		return fmt.Errorf("Windows workspace is not initialized")
+		return fmt.Errorf("windows workspace is not initialized")
 	}
 	var total uint64
 	return workspace.walk(func(relativePath string, file *os.File, identity windowsFileIdentity) error {

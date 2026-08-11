@@ -269,23 +269,6 @@ func (w *windowsWorkspace) auditAndAuthorizeTree() error {
 	})
 }
 
-func (w *windowsWorkspace) auditTree() error {
-	return w.walk(func(relativePath string, file *os.File, identity windowsFileIdentity) error {
-		allowedSIDs, err := privateWindowsWorkspaceSIDs(w.ownerSID, w.appContainerSID)
-		if err != nil {
-			return err
-		}
-		appPresent, err := auditPrivateWindowsHandle(file, identity, w.ownerSID, allowedSIDs, w.appContainerSID)
-		if err != nil {
-			return fmt.Errorf("audit Windows workspace entry %q: %w", relativePath, err)
-		}
-		if !appPresent {
-			return fmt.Errorf("audit Windows workspace entry %q: stable AppContainer identity is missing", relativePath)
-		}
-		return nil
-	})
-}
-
 func (w *windowsWorkspace) walk(visit func(string, *os.File, windowsFileIdentity) error) error {
 	var walk func(string) error
 	walk = func(relativePath string) (resultErr error) {
