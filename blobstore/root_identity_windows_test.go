@@ -19,8 +19,8 @@ func TestOpenedRootFilesystemRootDetectionUsesResolvedWindowsVolume(t *testing.T
 		t.Fatalf("open Windows volume root: %v", err)
 	}
 	t.Cleanup(func() {
-		if err := openedRoot.Close(); err != nil {
-			t.Errorf("close opened Windows volume root: %v", err)
+		if closeErr := openedRoot.Close(); closeErr != nil {
+			t.Errorf("close opened Windows volume root: %v", closeErr)
 		}
 	})
 

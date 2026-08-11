@@ -46,11 +46,11 @@ func TestWindowsWorkspaceClosePreservesEveryHandleError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := workspace.root.Close(); err != nil {
-		t.Fatal(err)
+	if closeErr := workspace.root.Close(); closeErr != nil {
+		t.Fatal(closeErr)
 	}
-	if err := workspace.rootGuard.Close(); err != nil {
-		t.Fatal(err)
+	if closeErr := workspace.rootGuard.Close(); closeErr != nil {
+		t.Fatal(closeErr)
 	}
 
 	err = workspace.close()
