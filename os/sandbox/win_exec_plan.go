@@ -30,19 +30,19 @@ type windowsDirectoryPlan struct {
 
 func resolveWindowsExecutable(workspace *windowsWorkspace, commandPath string) (*windowsExecutablePlan, error) {
 	if commandPath == "" {
-		return nil, fmt.Errorf("Windows Command.Path is required")
+		return nil, fmt.Errorf("windows Command.Path is required")
 	}
 	if commandPath != strings.TrimSpace(commandPath) {
-		return nil, fmt.Errorf("Windows Command.Path must not contain surrounding whitespace")
+		return nil, fmt.Errorf("windows Command.Path must not contain surrounding whitespace")
 	}
 	if strings.ContainsAny(commandPath, "\x00\r\n\"") {
-		return nil, fmt.Errorf("Windows Command.Path contains unsupported characters")
+		return nil, fmt.Errorf("windows Command.Path contains unsupported characters")
 	}
 	if err := validateWindowsPath(commandPath); err != nil {
 		return nil, err
 	}
 	if !filepath.IsAbs(commandPath) {
-		return nil, fmt.Errorf("Windows Command.Path must be an absolute canonical path")
+		return nil, fmt.Errorf("windows Command.Path must be an absolute canonical path")
 	}
 	if windowsPathWithin(workspace.canonicalPath, commandPath) {
 		return resolveWindowsWorkspaceExecutable(workspace, commandPath)
@@ -168,7 +168,7 @@ func finalizeWindowsExecutablePlan(
 		return nil, fmt.Errorf("resolve frozen Windows executable: %w", err)
 	}
 	if !strings.EqualFold(filepath.Clean(canonicalPath), filepath.Clean(file.Name())) {
-		return nil, fmt.Errorf("Windows Command.Path must already be canonical")
+		return nil, fmt.Errorf("windows Command.Path must already be canonical")
 	}
 	if workspacePath != "" {
 		if !windowsPathWithin(workspacePath, canonicalPath) {
@@ -232,7 +232,7 @@ func resolveWindowsWorkingDirectory(workspace *windowsWorkspace, commandDir stri
 	}
 	if commandDir != "" {
 		if err := validateWindowsPath(commandDir); err != nil {
-			return nil, fmt.Errorf("Windows Command.Dir contains an unsupported path: %w", err)
+			return nil, fmt.Errorf("windows Command.Dir contains an unsupported path: %w", err)
 		}
 	}
 	relativePath := "."
@@ -248,10 +248,11 @@ func resolveWindowsWorkingDirectory(workspace *windowsWorkspace, commandDir stri
 		}
 	}
 	if relativePath == ".." || strings.HasPrefix(relativePath, `..\`) || filepath.IsAbs(relativePath) {
-		return nil, fmt.Errorf("Windows Command.Dir must remain inside the sandbox workspace")
+		return nil, fmt.Errorf("windows Command.Dir must remain inside the sandbox workspace (dir=%q relative=%q canonical=%q)",
+			commandDir, relativePath, workspace.canonicalPath)
 	}
 	if err := rejectWindowsRootReparsePoint(workspace.root, relativePath); err != nil {
-		return nil, fmt.Errorf("Windows Command.Dir is invalid: %w", err)
+		return nil, fmt.Errorf("windows Command.Dir is invalid: %w", err)
 	}
 
 	original, err := workspace.root.Open(relativePath)
@@ -263,10 +264,10 @@ func resolveWindowsWorkingDirectory(workspace *windowsWorkspace, commandDir stri
 		return nil, errors.Join(fmt.Errorf("inspect Windows Command.Dir: %w", err), original.Close())
 	}
 	if identity.attributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
-		return nil, errors.Join(fmt.Errorf("Windows Command.Dir must be a directory"), original.Close())
+		return nil, errors.Join(fmt.Errorf("windows Command.Dir must be a directory"), original.Close())
 	}
 	if identity.attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		return nil, errors.Join(fmt.Errorf("Windows Command.Dir must not be a reparse point"), original.Close())
+		return nil, errors.Join(fmt.Errorf("windows Command.Dir must not be a reparse point"), original.Close())
 	}
 
 	frozenHandle, err := reopenWindowsHandle(
@@ -289,14 +290,14 @@ func resolveWindowsWorkingDirectory(workspace *windowsWorkspace, commandDir stri
 	}
 	frozenIdentity, err := inspectWindowsFileHandle(frozen)
 	if err != nil || !identity.sameObjectAndContent(frozenIdentity) {
-		return nil, errors.Join(fmt.Errorf("Windows Command.Dir changed while being frozen"), frozen.Close(), original.Close())
+		return nil, errors.Join(fmt.Errorf("windows Command.Dir changed while being frozen"), frozen.Close(), original.Close())
 	}
 	canonicalPath, err := canonicalWindowsPathFromHandle(frozen)
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("resolve Windows Command.Dir handle: %w", err), frozen.Close(), original.Close())
 	}
 	if !windowsPathWithin(workspace.canonicalPath, canonicalPath) {
-		return nil, errors.Join(fmt.Errorf("Windows Command.Dir resolved outside the sandbox workspace"), frozen.Close(), original.Close())
+		return nil, errors.Join(fmt.Errorf("windows Command.Dir resolved outside the sandbox workspace"), frozen.Close(), original.Close())
 	}
 	if err := original.Close(); err != nil {
 		return nil, errors.Join(fmt.Errorf("close Windows Command.Dir audit handle: %w", err), frozen.Close())
@@ -313,14 +314,14 @@ func (p *windowsDirectoryPlan) revalidate() error {
 		return fmt.Errorf("revalidate Windows Command.Dir: %w", err)
 	}
 	if !p.identity.sameObjectAndContent(identity) {
-		return fmt.Errorf("Windows Command.Dir changed after validation")
+		return fmt.Errorf("windows Command.Dir changed after validation")
 	}
 	canonicalPath, err := canonicalWindowsPathFromHandle(p.file)
 	if err != nil {
 		return fmt.Errorf("revalidate Windows Command.Dir path: %w", err)
 	}
 	if !strings.EqualFold(filepath.Clean(canonicalPath), filepath.Clean(p.path)) {
-		return fmt.Errorf("Windows Command.Dir path changed after validation")
+		return fmt.Errorf("windows Command.Dir path changed after validation")
 	}
 	return nil
 }

@@ -743,10 +743,10 @@ func canonicalWindowsPathFromHandle(file *os.File) (string, error) {
 func verifyWindowsDeniedPaths(cfg Config, workspace *windowsWorkspace) error {
 	for _, deniedPath := range cfg.DeniedPaths {
 		if err := validateWindowsPath(deniedPath); err != nil {
-			return fmt.Errorf("Windows DeniedPaths contains an unsupported path: %w", err)
+			return fmt.Errorf("windows DeniedPaths contains an unsupported path: %w", err)
 		}
 		if windowsPathsOverlap(workspace.canonicalPath, deniedPath) {
-			return fmt.Errorf("Windows DeniedPaths must not overlap the sandbox workspace: %s", deniedPath)
+			return fmt.Errorf("windows DeniedPaths must not overlap the sandbox workspace: %s", deniedPath)
 		}
 		if err := verifyWindowsPathDeniedByAppContainer(deniedPath, workspace.appContainerSID, cfg.Network); err != nil {
 			return fmt.Errorf("verify Windows denied path %q: %w", deniedPath, err)

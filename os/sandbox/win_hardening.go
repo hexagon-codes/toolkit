@@ -67,26 +67,26 @@ func validateWindowsCommandEnv(workspace *windowsWorkspace, env []string) ([]str
 	windowsDirectory, windowsDirectoryErr := windows.GetWindowsDirectory()
 	for _, entry := range clean {
 		if strings.ContainsAny(entry, "\x00\r\n") {
-			return nil, fmt.Errorf("Windows Command.Env contains unsupported characters")
+			return nil, fmt.Errorf("windows Command.Env contains unsupported characters")
 		}
 		separator := strings.IndexByte(entry, '=')
 		if separator <= 0 {
-			return nil, fmt.Errorf("Windows Command.Env entry must use KEY=VALUE form")
+			return nil, fmt.Errorf("windows Command.Env entry must use KEY=VALUE form")
 		}
 		key := strings.ToUpper(entry[:separator])
 		value := entry[separator+1:]
 		if _, exists := seen[key]; exists {
-			return nil, fmt.Errorf("Windows Command.Env contains duplicate key %s", key)
+			return nil, fmt.Errorf("windows Command.Env contains duplicate key %s", key)
 		}
 		seen[key] = struct{}{}
 
 		switch key {
 		case "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "GOCACHE", "GOMODCACHE", "GOPATH":
 			if err := validateWindowsPath(value); err != nil {
-				return nil, fmt.Errorf("Windows Command.Env %s contains an unsupported path: %w", key, err)
+				return nil, fmt.Errorf("windows Command.Env %s contains an unsupported path: %w", key, err)
 			}
 			if !filepath.IsAbs(value) || !windowsPathWithin(workspace.canonicalPath, value) {
-				return nil, fmt.Errorf("Windows Command.Env %s must remain inside the sandbox workspace", key)
+				return nil, fmt.Errorf("windows Command.Env %s must remain inside the sandbox workspace", key)
 			}
 		case "PATH":
 			if trustedRootsErr != nil {
@@ -94,13 +94,13 @@ func validateWindowsCommandEnv(workspace *windowsWorkspace, env []string) ([]str
 			}
 			for _, pathEntry := range filepath.SplitList(value) {
 				if err := validateWindowsPath(pathEntry); err != nil {
-					return nil, fmt.Errorf("Windows Command.Env PATH contains an unsupported path: %w", err)
+					return nil, fmt.Errorf("windows Command.Env PATH contains an unsupported path: %w", err)
 				}
 				if pathEntry == "" || !filepath.IsAbs(pathEntry) {
-					return nil, fmt.Errorf("Windows Command.Env PATH entries must be absolute")
+					return nil, fmt.Errorf("windows Command.Env PATH entries must be absolute")
 				}
 				if !windowsPathWithin(workspace.canonicalPath, pathEntry) && !windowsPathWithinAny(trustedRoots, pathEntry) {
-					return nil, fmt.Errorf("Windows Command.Env PATH entry is outside trusted roots: %s", pathEntry)
+					return nil, fmt.Errorf("windows Command.Env PATH entry is outside trusted roots: %s", pathEntry)
 				}
 			}
 		case "SYSTEMROOT", "WINDIR":
@@ -108,27 +108,27 @@ func validateWindowsCommandEnv(workspace *windowsWorkspace, env []string) ([]str
 				return nil, windowsDirectoryErr
 			}
 			if err := validateWindowsPath(value); err != nil {
-				return nil, fmt.Errorf("Windows Command.Env %s contains an unsupported path: %w", key, err)
+				return nil, fmt.Errorf("windows Command.Env %s contains an unsupported path: %w", key, err)
 			}
 			if !strings.EqualFold(filepath.Clean(value), filepath.Clean(windowsDirectory)) {
-				return nil, fmt.Errorf("Windows Command.Env %s must use the Windows directory", key)
+				return nil, fmt.Errorf("windows Command.Env %s must use the Windows directory", key)
 			}
 		case "SYSTEMDRIVE":
 			if windowsDirectoryErr != nil {
 				return nil, windowsDirectoryErr
 			}
 			if !strings.EqualFold(value, filepath.VolumeName(windowsDirectory)) {
-				return nil, fmt.Errorf("Windows Command.Env SYSTEMDRIVE is invalid")
+				return nil, fmt.Errorf("windows Command.Env SYSTEMDRIVE is invalid")
 			}
 		case "COMSPEC":
 			if trustedRootsErr != nil {
 				return nil, trustedRootsErr
 			}
 			if err := validateWindowsPath(value); err != nil {
-				return nil, fmt.Errorf("Windows Command.Env COMSPEC contains an unsupported path: %w", err)
+				return nil, fmt.Errorf("windows Command.Env COMSPEC contains an unsupported path: %w", err)
 			}
 			if !filepath.IsAbs(value) || !windowsPathWithinAny(trustedRoots, value) {
-				return nil, fmt.Errorf("Windows Command.Env COMSPEC is outside trusted roots")
+				return nil, fmt.Errorf("windows Command.Env COMSPEC is outside trusted roots")
 			}
 		}
 	}
