@@ -26,6 +26,12 @@ var (
 	// ErrInvalidLoader 表示 loader 为空。
 	ErrInvalidLoader = errors.New("cache: loader is nil")
 
+	// ErrInvalidContext 表示调用方传入了 nil context。
+	ErrInvalidContext = errors.New("cache: context must not be nil")
+
+	// ErrInvalidValue 表示 loader 在成功路径返回了 nil 或 typed nil。
+	ErrInvalidValue = errors.New("cache: loader returned a nil value")
+
 	// ErrCorrupt 表示缓存内容损坏，例如 value 被其他系统写坏。
 	ErrCorrupt = errors.New("cache: corrupt payload")
 )
@@ -72,6 +78,9 @@ type Options struct {
 
 	// Now 便于测试（默认 time.Now）
 	Now func() time.Time
+
+	// LoaderTimeout 限制共享 loader 的最长执行时间。
+	LoaderTimeout time.Duration
 }
 
 // Option 配置本地缓存行为。
@@ -86,8 +95,9 @@ func defaultOptions() Options {
 		IsNotFound: func(err error) bool {
 			return errors.Is(err, ErrNotFound)
 		},
-		OnError: nil,
-		Now:     time.Now,
+		OnError:       nil,
+		Now:           time.Now,
+		LoaderTimeout: 10 * time.Second,
 	}
 }
 
@@ -98,7 +108,7 @@ func applyOptions(opts ...Option) Options {
 			fn(&o)
 		}
 	}
-	if o.Codec == nil {
+	if isNilInterface(o.Codec) {
 		o.Codec = JSONCodec{}
 	}
 	if o.Now == nil {
@@ -113,6 +123,9 @@ func applyOptions(opts ...Option) Options {
 	}
 	if o.IsNotFound == nil {
 		o.IsNotFound = func(err error) bool { return errors.Is(err, ErrNotFound) }
+	}
+	if o.LoaderTimeout <= 0 {
+		o.LoaderTimeout = 10 * time.Second
 	}
 	return o
 }
@@ -152,6 +165,24 @@ func WithNow(now func() time.Time) Option {
 	return func(o *Options) { o.Now = now }
 }
 
+// WithLoaderTimeout 设置共享 loader 的最长执行时间。
+func WithLoaderTimeout(timeout time.Duration) Option {
+	return func(o *Options) { o.LoaderTimeout = timeout }
+}
+
+func isNilInterface(value any) bool {
+	if value == nil {
+		return true
+	}
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return reflected.IsNil()
+	default:
+		return false
+	}
+}
+
 func joinPrefix(prefix, key string) string {
 	if prefix == "" {
 		return key
@@ -187,10 +218,17 @@ func unpack(packed []byte) (found bool, data []byte, err error) {
 	if len(packed) == 0 {
 		return false, nil, ErrCorrupt
 	}
-	if packed[0] == 0 {
+	switch packed[0] {
+	case 0:
+		if len(packed) != 1 {
+			return false, nil, ErrCorrupt
+		}
 		return false, nil, nil
+	case 1:
+		return true, packed[1:], nil
+	default:
+		return false, nil, ErrCorrupt
 	}
-	return true, packed[1:], nil
 }
 
 func ensureDestPtr(dest any) error {
@@ -273,6 +311,7 @@ type Cache struct {
 	// 定期清理
 	cleanupInterval time.Duration
 	stopCleanup     chan struct{}
+	cleanupDone     chan struct{}
 	stopped         atomic.Bool // 防止双重关闭
 
 	// 版本号：Clear() 时递增，用于防止 singleflight 竞态写入旧数据
@@ -282,6 +321,10 @@ type Cache struct {
 	// 每次写入或 LRU 访问刷新都会 Add(1) 取号并写入对应 localItem.seq，
 	// 作为 accessedAt 相同时的确定性淘汰 tiebreak（详见 localItem.seq）。
 	accessSeq atomic.Uint64
+
+	// 时钟只允许单调前进，避免宿主机 wall clock 回拨破坏 TTL 与 LRU 顺序。
+	clockMu sync.Mutex
+	lastNow time.Time
 }
 
 // nextSeq 取下一个单调递增的访问序列号（并发安全）。
@@ -297,6 +340,16 @@ func (c *Cache) nextSeq() uint64 {
 func (c *Cache) touchLRU(item *localItem, now time.Time) {
 	item.setAccessedAt(now)
 	item.setSeq(c.nextSeq())
+}
+
+func (c *Cache) now() time.Time {
+	observed := c.opts.Now()
+	c.clockMu.Lock()
+	defer c.clockMu.Unlock()
+	if c.lastNow.IsZero() || !observed.Before(c.lastNow) {
+		c.lastNow = observed
+	}
+	return c.lastNow
 }
 
 const (
@@ -327,11 +380,14 @@ func NewCacheWithCleanup(maxEntries int, cleanupInterval time.Duration, opts ...
 		maxEntries:      maxEntries,
 		cleanupInterval: cleanupInterval,
 		stopCleanup:     make(chan struct{}),
+		cleanupDone:     make(chan struct{}),
 	}
 
 	// 启动定期清理（cleanupInterval <= 0 时禁用）
 	if cleanupInterval > 0 {
 		go c.periodicCleanup()
+	} else {
+		close(c.cleanupDone)
 	}
 
 	return c
@@ -364,6 +420,12 @@ func (c *Cache) GetOrLoad(
 	dest any,
 	loader func(ctx context.Context) (any, error),
 ) error {
+	if ctx == nil {
+		return ErrInvalidContext
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if key == "" {
 		return ErrInvalidKey
 	}
@@ -374,57 +436,11 @@ func (c *Cache) GetOrLoad(
 		return err
 	}
 
-	fullKey := joinPrefix(c.opts.Prefix, key)
-
-	// 1) 先读本地缓存
-	if packed, ok, err := c.getItem(fullKey); err == nil && ok {
-		return c.unmarshalPacked(packed, dest)
-	} else if err != nil {
-		c.onError(ctx, "local_get", fullKey, err)
-	}
-
-	// 记录当前版本号，用于防止 Clear() 竞态
-	gen := c.getGeneration()
-
-	// 2) singleflight 防击穿
-	v, err, _ := c.sf.Do(fullKey, func() (any, error) {
-		// double check
-		packed2, ok2, getErr := c.getItem(fullKey)
-		if getErr != nil {
-			c.onError(ctx, "local_double_check", fullKey, getErr)
-		} else if ok2 {
-			return packed2, nil
-		}
-
-		val, lerr := loader(ctx)
-		if lerr != nil {
-			if c.isNotFound(lerr) {
-				negTTL := c.negativeTTL()
-				c.setItemWithGen(fullKey, packNotFound(), jitterTTL(negTTL, c.opts.Jitter), gen, true)
-			}
-			return nil, lerr
-		}
-
-		raw, merr := c.opts.Codec.Marshal(val)
-		if merr != nil {
-			return nil, merr
-		}
-		packed3 := packFound(raw)
-
-		if ttl > 0 {
-			c.setItemWithGen(fullKey, packed3, jitterTTL(ttl, c.opts.Jitter), gen, true)
-		}
-		return packed3, nil
-	})
+	result, err := c.loadPacked(ctx, joinPrefix(c.opts.Prefix, key), ttl, dest, loader)
 	if err != nil {
 		return err
 	}
-
-	packed, ok := v.([]byte)
-	if !ok {
-		return ErrCorrupt
-	}
-	return c.unmarshalPacked(packed, dest)
+	return c.unmarshalPacked(result.packed, dest)
 }
 
 // Del 删除一个或多个缓存 key。
@@ -434,22 +450,27 @@ func (c *Cache) Del(ctx context.Context, keys ...string) error {
 	}
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
+	changed := false
 	for _, k := range keys {
 		if k == "" {
 			continue
 		}
 		fullKey := joinPrefix(c.opts.Prefix, k)
 		delete(c.items, fullKey)
+		changed = true
 	}
+	if changed {
+		// 删除与在途加载线性化：删除之后完成的旧加载不得重新写回。
+		c.generation.Add(1)
+	}
+	c.mu.Unlock()
 	return nil
 }
 
 // --- internal ---
 
 func (c *Cache) getItem(fullKey string) (data []byte, found bool, err error) {
-	now := c.opts.Now()
+	now := c.now()
 
 	// 使用读锁进行读取操作
 	// accessedAt 使用原子操作更新，无需写锁
@@ -461,12 +482,12 @@ func (c *Cache) getItem(fullKey string) (data []byte, found bool, err error) {
 	}
 
 	// 检查过期（需要写锁删除，升级锁）
-	if !item.expireAt.IsZero() && now.After(item.expireAt) {
+	if !item.expireAt.IsZero() && !now.Before(item.expireAt) {
 		c.mu.RUnlock()
 		// 升级到写锁进行删除
 		c.mu.Lock()
 		// 双重检查：在获取写锁期间可能已被其他 goroutine 删除
-		if existingItem, exists := c.items[fullKey]; exists && now.After(existingItem.expireAt) {
+		if existingItem, exists := c.items[fullKey]; exists && !existingItem.expireAt.IsZero() && !now.Before(existingItem.expireAt) {
 			delete(c.items, fullKey)
 		}
 		c.mu.Unlock()
@@ -494,7 +515,7 @@ func (c *Cache) setItemWithGen(fullKey string, packed []byte, ttl time.Duration,
 	if ttl <= 0 {
 		return
 	}
-	now := c.opts.Now()
+	now := c.now()
 	exp := now.Add(ttl)
 
 	// copy
@@ -533,7 +554,7 @@ func (c *Cache) evictIfNeededLocked(now time.Time) {
 	// 1) 先收集过期的 key，再删除（避免遍历时删除）
 	var expiredKeys []string
 	for k, it := range c.items {
-		if !it.expireAt.IsZero() && now.After(it.expireAt) {
+		if !it.expireAt.IsZero() && !now.Before(it.expireAt) {
 			expiredKeys = append(expiredKeys, k)
 		}
 	}
@@ -642,6 +663,7 @@ func (c *Cache) onError(ctx context.Context, op, key string, err error) {
 
 // periodicCleanup 定期清理过期条目
 func (c *Cache) periodicCleanup() {
+	defer close(c.cleanupDone)
 	ticker := time.NewTicker(c.cleanupInterval)
 	defer ticker.Stop()
 
@@ -657,13 +679,13 @@ func (c *Cache) periodicCleanup() {
 
 // cleanExpired 清理所有过期条目
 func (c *Cache) cleanExpired() {
-	now := c.opts.Now()
+	now := c.now()
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	for k, item := range c.items {
-		if !item.expireAt.IsZero() && now.After(item.expireAt) {
+		if !item.expireAt.IsZero() && !now.Before(item.expireAt) {
 			delete(c.items, k)
 		}
 	}
@@ -679,6 +701,7 @@ func (c *Cache) Stop() {
 	if c.stopped.CompareAndSwap(false, true) {
 		close(c.stopCleanup)
 	}
+	<-c.cleanupDone
 }
 
 // Close 是 Stop 的同名别名，停止后台清理并释放相关资源。
@@ -723,6 +746,12 @@ func (c *Cache) GetOrLoadEx(
 	dest any,
 	loader func(ctx context.Context) (any, error),
 ) (cacheHit bool, err error) {
+	if ctx == nil {
+		return false, ErrInvalidContext
+	}
+	if contextErr := ctx.Err(); contextErr != nil {
+		return false, contextErr
+	}
 	if key == "" {
 		return false, ErrInvalidKey
 	}
@@ -733,56 +762,90 @@ func (c *Cache) GetOrLoadEx(
 		return false, destErr
 	}
 
-	fullKey := joinPrefix(c.opts.Prefix, key)
-
-	// 1) 先读本地缓存
-	if packed, ok, getErr := c.getItem(fullKey); getErr == nil && ok {
-		return true, c.unmarshalPacked(packed, dest)
-	} else if getErr != nil {
-		c.onError(ctx, "local_get", fullKey, getErr)
-	}
-
-	// 记录当前版本号，用于防止 Clear() 竞态
-	gen := c.getGeneration()
-
-	// 2) singleflight 防击穿，返回值携带来源信息
-	v, loadErr, _ := c.sf.Do(fullKey, func() (any, error) {
-		// double check
-		packed2, ok2, getErr := c.getItem(fullKey)
-		if getErr != nil {
-			c.onError(ctx, "local_double_check", fullKey, getErr)
-		} else if ok2 {
-			return loadResult{packed: packed2, fromCache: true}, nil
-		}
-
-		val, lerr := loader(ctx)
-		if lerr != nil {
-			if c.isNotFound(lerr) {
-				negTTL := c.negativeTTL()
-				c.setItemWithGen(fullKey, packNotFound(), jitterTTL(negTTL, c.opts.Jitter), gen, true)
-			}
-			return nil, lerr
-		}
-
-		raw, merr := c.opts.Codec.Marshal(val)
-		if merr != nil {
-			return nil, merr
-		}
-		packed3 := packFound(raw)
-
-		if ttl > 0 {
-			c.setItemWithGen(fullKey, packed3, jitterTTL(ttl, c.opts.Jitter), gen, true)
-		}
-		return loadResult{packed: packed3, fromCache: false}, nil
-	})
+	result, loadErr := c.loadPacked(ctx, joinPrefix(c.opts.Prefix, key), ttl, dest, loader)
 	if loadErr != nil {
 		return false, loadErr
 	}
-
-	// 解析 singleflight 返回值
-	result, ok := v.(loadResult)
-	if !ok {
-		return false, ErrCorrupt
-	}
 	return result.fromCache, c.unmarshalPacked(result.packed, dest)
+}
+
+func (c *Cache) loadPacked(
+	ctx context.Context,
+	fullKey string,
+	ttl time.Duration,
+	destination any,
+	loader func(context.Context) (any, error),
+) (loadResult, error) {
+	if packed, ok, err := c.getItem(fullKey); err == nil && ok {
+		if validationErr := c.validatePackedDestination(packed, destination); validationErr == nil {
+			return loadResult{packed: packed, fromCache: true}, nil
+		} else {
+			c.onError(ctx, "local_decode", fullKey, validationErr)
+		}
+	} else if err != nil {
+		c.onError(ctx, "local_get", fullKey, err)
+	}
+
+	generation := c.getGeneration()
+	resultChannel := c.sf.DoChan(fullKey, func() (any, error) {
+		if packed, ok, err := c.getItem(fullKey); err == nil && ok {
+			if validationErr := c.validatePackedDestination(packed, destination); validationErr == nil {
+				return loadResult{packed: packed, fromCache: true}, nil
+			} else {
+				c.onError(ctx, "local_double_check_decode", fullKey, validationErr)
+			}
+		} else if err != nil {
+			c.onError(ctx, "local_double_check", fullKey, err)
+		}
+
+		loaderContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.opts.LoaderTimeout)
+		defer cancel()
+		value, err := loader(loaderContext)
+		if err != nil {
+			if c.isNotFound(err) {
+				c.setItemWithGen(fullKey, packNotFound(), jitterTTL(c.negativeTTL(), c.opts.Jitter), generation, true)
+			}
+			return nil, err
+		}
+		if isNilInterface(value) {
+			return nil, ErrInvalidValue
+		}
+
+		raw, err := c.opts.Codec.Marshal(value)
+		if err != nil {
+			return nil, err
+		}
+		packed := packFound(raw)
+		if ttl > 0 {
+			c.setItemWithGen(fullKey, packed, jitterTTL(ttl, c.opts.Jitter), generation, true)
+		}
+		return loadResult{packed: packed}, nil
+	})
+
+	select {
+	case <-ctx.Done():
+		return loadResult{}, ctx.Err()
+	case result := <-resultChannel:
+		if result.Err != nil {
+			return loadResult{}, result.Err
+		}
+		loaded, ok := result.Val.(loadResult)
+		if !ok {
+			return loadResult{}, ErrCorrupt
+		}
+		return loaded, nil
+	}
+}
+
+func (c *Cache) validatePackedDestination(packed []byte, destination any) error {
+	found, payload, err := unpack(packed)
+	if err != nil || !found {
+		return err
+	}
+	destinationValue := reflect.ValueOf(destination)
+	if destinationValue.Kind() != reflect.Pointer || destinationValue.IsNil() {
+		return ErrInvalidDest
+	}
+	probe := reflect.New(destinationValue.Elem().Type()).Interface()
+	return c.opts.Codec.Unmarshal(payload, probe)
 }

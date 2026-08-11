@@ -220,6 +220,10 @@ func (l *List[T]) move(n, at *Node[T]) {
 
 // Clear 清空链表
 func (l *List[T]) Clear() {
+	if l.root == nil {
+		l.init()
+		return
+	}
 	// 清理所有节点的引用，帮助 GC 回收
 	for n := l.root.next; n != l.root; {
 		next := n.next
@@ -245,30 +249,40 @@ func (l *List[T]) Values() []T {
 	return l.ToSlice()
 }
 
+// nodeSnapshot 返回调用开始时的节点快照。
+func (l *List[T]) nodeSnapshot() []*Node[T] {
+	result := make([]*Node[T], 0, l.len)
+	for n := l.Front(); n != nil; n = n.Next() {
+		result = append(result, n)
+	}
+	return result
+}
+
 // ForEach 遍历所有元素
 func (l *List[T]) ForEach(fn func(T)) {
-	for n := l.Front(); n != nil; n = n.Next() {
+	for _, n := range l.nodeSnapshot() {
 		fn(n.Value)
 	}
 }
 
 // ForEachNode 遍历所有节点
 func (l *List[T]) ForEachNode(fn func(*Node[T])) {
-	for n := l.Front(); n != nil; n = n.Next() {
+	for _, n := range l.nodeSnapshot() {
 		fn(n)
 	}
 }
 
 // ForEachReverse 反向遍历所有元素
 func (l *List[T]) ForEachReverse(fn func(T)) {
-	for n := l.Back(); n != nil; n = n.Prev() {
-		fn(n.Value)
+	nodes := l.nodeSnapshot()
+	for i := len(nodes) - 1; i >= 0; i-- {
+		fn(nodes[i].Value)
 	}
 }
 
 // Find 查找第一个满足条件的节点
 func (l *List[T]) Find(predicate func(T) bool) *Node[T] {
-	for n := l.Front(); n != nil; n = n.Next() {
+	for _, n := range l.nodeSnapshot() {
 		if predicate(n.Value) {
 			return n
 		}
@@ -279,7 +293,7 @@ func (l *List[T]) Find(predicate func(T) bool) *Node[T] {
 // FindAll 查找所有满足条件的节点
 func (l *List[T]) FindAll(predicate func(T) bool) []*Node[T] {
 	result := make([]*Node[T], 0)
-	for n := l.Front(); n != nil; n = n.Next() {
+	for _, n := range l.nodeSnapshot() {
 		if predicate(n.Value) {
 			result = append(result, n)
 		}
@@ -295,7 +309,7 @@ func (l *List[T]) Contains(predicate func(T) bool) bool {
 // Filter 过滤元素，返回新链表
 func (l *List[T]) Filter(predicate func(T) bool) *List[T] {
 	result := New[T]()
-	for n := l.Front(); n != nil; n = n.Next() {
+	for _, n := range l.nodeSnapshot() {
 		if predicate(n.Value) {
 			result.PushBack(n.Value)
 		}
@@ -337,7 +351,7 @@ func (l *List[T]) PushFrontList(other *List[T]) {
 // PushBackList 将另一个链表的所有元素添加到尾部
 func (l *List[T]) PushBackList(other *List[T]) {
 	l.lazyInit()
-	for n := other.Front(); n != nil; n = n.Next() {
+	for i, n := other.Len(), other.Front(); i > 0; i, n = i-1, n.Next() {
 		l.PushBack(n.Value)
 	}
 }
@@ -357,10 +371,20 @@ func NewSyncList[T any]() *SyncList[T] {
 	}
 }
 
+// initLocked 在持有写锁时初始化内部链表。
+func (sl *SyncList[T]) initLocked() {
+	if sl.l == nil {
+		sl.l = New[T]()
+	}
+}
+
 // Len 返回链表长度
 func (sl *SyncList[T]) Len() int {
 	sl.mu.RLock()
 	defer sl.mu.RUnlock()
+	if sl.l == nil {
+		return 0
+	}
 	return sl.l.Len()
 }
 
@@ -368,12 +392,16 @@ func (sl *SyncList[T]) Len() int {
 func (sl *SyncList[T]) IsEmpty() bool {
 	sl.mu.RLock()
 	defer sl.mu.RUnlock()
+	if sl.l == nil {
+		return true
+	}
 	return sl.l.IsEmpty()
 }
 
 // PushFront 在链表头部插入元素
 func (sl *SyncList[T]) PushFront(v T) {
 	sl.mu.Lock()
+	sl.initLocked()
 	sl.l.PushFront(v)
 	sl.mu.Unlock()
 }
@@ -381,6 +409,7 @@ func (sl *SyncList[T]) PushFront(v T) {
 // PushBack 在链表尾部插入元素
 func (sl *SyncList[T]) PushBack(v T) {
 	sl.mu.Lock()
+	sl.initLocked()
 	sl.l.PushBack(v)
 	sl.mu.Unlock()
 }
@@ -389,6 +418,10 @@ func (sl *SyncList[T]) PushBack(v T) {
 func (sl *SyncList[T]) PopFront() (T, bool) {
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
+	if sl.l == nil {
+		var zero T
+		return zero, false
+	}
 	return sl.l.PopFront()
 }
 
@@ -396,6 +429,10 @@ func (sl *SyncList[T]) PopFront() (T, bool) {
 func (sl *SyncList[T]) PopBack() (T, bool) {
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
+	if sl.l == nil {
+		var zero T
+		return zero, false
+	}
 	return sl.l.PopBack()
 }
 
@@ -403,6 +440,10 @@ func (sl *SyncList[T]) PopBack() (T, bool) {
 func (sl *SyncList[T]) Front() (T, bool) {
 	sl.mu.RLock()
 	defer sl.mu.RUnlock()
+	if sl.l == nil {
+		var zero T
+		return zero, false
+	}
 	if n := sl.l.Front(); n != nil {
 		return n.Value, true
 	}
@@ -414,6 +455,10 @@ func (sl *SyncList[T]) Front() (T, bool) {
 func (sl *SyncList[T]) Back() (T, bool) {
 	sl.mu.RLock()
 	defer sl.mu.RUnlock()
+	if sl.l == nil {
+		var zero T
+		return zero, false
+	}
 	if n := sl.l.Back(); n != nil {
 		return n.Value, true
 	}
@@ -424,6 +469,7 @@ func (sl *SyncList[T]) Back() (T, bool) {
 // Clear 清空链表
 func (sl *SyncList[T]) Clear() {
 	sl.mu.Lock()
+	sl.initLocked()
 	sl.l.Clear()
 	sl.mu.Unlock()
 }
@@ -432,6 +478,9 @@ func (sl *SyncList[T]) Clear() {
 func (sl *SyncList[T]) ToSlice() []T {
 	sl.mu.RLock()
 	defer sl.mu.RUnlock()
+	if sl.l == nil {
+		return nil
+	}
 	return sl.l.ToSlice()
 }
 
@@ -439,7 +488,10 @@ func (sl *SyncList[T]) ToSlice() []T {
 // 先在锁内复制数据到临时切片，释放锁后再遍历调用回调，避免死锁风险
 func (sl *SyncList[T]) ForEach(fn func(T)) {
 	sl.mu.RLock()
-	items := sl.l.ToSlice()
+	var items []T
+	if sl.l != nil {
+		items = sl.l.ToSlice()
+	}
 	sl.mu.RUnlock()
 
 	for _, v := range items {
@@ -451,7 +503,10 @@ func (sl *SyncList[T]) ForEach(fn func(T)) {
 // 先在锁内复制数据到临时切片，释放锁后再遍历调用回调，避免死锁风险
 func (sl *SyncList[T]) ForEachReverse(fn func(T)) {
 	sl.mu.RLock()
-	items := sl.l.ToSlice()
+	var items []T
+	if sl.l != nil {
+		items = sl.l.ToSlice()
+	}
 	sl.mu.RUnlock()
 
 	for i := len(items) - 1; i >= 0; i-- {
@@ -462,9 +517,15 @@ func (sl *SyncList[T]) ForEachReverse(fn func(T)) {
 // Find 查找第一个满足条件的元素值（线程安全）
 func (sl *SyncList[T]) Find(predicate func(T) bool) (T, bool) {
 	sl.mu.RLock()
-	defer sl.mu.RUnlock()
-	if n := sl.l.Find(predicate); n != nil {
-		return n.Value, true
+	var items []T
+	if sl.l != nil {
+		items = sl.l.ToSlice()
+	}
+	sl.mu.RUnlock()
+	for _, item := range items {
+		if predicate(item) {
+			return item, true
+		}
 	}
 	var zero T
 	return zero, false
@@ -473,32 +534,40 @@ func (sl *SyncList[T]) Find(predicate func(T) bool) (T, bool) {
 // FindAll 查找所有满足条件的元素值（线程安全）
 func (sl *SyncList[T]) FindAll(predicate func(T) bool) []T {
 	sl.mu.RLock()
-	defer sl.mu.RUnlock()
-	nodes := sl.l.FindAll(predicate)
-	result := make([]T, len(nodes))
-	for i, n := range nodes {
-		result[i] = n.Value
+	var items []T
+	if sl.l != nil {
+		items = sl.l.ToSlice()
+	}
+	sl.mu.RUnlock()
+	result := make([]T, 0)
+	for _, item := range items {
+		if predicate(item) {
+			result = append(result, item)
+		}
 	}
 	return result
 }
 
 // Contains 判断是否包含满足条件的元素（线程安全）
 func (sl *SyncList[T]) Contains(predicate func(T) bool) bool {
-	sl.mu.RLock()
-	defer sl.mu.RUnlock()
-	return sl.l.Contains(predicate)
+	_, ok := sl.Find(predicate)
+	return ok
 }
 
 // Filter 过滤元素，返回新的线程安全链表
 func (sl *SyncList[T]) Filter(predicate func(T) bool) *SyncList[T] {
 	sl.mu.RLock()
-	defer sl.mu.RUnlock()
+	var items []T
+	if sl.l != nil {
+		items = sl.l.ToSlice()
+	}
+	sl.mu.RUnlock()
 	result := NewSyncList[T]()
-	sl.l.ForEach(func(v T) {
-		if predicate(v) {
-			result.PushBack(v)
+	for _, item := range items {
+		if predicate(item) {
+			result.l.PushBack(item)
 		}
-	})
+	}
 	return result
 }
 
@@ -507,6 +576,9 @@ func (sl *SyncList[T]) Clone() *SyncList[T] {
 	sl.mu.RLock()
 	defer sl.mu.RUnlock()
 	result := NewSyncList[T]()
+	if sl.l == nil {
+		return result
+	}
 	sl.l.ForEach(func(v T) {
 		result.l.PushBack(v) // 直接操作内部链表避免重复加锁
 	})
@@ -517,5 +589,8 @@ func (sl *SyncList[T]) Clone() *SyncList[T] {
 func (sl *SyncList[T]) Reverse() {
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
+	if sl.l == nil {
+		return
+	}
 	sl.l.Reverse()
 }

@@ -18,6 +18,9 @@ func New[T any](items ...T) *Stack[T] {
 
 // NewWithCapacity 创建指定初始容量的栈
 func NewWithCapacity[T any](capacity int) *Stack[T] {
+	if capacity < 0 {
+		capacity = 0
+	}
 	return &Stack[T]{
 		items: make([]T, 0, capacity),
 	}
@@ -105,15 +108,16 @@ func (s *Stack[T]) Values() []T {
 
 // ForEach 从栈底到栈顶遍历所有元素
 func (s *Stack[T]) ForEach(fn func(T)) {
-	for _, item := range s.items {
+	for _, item := range s.ToSlice() {
 		fn(item)
 	}
 }
 
 // ForEachReverse 从栈顶到栈底遍历所有元素
 func (s *Stack[T]) ForEachReverse(fn func(T)) {
-	for i := len(s.items) - 1; i >= 0; i-- {
-		fn(s.items[i])
+	items := s.ToSlice()
+	for i := len(items) - 1; i >= 0; i-- {
+		fn(items[i])
 	}
 }
 
@@ -126,7 +130,7 @@ func (s *Stack[T]) Clone() *Stack[T] {
 
 // Contains 判断是否包含满足条件的元素
 func (s *Stack[T]) Contains(predicate func(T) bool) bool {
-	for _, item := range s.items {
+	for _, item := range s.ToSlice() {
 		if predicate(item) {
 			return true
 		}
@@ -137,7 +141,7 @@ func (s *Stack[T]) Contains(predicate func(T) bool) bool {
 // Filter 过滤元素，返回新栈
 func (s *Stack[T]) Filter(predicate func(T) bool) *Stack[T] {
 	result := NewWithCapacity[T](len(s.items))
-	for _, item := range s.items {
+	for _, item := range s.ToSlice() {
 		if predicate(item) {
 			result.items = append(result.items, item)
 		}
@@ -203,9 +207,17 @@ func NewSyncStack[T any]() *SyncStack[T] {
 	}
 }
 
+// initLocked 在持有写锁时初始化内部栈。
+func (ss *SyncStack[T]) initLocked() {
+	if ss.s == nil {
+		ss.s = New[T]()
+	}
+}
+
 // Push 入栈
 func (ss *SyncStack[T]) Push(items ...T) {
 	ss.mu.Lock()
+	ss.initLocked()
 	ss.s.Push(items...)
 	ss.mu.Unlock()
 }
@@ -214,6 +226,10 @@ func (ss *SyncStack[T]) Push(items ...T) {
 func (ss *SyncStack[T]) Pop() (T, bool) {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
+	if ss.s == nil {
+		var zero T
+		return zero, false
+	}
 	return ss.s.Pop()
 }
 
@@ -221,6 +237,10 @@ func (ss *SyncStack[T]) Pop() (T, bool) {
 func (ss *SyncStack[T]) Peek() (T, bool) {
 	ss.mu.RLock()
 	defer ss.mu.RUnlock()
+	if ss.s == nil {
+		var zero T
+		return zero, false
+	}
 	return ss.s.Peek()
 }
 
@@ -228,6 +248,9 @@ func (ss *SyncStack[T]) Peek() (T, bool) {
 func (ss *SyncStack[T]) Size() int {
 	ss.mu.RLock()
 	defer ss.mu.RUnlock()
+	if ss.s == nil {
+		return 0
+	}
 	return ss.s.Size()
 }
 
@@ -235,13 +258,18 @@ func (ss *SyncStack[T]) Size() int {
 func (ss *SyncStack[T]) IsEmpty() bool {
 	ss.mu.RLock()
 	defer ss.mu.RUnlock()
+	if ss.s == nil {
+		return true
+	}
 	return ss.s.IsEmpty()
 }
 
 // Clear 清空栈
 func (ss *SyncStack[T]) Clear() {
 	ss.mu.Lock()
-	ss.s.Clear()
+	if ss.s != nil {
+		ss.s.Clear()
+	}
 	ss.mu.Unlock()
 }
 
@@ -249,6 +277,9 @@ func (ss *SyncStack[T]) Clear() {
 func (ss *SyncStack[T]) ToSlice() []T {
 	ss.mu.RLock()
 	defer ss.mu.RUnlock()
+	if ss.s == nil {
+		return nil
+	}
 	return ss.s.ToSlice()
 }
 
@@ -256,5 +287,8 @@ func (ss *SyncStack[T]) ToSlice() []T {
 func (ss *SyncStack[T]) PopN(n int) []T {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
+	if ss.s == nil {
+		return nil
+	}
 	return ss.s.PopN(n)
 }

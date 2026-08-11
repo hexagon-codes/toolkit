@@ -82,6 +82,7 @@ func TestSaveStream_RejectsEscapingSymlinkedStorageSubdirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	registerStoreCleanup(t, s)
 	outside := filepath.Join(parent, "outside")
 	if mkErr := os.Mkdir(outside, 0o755); mkErr != nil {
 		t.Fatal(mkErr)

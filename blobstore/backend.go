@@ -34,6 +34,8 @@ type Blobstore interface {
 	SetTTL(relPath string, ttl time.Duration) error
 	// Purge 清理在 now 之前过期的内容，返回清理数量。
 	Purge(now time.Time) (removed int, err error)
+	// Close 关闭本地存储持有的资源。
+	Close() error
 }
 
 // 编译期断言：本地 Store 满足 Blobstore 抽象接口。
@@ -45,98 +47,76 @@ var _ Blobstore = (*Store)(nil)
 // 内容读进内存：边读边写临时文件、同时计算哈希，读完后按哈希 rename 到最终路径。
 // 适合视频等大文件。ext 不带点；空内容返回错误；ctx 取消会中断读取。
 func (s *Store) SaveStream(ctx context.Context, r io.Reader, ext string) (string, error) {
+	root, release, err := s.acquireRoot()
+	if err != nil {
+		return "", err
+	}
+	defer release()
+	return s.saveStream(root, ctx, r, ext)
+}
+
+func (s *Store) saveStream(root *os.Root, ctx context.Context, r io.Reader, ext string) (relResult string, err error) {
 	if isNilInterface(ctx) {
 		return "", errors.New("blobstore: context must not be nil")
 	}
 	if isNilInterface(r) {
 		return "", errors.New("blobstore: reader must not be nil")
 	}
-	var err error
 	ext, err = normalizeExtension(ext)
 	if err != nil {
 		return "", err
 	}
-	root, err := os.OpenRoot(s.root)
-	if err != nil {
-		return "", fmt.Errorf("open blob root: %w", err)
-	}
-	defer func() {
-		if closeErr := root.Close(); closeErr != nil {
-			_ = closeErr
-		}
-	}()
-
 	// 临时文件落在根目录下，确保与最终路径同一文件系统（rename 原子）。
-	tmp, tmpPath, err := createRootTemp(root, ".", ".stream.")
+	tmp, err := createRootTemp(root, ".", ".stream.", "stream")
 	if err != nil {
 		return "", fmt.Errorf("create tmp: %w", err)
 	}
-	cleanupTmp := func() {
-		if rmErr := root.Remove(tmpPath); rmErr != nil && !os.IsNotExist(rmErr) {
-			_ = rmErr
-		}
-	}
+	defer func() { err = errors.Join(err, tmp.cleanup()) }()
 
 	h := sha256.New()
 	// 边写临时文件边计算哈希；ctxReader 让取消能中断长时间拷贝。
-	n, err := io.Copy(io.MultiWriter(tmp, h), &ctxReader{ctx: ctx, r: r})
+	n, err := io.Copy(io.MultiWriter(tmp.file, h), &ctxReader{ctx: ctx, r: r})
 	if err != nil {
-		if closeErr := tmp.Close(); closeErr != nil {
-			_ = closeErr
-		}
-		cleanupTmp()
 		return "", fmt.Errorf("stream copy: %w", err)
 	}
 	if n == 0 {
-		emptyErr := errors.New("empty data")
-		if closeErr := tmp.Close(); closeErr != nil {
-			emptyErr = errors.Join(emptyErr, closeErr)
-		}
-		cleanupTmp()
-		return "", emptyErr
+		return "", errors.New("empty data")
 	}
-	if err := tmp.Sync(); err != nil {
-		if closeErr := tmp.Close(); closeErr != nil {
-			err = errors.Join(err, closeErr)
-		}
-		cleanupTmp()
-		return "", fmt.Errorf("sync tmp %s: %w", tmpPath, err)
+	if err := tmp.file.Sync(); err != nil {
+		return "", fmt.Errorf("sync tmp %s: %w", tmp.path, err)
 	}
-	if err := tmp.Close(); err != nil {
-		cleanupTmp()
-		return "", fmt.Errorf("close tmp %s: %w", tmpPath, err)
+	if err := tmp.close(); err != nil {
+		return "", err
 	}
 
 	expectedHash := h.Sum(nil)
 	hash := hex.EncodeToString(expectedHash)
 	subdir := time.Now().Format("200601") // YYYYMM
 	relPath := filepath.Join(subdir, hash+"."+ext)
-	if _, err := containedPath(s.root, relPath); err != nil {
-		cleanupTmp()
+	if _, err := containedPath(s.rootPath, relPath); err != nil {
 		return "", err
 	}
 
 	// 仅在既有文件内容确实匹配地址哈希时复用，损坏文件必须被替换。
 	matches, matchErr := storedBlobMatches(root, relPath, expectedHash)
 	if matchErr != nil {
-		cleanupTmp()
 		return "", fmt.Errorf("verify stored blob: %w", matchErr)
 	}
 	if matches {
-		cleanupTmp()
 		return filepath.ToSlash(relPath), nil
 	}
 	if err := root.MkdirAll(subdir, 0o700); err != nil {
-		cleanupTmp()
 		return "", fmt.Errorf("mkdir: %w", err)
 	}
-	if err := root.Rename(tmpPath, relPath); err != nil {
-		if matches, matchErr := storedBlobMatches(root, relPath, expectedHash); matchErr == nil && matches {
-			cleanupTmp()
+	if renameErr := root.Rename(tmp.path, relPath); renameErr != nil {
+		matches, matchErr := storedBlobMatches(root, relPath, expectedHash)
+		if matchErr == nil && matches {
 			return filepath.ToSlash(relPath), nil
 		}
-		cleanupTmp()
-		return "", fmt.Errorf("rename %s→%s: %w", tmpPath, relPath, err)
+		return "", errors.Join(
+			fmt.Errorf("rename %s→%s: %w", tmp.path, relPath, renameErr),
+			wrapOptionalError("verify stored blob after rename failure", matchErr),
+		)
 	}
 	return filepath.ToSlash(relPath), nil
 }

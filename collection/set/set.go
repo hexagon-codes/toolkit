@@ -25,6 +25,9 @@ func New[T comparable](items ...T) *Set[T] {
 
 // NewWithSize 创建指定初始容量的 Set
 func NewWithSize[T comparable](size int) *Set[T] {
+	if size < 0 {
+		size = 0
+	}
 	return &Set[T]{
 		m: make(map[T]struct{}, size),
 	}
@@ -37,6 +40,9 @@ func FromSlice[T comparable](items []T) *Set[T] {
 
 // Add 添加元素
 func (s *Set[T]) Add(items ...T) *Set[T] {
+	if s.m == nil {
+		s.m = make(map[T]struct{}, len(items))
+	}
 	for _, item := range items {
 		s.m[item] = struct{}{}
 	}
@@ -229,7 +235,7 @@ func (s *Set[T]) Equal(other *Set[T]) bool {
 
 // ForEach 遍历所有元素
 func (s *Set[T]) ForEach(fn func(T)) {
-	for item := range s.m {
+	for _, item := range s.ToSlice() {
 		fn(item)
 	}
 }
@@ -237,7 +243,7 @@ func (s *Set[T]) ForEach(fn func(T)) {
 // Filter 过滤元素
 func (s *Set[T]) Filter(predicate func(T) bool) *Set[T] {
 	result := NewWithSize[T](len(s.m))
-	for item := range s.m {
+	for _, item := range s.ToSlice() {
 		if predicate(item) {
 			result.m[item] = struct{}{}
 		}
@@ -247,7 +253,7 @@ func (s *Set[T]) Filter(predicate func(T) bool) *Set[T] {
 
 // Any 判断是否存在满足条件的元素
 func (s *Set[T]) Any(predicate func(T) bool) bool {
-	for item := range s.m {
+	for _, item := range s.ToSlice() {
 		if predicate(item) {
 			return true
 		}
@@ -257,7 +263,7 @@ func (s *Set[T]) Any(predicate func(T) bool) bool {
 
 // All 判断是否所有元素都满足条件
 func (s *Set[T]) All(predicate func(T) bool) bool {
-	for item := range s.m {
+	for _, item := range s.ToSlice() {
 		if !predicate(item) {
 			return false
 		}
@@ -267,7 +273,7 @@ func (s *Set[T]) All(predicate func(T) bool) bool {
 
 // None 判断是否没有元素满足条件
 func (s *Set[T]) None(predicate func(T) bool) bool {
-	for item := range s.m {
+	for _, item := range s.ToSlice() {
 		if predicate(item) {
 			return false
 		}
@@ -278,7 +284,7 @@ func (s *Set[T]) None(predicate func(T) bool) bool {
 // Count 统计满足条件的元素数量
 func (s *Set[T]) Count(predicate func(T) bool) int {
 	count := 0
-	for item := range s.m {
+	for _, item := range s.ToSlice() {
 		if predicate(item) {
 			count++
 		}
@@ -396,7 +402,25 @@ type SyncSet[T comparable] struct {
 var syncSetID atomic.Uint64
 
 func newSyncSetFromSet[T comparable](set *Set[T]) *SyncSet[T] {
+	if set == nil {
+		set = New[T]()
+	}
 	return &SyncSet[T]{s: set, id: syncSetID.Add(1)}
+}
+
+// initLocked 在持有写锁时初始化内部集合。
+func (ss *SyncSet[T]) initLocked() {
+	if ss.s == nil {
+		ss.s = New[T]()
+	}
+}
+
+// setOrEmpty 将未初始化的零值视为空集合。
+func setOrEmpty[T comparable](set *Set[T]) *Set[T] {
+	if set == nil {
+		return &Set[T]{}
+	}
+	return set
 }
 
 // NewSyncSet 创建线程安全的 Set
@@ -407,6 +431,7 @@ func NewSyncSet[T comparable](items ...T) *SyncSet[T] {
 // Add 添加元素（线程安全）
 func (ss *SyncSet[T]) Add(items ...T) *SyncSet[T] {
 	ss.mu.Lock()
+	ss.initLocked()
 	ss.s.Add(items...)
 	ss.mu.Unlock()
 	return ss
@@ -415,7 +440,9 @@ func (ss *SyncSet[T]) Add(items ...T) *SyncSet[T] {
 // Remove 移除元素（线程安全）
 func (ss *SyncSet[T]) Remove(items ...T) *SyncSet[T] {
 	ss.mu.Lock()
-	ss.s.Remove(items...)
+	if ss.s != nil {
+		ss.s.Remove(items...)
+	}
 	ss.mu.Unlock()
 	return ss
 }
@@ -424,28 +451,28 @@ func (ss *SyncSet[T]) Remove(items ...T) *SyncSet[T] {
 func (ss *SyncSet[T]) Contains(item T) bool {
 	ss.mu.RLock()
 	defer ss.mu.RUnlock()
-	return ss.s.Contains(item)
+	return setOrEmpty(ss.s).Contains(item)
 }
 
 // ContainsAll 判断是否包含所有元素（线程安全）
 func (ss *SyncSet[T]) ContainsAll(items ...T) bool {
 	ss.mu.RLock()
 	defer ss.mu.RUnlock()
-	return ss.s.ContainsAll(items...)
+	return setOrEmpty(ss.s).ContainsAll(items...)
 }
 
 // ContainsAny 判断是否包含任意一个元素（线程安全）
 func (ss *SyncSet[T]) ContainsAny(items ...T) bool {
 	ss.mu.RLock()
 	defer ss.mu.RUnlock()
-	return ss.s.ContainsAny(items...)
+	return setOrEmpty(ss.s).ContainsAny(items...)
 }
 
 // Size 返回元素数量（线程安全）
 func (ss *SyncSet[T]) Size() int {
 	ss.mu.RLock()
 	defer ss.mu.RUnlock()
-	return ss.s.Size()
+	return setOrEmpty(ss.s).Size()
 }
 
 // Len 返回元素数量（线程安全）
@@ -457,12 +484,13 @@ func (ss *SyncSet[T]) Len() int {
 func (ss *SyncSet[T]) IsEmpty() bool {
 	ss.mu.RLock()
 	defer ss.mu.RUnlock()
-	return ss.s.IsEmpty()
+	return setOrEmpty(ss.s).IsEmpty()
 }
 
 // Clear 清空所有元素（线程安全）
 func (ss *SyncSet[T]) Clear() {
 	ss.mu.Lock()
+	ss.initLocked()
 	ss.s.Clear()
 	ss.mu.Unlock()
 }
@@ -471,7 +499,7 @@ func (ss *SyncSet[T]) Clear() {
 func (ss *SyncSet[T]) ToSlice() []T {
 	ss.mu.RLock()
 	defer ss.mu.RUnlock()
-	return ss.s.ToSlice()
+	return setOrEmpty(ss.s).ToSlice()
 }
 
 // Values 返回所有元素（线程安全）
@@ -483,13 +511,17 @@ func (ss *SyncSet[T]) Values() []T {
 func (ss *SyncSet[T]) Clone() *SyncSet[T] {
 	ss.mu.RLock()
 	defer ss.mu.RUnlock()
-	return newSyncSetFromSet(ss.s.Clone())
+	return newSyncSetFromSet(setOrEmpty(ss.s).Clone())
 }
 
 // Pop 随机移除并返回一个元素（线程安全）
 func (ss *SyncSet[T]) Pop() (T, bool) {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
+	if ss.s == nil {
+		var zero T
+		return zero, false
+	}
 	return ss.s.Pop()
 }
 
@@ -497,7 +529,7 @@ func (ss *SyncSet[T]) Pop() (T, bool) {
 // 先在锁内复制数据到临时切片，释放锁后再遍历调用回调，避免死锁风险
 func (ss *SyncSet[T]) ForEach(fn func(T)) {
 	ss.mu.RLock()
-	items := ss.s.ToSlice()
+	items := setOrEmpty(ss.s).ToSlice()
 	ss.mu.RUnlock()
 
 	for _, v := range items {
@@ -508,22 +540,41 @@ func (ss *SyncSet[T]) ForEach(fn func(T)) {
 // Filter 过滤元素（线程安全）
 func (ss *SyncSet[T]) Filter(predicate func(T) bool) *SyncSet[T] {
 	ss.mu.RLock()
-	defer ss.mu.RUnlock()
-	return newSyncSetFromSet(ss.s.Filter(predicate))
+	items := setOrEmpty(ss.s).ToSlice()
+	ss.mu.RUnlock()
+	result := NewWithSize[T](len(items))
+	for _, item := range items {
+		if predicate(item) {
+			result.Add(item)
+		}
+	}
+	return newSyncSetFromSet(result)
 }
 
 // Any 判断是否存在满足条件的元素（线程安全）
 func (ss *SyncSet[T]) Any(predicate func(T) bool) bool {
 	ss.mu.RLock()
-	defer ss.mu.RUnlock()
-	return ss.s.Any(predicate)
+	items := setOrEmpty(ss.s).ToSlice()
+	ss.mu.RUnlock()
+	for _, item := range items {
+		if predicate(item) {
+			return true
+		}
+	}
+	return false
 }
 
 // All 判断是否所有元素都满足条件（线程安全）
 func (ss *SyncSet[T]) All(predicate func(T) bool) bool {
 	ss.mu.RLock()
-	defer ss.mu.RUnlock()
-	return ss.s.All(predicate)
+	items := setOrEmpty(ss.s).ToSlice()
+	ss.mu.RUnlock()
+	for _, item := range items {
+		if !predicate(item) {
+			return false
+		}
+	}
+	return true
 }
 
 // Union 并集（线程安全）
@@ -531,7 +582,7 @@ func (ss *SyncSet[T]) All(predicate func(T) bool) bool {
 func (ss *SyncSet[T]) Union(other *SyncSet[T]) *SyncSet[T] {
 	unlock := lockPairRead(ss, other)
 	defer unlock()
-	return newSyncSetFromSet(ss.s.Union(other.s))
+	return newSyncSetFromSet(setOrEmpty(ss.s).Union(setOrEmpty(other.s)))
 }
 
 // Intersection 交集（线程安全）
@@ -539,7 +590,7 @@ func (ss *SyncSet[T]) Union(other *SyncSet[T]) *SyncSet[T] {
 func (ss *SyncSet[T]) Intersection(other *SyncSet[T]) *SyncSet[T] {
 	unlock := lockPairRead(ss, other)
 	defer unlock()
-	return newSyncSetFromSet(ss.s.Intersection(other.s))
+	return newSyncSetFromSet(setOrEmpty(ss.s).Intersection(setOrEmpty(other.s)))
 }
 
 // Difference 差集（线程安全）
@@ -547,15 +598,17 @@ func (ss *SyncSet[T]) Intersection(other *SyncSet[T]) *SyncSet[T] {
 func (ss *SyncSet[T]) Difference(other *SyncSet[T]) *SyncSet[T] {
 	unlock := lockPairRead(ss, other)
 	defer unlock()
-	return newSyncSetFromSet(ss.s.Difference(other.s))
+	return newSyncSetFromSet(setOrEmpty(ss.s).Difference(setOrEmpty(other.s)))
 }
 
 // String 返回字符串表示（线程安全）
 func (ss *SyncSet[T]) String() string {
 	ss.mu.RLock()
 	defer ss.mu.RUnlock()
-	return "Sync" + ss.s.String()
+	return "Sync" + setOrEmpty(ss.s).String()
 }
+
+var syncSetIdentityMu sync.Mutex
 
 // orderByID 按不可变编号排序两个 SyncSet，确保固定的加锁顺序。
 func orderByID[T comparable](a, b *SyncSet[T]) (first, second *SyncSet[T]) {
@@ -570,7 +623,15 @@ func lockPairRead[T comparable](a, b *SyncSet[T]) func() {
 		a.mu.RLock()
 		return a.mu.RUnlock
 	}
+	syncSetIdentityMu.Lock()
+	if a.id == 0 {
+		a.id = syncSetID.Add(1)
+	}
+	if b.id == 0 {
+		b.id = syncSetID.Add(1)
+	}
 	first, second := orderByID(a, b)
+	syncSetIdentityMu.Unlock()
 	first.mu.RLock()
 	second.mu.RLock()
 	return func() {

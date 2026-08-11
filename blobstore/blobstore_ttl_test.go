@@ -14,6 +14,7 @@ func TestBlobstoreTTL_PurgeExpired(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	registerStoreCleanup(t, s)
 
 	// 已过期（ttl 1ns，等待后必过期）
 	expired, _ := s.SaveBytesWithTTL([]byte("expired-content"), "txt", time.Nanosecond)
@@ -51,9 +52,16 @@ func TestBlobstoreTTL_PurgeExpired(t *testing.T) {
 
 // TestBlobstoreTTL_ExpiresAt 验证 ExpiresAt 读取与清除。
 func TestBlobstoreTTL_ExpiresAt(t *testing.T) {
-	s, _ := NewStore(t.TempDir())
+	s, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registerStoreCleanup(t, s)
 
-	rel, _ := s.SaveBytes([]byte("x"), "txt")
+	rel, err := s.SaveBytes([]byte("x"), "txt")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, ok, _ := s.ExpiresAt(rel); ok {
 		t.Fatal("无 TTL 时 ExpiresAt 应 ok=false")
 	}
@@ -85,6 +93,7 @@ func TestBlobstoreTTL_RejectsEscapingPathsAndSymlinks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	registerStoreCleanup(t, s)
 
 	for _, relPath := range []string{
 		"../outside",
@@ -140,6 +149,7 @@ func TestBlobstore_DefaultPermissionsAreOwnerOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	registerStoreCleanup(t, s)
 	relPath, err := s.SaveBytesWithTTL([]byte("private"), "bin", time.Hour)
 	if err != nil {
 		t.Fatal(err)

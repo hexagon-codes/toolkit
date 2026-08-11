@@ -2,31 +2,27 @@ package redis
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/singleflight"
 )
 
-// StableCache 稳定 key 缓存（用于 FindOne 等单条记录查询）
-//
-// 特点：
-// 1. key 确定性强（如 user:{id}, channel:{id}）
-// 2. 精确失效（更新时删除对应 key）
-// 3. 适合单条记录查询
-//
-// 使用场景：
-// - GetUserByID(id)
-// - GetChannelByID(id)
-// - GetAbilityByID(id)
+// StableCache 稳定 key 缓存（用于 FindOne 等单条记录查询）。
+// Redis 客户端由调用方持有；StableCache 不会关闭客户端。
 type StableCache struct {
 	client redis.UniversalClient
 	sf     singleflight.Group
 	opts   Options
+
+	// mutationMu 将主动写入、删除与共享加载回填线性化。
+	mutationMu sync.RWMutex
+	generation atomic.Uint64
 }
 
-// NewStableCache 创建稳定 key 缓存
+// NewStableCache 创建稳定 key 缓存。
 func NewStableCache(client redis.UniversalClient, opts ...Option) *StableCache {
 	return &StableCache{
 		client: client,
@@ -34,14 +30,7 @@ func NewStableCache(client redis.UniversalClient, opts ...Option) *StableCache {
 	}
 }
 
-// GetOrLoad 获取或加载单条记录（稳定 key）
-//
-// 示例：
-//
-//	var user User
-//	err := cache.GetOrLoad(ctx, "user:123", 10*time.Minute, &user, func(ctx context.Context) (any, error) {
-//	    return db.FindUserByID(ctx, 123)
-//	})
+// GetOrLoad 获取或加载单条记录（稳定 key）。
 func (c *StableCache) GetOrLoad(
 	ctx context.Context,
 	key string,
@@ -49,6 +38,9 @@ func (c *StableCache) GetOrLoad(
 	dest any,
 	loader func(ctx context.Context) (any, error),
 ) error {
+	if err := c.validateCall(ctx); err != nil {
+		return err
+	}
 	if key == "" {
 		return ErrInvalidKey
 	}
@@ -60,176 +52,183 @@ func (c *StableCache) GetOrLoad(
 	}
 
 	fullKey := joinPrefix(c.opts.Prefix, key)
+	generation := c.generation.Load()
+	forceReload := false
 
-	// 1. 先查缓存（带超时）
 	readCtx, cancel := withTimeout(ctx, c.opts.ReadTimeout)
-	defer cancel()
-
 	data, err := c.client.Get(readCtx, fullKey).Bytes()
+	cancel()
 	if err == nil {
-		// 缓存命中
-		found, payload, uerr := unpack(data)
-		if uerr != nil {
-			// 数据损坏：删除损坏的 key，继续走 singleflight 加载新数据
-			c.onError(ctx, "stable_unpack", fullKey, uerr)
-			c.asyncDel(ctx, fullKey)
-		} else {
-			if !found {
-				// 负缓存命中
-				return ErrNotFound
+		found, payload, unpackErr := unpack(data)
+		switch {
+		case unpackErr != nil:
+			c.onError(ctx, "stable_unpack", fullKey, unpackErr)
+			forceReload = true
+		case !found:
+			return ErrNotFound
+		default:
+			if decodeErr := c.opts.Codec.Unmarshal(payload, dest); decodeErr == nil {
+				return nil
+			} else {
+				c.onError(ctx, "stable_decode", fullKey, decodeErr)
+				forceReload = true
 			}
-			return c.opts.Codec.Unmarshal(payload, dest)
 		}
 	} else if err != redis.Nil {
-		// Redis 网络错误，降级到直接加载
+		if contextErr := ctx.Err(); contextErr != nil {
+			return contextErr
+		}
 		c.onError(ctx, "stable_get", fullKey, err)
 		return c.loadAndFill(ctx, loader, dest)
 	}
 
-	// 2. 缓存未命中，使用 singleflight 防击穿
-	packed, err, _ := c.sf.Do(fullKey, func() (interface{}, error) {
-		// 使用独立 context，确保发起者取消不影响其他等待者
-		sfCtx := context.WithoutCancel(ctx)
+	resultChannel := c.sf.DoChan(fullKey, func() (any, error) {
+		sharedCtx, sharedCancel := context.WithTimeout(context.WithoutCancel(ctx), defaultLoaderTimeout)
+		defer sharedCancel()
 
-		// 双重检查（带超时）
-		checkCtx, checkCancel := withTimeout(sfCtx, c.opts.ReadTimeout)
-		defer checkCancel()
-		data2, err2 := c.client.Get(checkCtx, fullKey).Bytes()
-		if err2 == nil {
-			return data2, nil
-		}
-
-		// 执行加载（带超时保护，防止 loader 无限阻塞）
-		loaderCtx, loaderCancel := withTimeout(sfCtx, 10*time.Second)
-		defer loaderCancel()
-		val, lerr := loader(loaderCtx)
-		if lerr != nil {
-			if c.isNotFound(lerr) {
-				// 缓存空值（负缓存）
-				packed := packNotFound()
-				c.asyncSet(ctx, fullKey, packed, c.opts.NegativeTTL)
+		if !forceReload {
+			checkCtx, checkCancel := withTimeout(sharedCtx, c.opts.ReadTimeout)
+			secondData, secondErr := c.client.Get(checkCtx, fullKey).Bytes()
+			checkCancel()
+			if secondErr == nil && c.payloadDecodes(secondData, dest) {
+				return secondData, nil
 			}
-			return nil, lerr
+			if secondErr != nil && secondErr != redis.Nil && sharedCtx.Err() == nil {
+				c.onError(sharedCtx, "stable_double_check", fullKey, secondErr)
+			}
 		}
 
-		// 序列化
-		raw, merr := c.opts.Codec.Marshal(val)
-		if merr != nil {
-			return nil, merr
+		value, loadErr := loader(sharedCtx)
+		if loadErr != nil {
+			if c.isNotFound(loadErr) {
+				if writeErr := c.setIfCurrent(sharedCtx, fullKey, packNotFound(), c.opts.NegativeTTL, generation); writeErr != nil {
+					c.onError(sharedCtx, "stable_set_negative", fullKey, writeErr)
+				}
+			}
+			return nil, loadErr
+		}
+		if isNilInterface(value) {
+			return nil, ErrInvalidValue
+		}
+
+		raw, marshalErr := c.opts.Codec.Marshal(value)
+		if marshalErr != nil {
+			return nil, marshalErr
 		}
 		packed := packFound(raw)
-
-		// 异步写入缓存（带 jitter）
-		c.asyncSet(ctx, fullKey, packed, jitterTTL(ttl, c.opts.Jitter))
-
+		if writeErr := c.setIfCurrent(sharedCtx, fullKey, packed, jitterTTL(ttl, c.opts.Jitter), generation); writeErr != nil {
+			// 缓存写失败不应覆盖已经成功的数据源读取。
+			c.onError(sharedCtx, "stable_set", fullKey, writeErr)
+		}
 		return packed, nil
 	})
 
-	if err != nil {
-		return err
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case result := <-resultChannel:
+		if result.Err != nil {
+			return result.Err
+		}
+		packed, ok := result.Val.([]byte)
+		if !ok {
+			return ErrCorrupt
+		}
+		found, payload, unpackErr := unpack(packed)
+		if unpackErr != nil {
+			return unpackErr
+		}
+		if !found {
+			return ErrNotFound
+		}
+		return c.opts.Codec.Unmarshal(payload, dest)
 	}
-
-	// 解包并填充
-	packedBytes, ok := packed.([]byte)
-	if !ok {
-		return ErrCorrupt
-	}
-	found, payload, uerr := unpack(packedBytes)
-	if uerr != nil {
-		return uerr
-	}
-	if !found {
-		return ErrNotFound
-	}
-	return c.opts.Codec.Unmarshal(payload, dest)
 }
 
-// Del 删除指定 key（精确失效）
-//
-// 示例：
-//
-//	cache.Del(ctx, "user:123", "user:456")
+// Del 删除指定 key（精确失效）。
 func (c *StableCache) Del(ctx context.Context, keys ...string) error {
-	if len(keys) == 0 {
-		return nil
+	if err := c.validateCall(ctx); err != nil {
+		return err
 	}
-
 	fullKeys := make([]string, 0, len(keys))
-	for _, k := range keys {
-		if k != "" {
-			fullKeys = append(fullKeys, joinPrefix(c.opts.Prefix, k))
+	for _, key := range keys {
+		if key != "" {
+			fullKeys = append(fullKeys, joinPrefix(c.opts.Prefix, key))
 		}
 	}
-
 	if len(fullKeys) == 0 {
 		return nil
 	}
 
 	writeCtx, cancel := withTimeout(ctx, c.opts.WriteTimeout)
 	defer cancel()
-
+	c.mutationMu.Lock()
+	c.generation.Add(1)
 	err := c.client.Del(writeCtx, fullKeys...).Err()
+	c.mutationMu.Unlock()
 	if err != nil {
 		c.onError(ctx, "stable_del", fullKeys[0], err)
 	}
 	return err
 }
 
-// Set 主动写入缓存（Write-Through 模式）
-//
-// 示例：
-//
-//	cache.Set(ctx, "option:ModelRatio", "{}", 60*time.Minute)
+// Set 主动写入缓存（Write-Through 模式）。
 func (c *StableCache) Set(ctx context.Context, key string, value any, ttl time.Duration) error {
+	if err := c.validateCall(ctx); err != nil {
+		return err
+	}
 	if key == "" {
 		return ErrInvalidKey
 	}
-
-	fullKey := joinPrefix(c.opts.Prefix, key)
-
-	// 序列化
+	if isNilInterface(value) {
+		return ErrInvalidValue
+	}
 	raw, err := c.opts.Codec.Marshal(value)
 	if err != nil {
 		return err
 	}
-	packed := packFound(raw)
-
-	// 写入缓存（带 jitter）
+	fullKey := joinPrefix(c.opts.Prefix, key)
 	writeCtx, cancel := withTimeout(ctx, c.opts.WriteTimeout)
 	defer cancel()
 
-	err = c.client.Set(writeCtx, fullKey, packed, jitterTTL(ttl, c.opts.Jitter)).Err()
+	c.mutationMu.Lock()
+	c.generation.Add(1)
+	err = c.client.Set(writeCtx, fullKey, packFound(raw), jitterTTL(ttl, c.opts.Jitter)).Err()
+	c.mutationMu.Unlock()
 	if err != nil {
 		c.onError(ctx, "stable_set_sync", fullKey, err)
 	}
 	return err
 }
 
-// asyncDel 异步删除损坏的缓存 key（自愈机制）
-func (c *StableCache) asyncDel(ctx context.Context, key string) {
-	task := func() {
-		delCtx, cancel := withTimeout(context.Background(), c.opts.WriteTimeout)
-		defer cancel()
-
-		err := c.client.Del(delCtx, key).Err()
-		if err != nil {
-			c.onError(ctx, "stable_del_corrupt", key, err)
-		}
+func (c *StableCache) setIfCurrent(ctx context.Context, key string, data []byte, ttl time.Duration, generation uint64) error {
+	c.mutationMu.RLock()
+	defer c.mutationMu.RUnlock()
+	if c.generation.Load() != generation {
+		return nil
 	}
-	gopool.Go(task)
+	writeCtx, cancel := withTimeout(context.WithoutCancel(ctx), c.opts.WriteTimeout)
+	defer cancel()
+	return c.client.Set(writeCtx, key, data, ttl).Err()
 }
 
-func (c *StableCache) asyncSet(ctx context.Context, key string, data []byte, ttl time.Duration) {
-	task := func() {
-		writeCtx, cancel := withTimeout(context.Background(), c.opts.WriteTimeout)
-		defer cancel()
-
-		err := c.client.Set(writeCtx, key, data, ttl).Err()
-		if err != nil {
-			c.onError(ctx, "stable_set", key, err)
-		}
+func (c *StableCache) payloadDecodes(packed []byte, destination any) bool {
+	found, payload, err := unpack(packed)
+	if err != nil || !found {
+		return err == nil
 	}
-	gopool.Go(task)
+	probe := newDestinationLike(destination)
+	return probe != nil && c.opts.Codec.Unmarshal(payload, probe) == nil
+}
+
+func (c *StableCache) validateCall(ctx context.Context) error {
+	if c == nil || isNilInterface(c.client) {
+		return ErrInvalidClient
+	}
+	if ctx == nil {
+		return ErrInvalidContext
+	}
+	return ctx.Err()
 }
 
 func (c *StableCache) loadAndFill(ctx context.Context, loader func(ctx context.Context) (any, error), dest any) error {

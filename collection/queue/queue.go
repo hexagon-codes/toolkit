@@ -64,6 +64,9 @@ func (q *Queue[T]) Enqueue(items ...T) *Queue[T] {
 // grow 扩容队列
 func (q *Queue[T]) grow() {
 	newCap := len(q.items) * 2
+	if newCap == 0 {
+		newCap = 8
+	}
 	newItems := make([]T, newCap)
 	// 复制元素到新数组
 	for i := 0; i < q.size; i++ {
@@ -165,16 +168,15 @@ func (q *Queue[T]) Values() []T {
 
 // ForEach 遍历所有元素
 func (q *Queue[T]) ForEach(fn func(T)) {
-	for i := 0; i < q.size; i++ {
-		fn(q.items[(q.head+i)%len(q.items)])
+	for _, item := range q.ToSlice() {
+		fn(item)
 	}
 }
 
 // Filter 过滤元素
 func (q *Queue[T]) Filter(predicate func(T) bool) *Queue[T] {
 	result := NewWithCapacity[T](q.size)
-	for i := 0; i < q.size; i++ {
-		item := q.items[(q.head+i)%len(q.items)]
+	for _, item := range q.ToSlice() {
 		if predicate(item) {
 			result.Enqueue(item)
 		}
@@ -238,6 +240,9 @@ func NewDequeWithCapacity[T any](capacity int) *Deque[T] {
 // growDeque 扩容双端队列
 func (d *Deque[T]) growDeque() {
 	newCap := len(d.items) * 2
+	if newCap == 0 {
+		newCap = 8
+	}
 	newItems := make([]T, newCap)
 	// 复制元素到新数组
 	for i := 0; i < d.size; i++ {
@@ -405,6 +410,9 @@ func (h *priorityHeap[T]) Pop() any {
 // NewPriorityQueue 创建新的优先级队列
 // less 函数定义优先级：返回 true 表示 a 优先级高于 b
 func NewPriorityQueue[T any](less func(a, b T) bool) *PriorityQueue[T] {
+	if less == nil {
+		panic("queue: priority comparator is nil")
+	}
 	pq := &PriorityQueue[T]{
 		heap: &priorityHeap[T]{
 			items: make([]T, 0),
@@ -484,6 +492,7 @@ func (pq *PriorityQueue[T]) IsEmpty() bool {
 
 // Clear 清空队列
 func (pq *PriorityQueue[T]) Clear() {
+	clear(pq.heap.items)
 	pq.heap.items = pq.heap.items[:0]
 }
 
@@ -523,9 +532,17 @@ func NewSyncQueue[T any]() *SyncQueue[T] {
 	}
 }
 
+// initLocked 在持有写锁时初始化内部队列。
+func (sq *SyncQueue[T]) initLocked() {
+	if sq.q == nil {
+		sq.q = New[T]()
+	}
+}
+
 // Enqueue 入队
 func (sq *SyncQueue[T]) Enqueue(items ...T) {
 	sq.mu.Lock()
+	sq.initLocked()
 	sq.q.Enqueue(items...)
 	sq.mu.Unlock()
 }
@@ -534,6 +551,10 @@ func (sq *SyncQueue[T]) Enqueue(items ...T) {
 func (sq *SyncQueue[T]) Dequeue() (T, bool) {
 	sq.mu.Lock()
 	defer sq.mu.Unlock()
+	if sq.q == nil {
+		var zero T
+		return zero, false
+	}
 	return sq.q.Dequeue()
 }
 
@@ -541,6 +562,10 @@ func (sq *SyncQueue[T]) Dequeue() (T, bool) {
 func (sq *SyncQueue[T]) Peek() (T, bool) {
 	sq.mu.RLock()
 	defer sq.mu.RUnlock()
+	if sq.q == nil {
+		var zero T
+		return zero, false
+	}
 	return sq.q.Peek()
 }
 
@@ -548,6 +573,9 @@ func (sq *SyncQueue[T]) Peek() (T, bool) {
 func (sq *SyncQueue[T]) Size() int {
 	sq.mu.RLock()
 	defer sq.mu.RUnlock()
+	if sq.q == nil {
+		return 0
+	}
 	return sq.q.Size()
 }
 
@@ -555,13 +583,18 @@ func (sq *SyncQueue[T]) Size() int {
 func (sq *SyncQueue[T]) IsEmpty() bool {
 	sq.mu.RLock()
 	defer sq.mu.RUnlock()
+	if sq.q == nil {
+		return true
+	}
 	return sq.q.IsEmpty()
 }
 
 // Clear 清空队列
 func (sq *SyncQueue[T]) Clear() {
 	sq.mu.Lock()
-	sq.q.Clear()
+	if sq.q != nil {
+		sq.q.Clear()
+	}
 	sq.mu.Unlock()
 }
 
@@ -578,9 +611,17 @@ func NewSyncDeque[T any]() *SyncDeque[T] {
 	}
 }
 
+// initLocked 在持有写锁时初始化内部双端队列。
+func (sd *SyncDeque[T]) initLocked() {
+	if sd.d == nil {
+		sd.d = NewDeque[T]()
+	}
+}
+
 // PushBack 从队尾添加元素
 func (sd *SyncDeque[T]) PushBack(items ...T) {
 	sd.mu.Lock()
+	sd.initLocked()
 	sd.d.PushBack(items...)
 	sd.mu.Unlock()
 }
@@ -588,6 +629,7 @@ func (sd *SyncDeque[T]) PushBack(items ...T) {
 // PushFront 从队首添加元素
 func (sd *SyncDeque[T]) PushFront(items ...T) {
 	sd.mu.Lock()
+	sd.initLocked()
 	sd.d.PushFront(items...)
 	sd.mu.Unlock()
 }
@@ -596,6 +638,10 @@ func (sd *SyncDeque[T]) PushFront(items ...T) {
 func (sd *SyncDeque[T]) PopBack() (T, bool) {
 	sd.mu.Lock()
 	defer sd.mu.Unlock()
+	if sd.d == nil {
+		var zero T
+		return zero, false
+	}
 	return sd.d.PopBack()
 }
 
@@ -603,6 +649,10 @@ func (sd *SyncDeque[T]) PopBack() (T, bool) {
 func (sd *SyncDeque[T]) PopFront() (T, bool) {
 	sd.mu.Lock()
 	defer sd.mu.Unlock()
+	if sd.d == nil {
+		var zero T
+		return zero, false
+	}
 	return sd.d.PopFront()
 }
 
@@ -610,6 +660,10 @@ func (sd *SyncDeque[T]) PopFront() (T, bool) {
 func (sd *SyncDeque[T]) Front() (T, bool) {
 	sd.mu.RLock()
 	defer sd.mu.RUnlock()
+	if sd.d == nil {
+		var zero T
+		return zero, false
+	}
 	return sd.d.Front()
 }
 
@@ -617,6 +671,10 @@ func (sd *SyncDeque[T]) Front() (T, bool) {
 func (sd *SyncDeque[T]) Back() (T, bool) {
 	sd.mu.RLock()
 	defer sd.mu.RUnlock()
+	if sd.d == nil {
+		var zero T
+		return zero, false
+	}
 	return sd.d.Back()
 }
 
@@ -624,6 +682,9 @@ func (sd *SyncDeque[T]) Back() (T, bool) {
 func (sd *SyncDeque[T]) Size() int {
 	sd.mu.RLock()
 	defer sd.mu.RUnlock()
+	if sd.d == nil {
+		return 0
+	}
 	return sd.d.Size()
 }
 
@@ -631,13 +692,18 @@ func (sd *SyncDeque[T]) Size() int {
 func (sd *SyncDeque[T]) IsEmpty() bool {
 	sd.mu.RLock()
 	defer sd.mu.RUnlock()
+	if sd.d == nil {
+		return true
+	}
 	return sd.d.IsEmpty()
 }
 
 // Clear 清空队列
 func (sd *SyncDeque[T]) Clear() {
 	sd.mu.Lock()
-	sd.d.Clear()
+	if sd.d != nil {
+		sd.d.Clear()
+	}
 	sd.mu.Unlock()
 }
 

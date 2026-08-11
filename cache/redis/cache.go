@@ -22,6 +22,15 @@ var (
 	// ErrInvalidLoader 表示 loader 为空。
 	ErrInvalidLoader = errors.New("cache: loader is nil")
 
+	// ErrInvalidContext 表示调用方传入了 nil context。
+	ErrInvalidContext = errors.New("cache: context must not be nil")
+
+	// ErrInvalidClient 表示 Redis 客户端为 nil 或 typed nil。
+	ErrInvalidClient = errors.New("cache: Redis client must not be nil")
+
+	// ErrInvalidValue 表示 loader 在成功路径返回了 nil 或 typed nil。
+	ErrInvalidValue = errors.New("cache: loader returned a nil value")
+
 	// ErrCorrupt 表示缓存内容损坏，例如 value 被其他系统写坏。
 	ErrCorrupt = errors.New("cache: corrupt payload")
 )
@@ -55,6 +64,9 @@ func (JSONCodec) Marshal(v any) ([]byte, error) { return json.Marshal(v) }
 func (JSONCodec) Unmarshal(b []byte, v any) error { return json.Unmarshal(b, v) }
 
 const (
+	// defaultLoaderTimeout 限制共享 loader 的最长执行时间。
+	defaultLoaderTimeout = 10 * time.Second
+
 	// DefaultMaxTTL 默认最大 TTL（用于 UnstableCache）
 	DefaultMaxTTL = 15 * time.Minute
 	// StableCacheTTL 稳定 Key TTL（单条记录查询）
@@ -131,7 +143,7 @@ func applyOptions(opts ...Option) Options {
 			fn(&o)
 		}
 	}
-	if o.Codec == nil {
+	if isNilInterface(o.Codec) {
 		o.Codec = JSONCodec{}
 	}
 	if o.Now == nil {
@@ -217,6 +229,27 @@ func ensureDestPtr(dest any) error {
 	return nil
 }
 
+func newDestinationLike(destination any) any {
+	value := reflect.ValueOf(destination)
+	if value.Kind() != reflect.Pointer || value.IsNil() {
+		return nil
+	}
+	return reflect.New(value.Elem().Type()).Interface()
+}
+
+func isNilInterface(value any) bool {
+	if value == nil {
+		return true
+	}
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return reflected.IsNil()
+	default:
+		return false
+	}
+}
+
 // WithTimeout 创建超时 context；若 parent 的 deadline 更早，则直接复用 parent。
 func WithTimeout(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
 	if d <= 0 {
@@ -274,6 +307,9 @@ func loadAndFillCommon(ctx context.Context, codec Codec, loader func(ctx context
 	if err != nil {
 		return err
 	}
+	if isNilInterface(val) {
+		return ErrInvalidValue
+	}
 	if dest != nil {
 		raw, merr := codec.Marshal(val)
 		if merr != nil {
@@ -311,8 +347,15 @@ func unpack(packed []byte) (found bool, data []byte, err error) {
 	if len(packed) == 0 {
 		return false, nil, ErrCorrupt
 	}
-	if packed[0] == 0 {
+	switch packed[0] {
+	case 0:
+		if len(packed) != 1 {
+			return false, nil, ErrCorrupt
+		}
 		return false, nil, nil
+	case 1:
+		return true, packed[1:], nil
+	default:
+		return false, nil, ErrCorrupt
 	}
-	return true, packed[1:], nil
 }

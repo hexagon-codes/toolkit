@@ -87,7 +87,7 @@ func (c *Cache) SetWithTTL(key string, value any, ttl time.Duration) {
 // getRawItem 读取裸条目，逻辑与 getItem 对齐（过期惰性删除 + LRU 访问时间刷新），
 // 但只对 isRaw=true 的条目生效，并返回原始 any 值而非 packed 字节。
 func (c *Cache) getRawItem(fullKey string) (any, bool) {
-	now := c.opts.Now()
+	now := c.now()
 
 	// 读锁读取；accessedAt 通过原子操作更新，无需升级写锁
 	c.mu.RLock()
@@ -104,12 +104,12 @@ func (c *Cache) getRawItem(fullKey string) (any, bool) {
 	}
 
 	// 过期检查：需要写锁删除，升级锁
-	if !item.expireAt.IsZero() && now.After(item.expireAt) {
+	if !item.expireAt.IsZero() && !now.Before(item.expireAt) {
 		c.mu.RUnlock()
 		c.mu.Lock()
 		// 双重检查：获取写锁期间可能已被其他 goroutine 删除/替换
 		if existing, exists := c.items[fullKey]; exists &&
-			!existing.expireAt.IsZero() && now.After(existing.expireAt) {
+			!existing.expireAt.IsZero() && !now.Before(existing.expireAt) {
 			delete(c.items, fullKey)
 		}
 		c.mu.Unlock()
@@ -127,7 +127,7 @@ func (c *Cache) getRawItem(fullKey string) (any, bool) {
 // setRawItemWithGen 写入裸条目，复用 setItemWithGen 的版本号保护与 LRU 淘汰逻辑，
 // 但 ttl<=0 时语义为"无过期写入"（expireAt 置零），而非丢弃写入。
 func (c *Cache) setRawItemWithGen(fullKey string, value any, ttl time.Duration, expectedGen uint64) {
-	now := c.opts.Now()
+	now := c.now()
 
 	// ttl<=0 表示永不过期：expireAt 置零值，过期检查会跳过它
 	var exp time.Time

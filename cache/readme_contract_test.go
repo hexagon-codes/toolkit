@@ -37,7 +37,7 @@ func TestCacheReadmeStandaloneExamplesCompileWithCanonicalRedisContract(t *testi
 
 	goMod := fmt.Sprintf(`module cache-readme-examples
 
-go 1.25.7
+go 1.25.12
 
 require github.com/hexagon-codes/toolkit v0.0.0
 

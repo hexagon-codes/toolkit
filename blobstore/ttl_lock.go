@@ -12,21 +12,15 @@ type ttlFileLock struct {
 	file *os.File
 }
 
-func (s *Store) acquireTTLFileLock(exclusive bool) (*ttlFileLock, error) {
-	root, err := os.OpenRoot(s.root)
-	if err != nil {
-		return nil, fmt.Errorf("blobstore: open root for ttl lock: %w", err)
-	}
+func (s *Store) acquireTTLFileLock(root *os.Root, exclusive bool) (*ttlFileLock, error) {
 	file, openErr := root.OpenFile(ttlLockFileName, os.O_CREATE|os.O_RDWR, 0o600)
-	closeRootErr := root.Close()
-	if openErr != nil || closeRootErr != nil {
+	if openErr != nil {
 		var closeFileErr error
 		if file != nil {
 			closeFileErr = file.Close()
 		}
 		return nil, errors.Join(
 			wrapOptionalError("blobstore: open ttl lock", openErr),
-			wrapOptionalError("blobstore: close root after opening ttl lock", closeRootErr),
 			wrapOptionalError("blobstore: close ttl lock after open failure", closeFileErr),
 		)
 	}

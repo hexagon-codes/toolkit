@@ -24,27 +24,26 @@ const (
 //
 // 相同内容共享同一相对路径，因此 TTL 也以路径为粒度，最后一次设置生效。
 func (s *Store) SetTTL(relPath string, ttl time.Duration) (err error) {
+	root, release, err := s.acquireRoot()
+	if err != nil {
+		return err
+	}
+	defer release()
 	s.ttlMu.Lock()
 	defer s.ttlMu.Unlock()
-	lock, err := s.acquireTTLFileLock(true)
+	lock, err := s.acquireTTLFileLock(root, true)
 	if err != nil {
 		return err
 	}
 	defer func() { err = errors.Join(err, lock.close()) }()
-	return s.setTTL(relPath, ttl)
+	return s.setTTL(root, relPath, ttl)
 }
 
-func (s *Store) setTTL(relPath string, ttl time.Duration) (err error) {
+func (s *Store) setTTL(root *os.Root, relPath string, ttl time.Duration) (err error) {
 	relPath, err = normalizeStorePath(relPath)
 	if err != nil {
 		return err
 	}
-	root, err := os.OpenRoot(s.root)
-	if err != nil {
-		return fmt.Errorf("blobstore: open root: %w", err)
-	}
-	defer func() { err = errors.Join(err, root.Close()) }()
-
 	sidecarPath := relPath + ttlSuffix
 	if ttl <= 0 {
 		if removeErr := root.Remove(sidecarPath); removeErr != nil && !os.IsNotExist(removeErr) {
@@ -74,32 +73,22 @@ func (s *Store) setTTL(relPath string, ttl time.Duration) (err error) {
 
 func writeTTLMetadata(root *os.Root, sidecarPath string, data []byte) (err error) {
 	dir := filepath.Dir(sidecarPath)
-	tmp, tmpPath, err := createRootTemp(root, dir, filepath.Base(sidecarPath)+".tmp.")
+	tmp, err := createRootTemp(root, dir, filepath.Base(sidecarPath)+".tmp.", "ttl metadata")
 	if err != nil {
 		return fmt.Errorf("create temporary ttl metadata: %w", err)
 	}
-	tmpOpen := true
-	defer func() {
-		if tmpOpen {
-			err = errors.Join(err, tmp.Close())
-		}
-		if removeErr := root.Remove(tmpPath); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
-			err = errors.Join(err, fmt.Errorf("remove temporary ttl metadata: %w", removeErr))
-		}
-	}()
+	defer func() { err = errors.Join(err, tmp.cleanup()) }()
 
-	if _, err := tmp.Write(data); err != nil {
+	if _, err := tmp.file.Write(data); err != nil {
 		return fmt.Errorf("write temporary ttl metadata: %w", err)
 	}
-	if err := tmp.Sync(); err != nil {
+	if err := tmp.file.Sync(); err != nil {
 		return fmt.Errorf("sync temporary ttl metadata: %w", err)
 	}
-	if err := tmp.Close(); err != nil {
-		tmpOpen = false
-		return fmt.Errorf("close temporary ttl metadata: %w", err)
+	if err := tmp.close(); err != nil {
+		return err
 	}
-	tmpOpen = false
-	if err := root.Rename(tmpPath, sidecarPath); err != nil {
+	if err := root.Rename(tmp.path, sidecarPath); err != nil {
 		return fmt.Errorf("replace ttl metadata: %w", err)
 	}
 	return nil
@@ -107,19 +96,24 @@ func writeTTLMetadata(root *os.Root, sidecarPath string, data []byte) (err error
 
 // SaveBytesWithTTL 落盘并设置存活时长，返回相对路径。
 func (s *Store) SaveBytesWithTTL(data []byte, ext string, ttl time.Duration) (relPath string, err error) {
+	root, release, err := s.acquireRoot()
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	s.ttlMu.Lock()
 	defer s.ttlMu.Unlock()
-	lock, err := s.acquireTTLFileLock(true)
+	lock, err := s.acquireTTLFileLock(root, true)
 	if err != nil {
 		return "", err
 	}
 	defer func() { err = errors.Join(err, lock.close()) }()
 
-	relPath, err = s.SaveBytes(data, ext)
+	relPath, err = s.saveBytes(root, data, ext)
 	if err != nil {
 		return "", err
 	}
-	if err := s.setTTL(relPath, ttl); err != nil {
+	if err := s.setTTL(root, relPath, ttl); err != nil {
 		return relPath, err
 	}
 	return relPath, nil
@@ -127,9 +121,14 @@ func (s *Store) SaveBytesWithTTL(data []byte, ext string, ttl time.Duration) (re
 
 // ExpiresAt 返回相对路径的过期时刻；ok=false 表示未设置 TTL。
 func (s *Store) ExpiresAt(relPath string) (t time.Time, ok bool, err error) {
+	root, release, err := s.acquireRoot()
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	defer release()
 	s.ttlMu.RLock()
 	defer s.ttlMu.RUnlock()
-	lock, err := s.acquireTTLFileLock(false)
+	lock, err := s.acquireTTLFileLock(root, false)
 	if err != nil {
 		return time.Time{}, false, err
 	}
@@ -139,12 +138,6 @@ func (s *Store) ExpiresAt(relPath string) (t time.Time, ok bool, err error) {
 	if err != nil {
 		return time.Time{}, false, err
 	}
-	root, err := os.OpenRoot(s.root)
-	if err != nil {
-		return time.Time{}, false, fmt.Errorf("blobstore: open root: %w", err)
-	}
-	defer func() { err = errors.Join(err, root.Close()) }()
-
 	expiry, err := readTTL(root, relPath+ttlSuffix)
 	if os.IsNotExist(err) {
 		return time.Time{}, false, nil
@@ -159,19 +152,18 @@ func (s *Store) ExpiresAt(relPath string) (t time.Time, ok bool, err error) {
 //
 // 未设置 TTL 的 blob 永不删除。损坏或不可读的元数据会汇总为错误，其他条目仍会继续清理。
 func (s *Store) Purge(now time.Time) (purged int, err error) {
+	root, release, err := s.acquireRoot()
+	if err != nil {
+		return 0, err
+	}
+	defer release()
 	s.ttlMu.Lock()
 	defer s.ttlMu.Unlock()
-	lock, err := s.acquireTTLFileLock(true)
+	lock, err := s.acquireTTLFileLock(root, true)
 	if err != nil {
 		return 0, err
 	}
 	defer func() { err = errors.Join(err, lock.close()) }()
-
-	root, err := os.OpenRoot(s.root)
-	if err != nil {
-		return 0, fmt.Errorf("blobstore: open root: %w", err)
-	}
-	defer func() { err = errors.Join(err, root.Close()) }()
 
 	var purgeErr error
 	walkErr := fs.WalkDir(root.FS(), ".", func(entryPath string, entry fs.DirEntry, walkErr error) error {

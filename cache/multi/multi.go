@@ -6,7 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
+	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 var (
@@ -42,6 +46,12 @@ var (
 
 	// ErrInvalidContext 表示调用方传入了 nil context。
 	ErrInvalidContext = errors.New("multi-cache: context must not be nil")
+
+	// ErrInvalidValue 表示 loader 在成功路径返回了 nil 或 typed nil。
+	ErrInvalidValue = errors.New("multi-cache: loader returned a nil value")
+
+	// ErrClosed 表示多层缓存已经关闭。
+	ErrClosed = errors.New("multi-cache: cache is closed")
 )
 
 // Layer 缓存层接口（本地缓存和 Redis 缓存都实现了这个接口）
@@ -87,6 +97,14 @@ type Cache struct {
 	layers        []LayerConfig
 	opts          Options
 	backfillSlots chan struct{}
+	sf            singleflight.Group
+	keyGates      keyGateSet
+
+	lifecycleMu     sync.Mutex
+	lifecycleCtx    context.Context
+	lifecycleCancel context.CancelFunc
+	backfillWG      sync.WaitGroup
+	closed          bool
 }
 
 // Options 多层缓存配置
@@ -203,10 +221,13 @@ func NewCache(layers []LayerConfig, opts ...Option) (*Cache, error) {
 	if err != nil {
 		return nil, err
 	}
+	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
 	return &Cache{
-		layers:        layerCopy,
-		opts:          options,
-		backfillSlots: make(chan struct{}, options.BackfillConcurrency),
+		layers:          layerCopy,
+		opts:            options,
+		backfillSlots:   make(chan struct{}, options.BackfillConcurrency),
+		lifecycleCtx:    lifecycleCtx,
+		lifecycleCancel: lifecycleCancel,
 	}, nil
 }
 
@@ -251,6 +272,12 @@ func (c *Cache) GetOrLoad(
 	if ctx == nil {
 		return ErrInvalidContext
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.isClosed() {
+		return ErrClosed
+	}
 	if key == "" {
 		return ErrInvalidKey
 	}
@@ -285,6 +312,9 @@ func (c *Cache) GetOrLoad(
 		if errors.Is(err, errCacheMiss) {
 			continue
 		}
+		if contextErr := ctx.Err(); contextErr != nil {
+			return contextErr
+		}
 		// ErrNotFound 来自负缓存命中，直接向外返回
 		if c.isNotFound(err) {
 			return ErrNotFound
@@ -294,29 +324,48 @@ func (c *Cache) GetOrLoad(
 	}
 
 	// 2. 所有层都未命中，调用 loader（只调用一次）
-	val, err := loader(ctx)
-	if err != nil {
-		if c.isNotFound(err) {
-			return ErrNotFound
+	resultChannel := c.sf.DoChan(key, func() (any, error) {
+		loaderContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), sourceLoadTimeout)
+		defer cancel()
+		value, loadErr := loader(loaderContext)
+		if loadErr != nil {
+			return nil, loadErr
 		}
-		return err
-	}
+		if isNilLayerValue(value) {
+			return nil, ErrInvalidValue
+		}
+		if !c.opts.SkipBackfill {
+			c.backfillAll(loaderContext, key, value)
+		}
+		return value, nil
+	})
 
-	// 3. 将结果复制到 dest
+	var val any
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case result := <-resultChannel:
+		if result.Err != nil {
+			if c.isNotFound(result.Err) {
+				return ErrNotFound
+			}
+			return result.Err
+		}
+		val = result.Val
+	}
+	if isNilLayerValue(val) {
+		return ErrInvalidValue
+	}
 	if err := copyValue(val, dest); err != nil {
 		return err
 	}
-
-	// 4. 回填到所有层
-	if !c.opts.SkipBackfill {
-		c.backfillAll(ctx, key, val)
-	}
-
 	return nil
 }
 
 // backfillTimeout 回填操作的超时时间
 const backfillTimeout = 5 * time.Second
+
+const sourceLoadTimeout = 10 * time.Second
 
 const defaultBackfillConcurrency = 4
 
@@ -355,26 +404,51 @@ func (c *Cache) scheduleBackfill(ctx context.Context, key string, value any, lay
 		c.onError(ctx, "multi", "backfill", key, ErrBackfillSaturated)
 		return
 	}
+	if !c.registerBackfill() {
+		<-c.backfillSlots
+		c.onError(ctx, "multi", "backfill", key, ErrClosed)
+		return
+	}
 
 	layers = append([]LayerConfig(nil), layers...)
 	go func() {
-		defer func() { <-c.backfillSlots }()
+		var callbackErrors []struct {
+			layer string
+			err   error
+		}
+		defer func() {
+			<-c.backfillSlots
+			c.backfillWG.Done()
+			for _, callbackError := range callbackErrors {
+				c.onError(context.WithoutCancel(ctx), callbackError.layer, "backfill", key, callbackError.err)
+			}
+		}()
 		// 使用 WithoutCancel 脱离原始请求的取消信号，但保留 trace/value 等上下文信息
 		backfillCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), backfillTimeout)
+		stopLifecycleCancel := context.AfterFunc(c.lifecycleCtx, cancel)
+		defer stopLifecycleCancel()
 		defer cancel()
 
+		unlock, lockErr := c.keyGates.acquire(backfillCtx, key)
+		if lockErr != nil {
+			return
+		}
 		for _, layer := range layers {
 			var temp any
 			err := layer.Layer.GetOrLoad(backfillCtx, key, layer.TTL, &temp, func(context.Context) (any, error) {
 				return snapshot, nil
 			})
 			if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
-				c.onError(backfillCtx, layer.Name, "backfill", key, err)
+				callbackErrors = append(callbackErrors, struct {
+					layer string
+					err   error
+				}{layer: layer.Name, err: err})
 			}
 			if backfillCtx.Err() != nil {
-				return
+				break
 			}
 		}
+		unlock()
 	}()
 }
 
@@ -390,14 +464,59 @@ func (c *Cache) Del(ctx context.Context, keys ...string) error {
 	if len(keys) == 0 {
 		return nil
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.isClosed() {
+		return ErrClosed
+	}
+
+	unique := make(map[string]struct{}, len(keys))
+	orderedKeys := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+		if _, exists := unique[key]; exists {
+			continue
+		}
+		unique[key] = struct{}{}
+		orderedKeys = append(orderedKeys, key)
+	}
+	if len(orderedKeys) == 0 {
+		return nil
+	}
+	sort.Strings(orderedKeys)
+	unlocks := make([]func(), 0, len(orderedKeys))
+	for _, key := range orderedKeys {
+		unlock, err := c.keyGates.acquire(ctx, key)
+		if err != nil {
+			for index := len(unlocks) - 1; index >= 0; index-- {
+				unlocks[index]()
+			}
+			return err
+		}
+		unlocks = append(unlocks, unlock)
+	}
 
 	var deleteErr error
+	type callbackError struct {
+		layer string
+		err   error
+	}
+	callbackErrors := make([]callbackError, 0)
 	for _, layer := range c.layers {
-		err := layer.Layer.Del(ctx, keys...)
+		err := layer.Layer.Del(ctx, orderedKeys...)
 		if err != nil {
-			c.onError(ctx, layer.Name, "del", keys[0], err)
+			callbackErrors = append(callbackErrors, callbackError{layer: layer.Name, err: err})
 			deleteErr = errors.Join(deleteErr, err)
 		}
+	}
+	for index := len(unlocks) - 1; index >= 0; index-- {
+		unlocks[index]()
+	}
+	for _, callback := range callbackErrors {
+		c.onError(ctx, callback.layer, "del", orderedKeys[0], callback.err)
 	}
 	return deleteErr
 }
@@ -405,6 +524,37 @@ func (c *Cache) Del(ctx context.Context, keys ...string) error {
 // LayerCount 返回缓存层数
 func (c *Cache) LayerCount() int {
 	return len(c.layers)
+}
+
+// Close 取消并等待实例拥有的异步回填；底层 Layer 的生命周期仍由调用方管理。
+func (c *Cache) Close() error {
+	if c == nil {
+		return nil
+	}
+	c.lifecycleMu.Lock()
+	if !c.closed {
+		c.closed = true
+		c.lifecycleCancel()
+	}
+	c.lifecycleMu.Unlock()
+	c.backfillWG.Wait()
+	return nil
+}
+
+func (c *Cache) registerBackfill() bool {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	if c.closed {
+		return false
+	}
+	c.backfillWG.Add(1)
+	return true
+}
+
+func (c *Cache) isClosed() bool {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	return c.closed
 }
 
 // isNotFound 判断是否是 NotFound 错误
@@ -428,8 +578,8 @@ func (c *Cache) onError(ctx context.Context, layer, op, key string, err error) {
 // copyValue 将 src 的值复制到 dst
 // 使用 JSON 序列化/反序列化确保深拷贝
 func copyValue(src, dst any) error {
-	if src == nil {
-		return nil
+	if isNilLayerValue(src) {
+		return ErrInvalidValue
 	}
 
 	// 使用 reflect 进行类型检查和赋值
@@ -463,4 +613,17 @@ func copyValue(src, dst any) error {
 		return err
 	}
 	return json.Unmarshal(data, dst)
+}
+
+func isNilLayerValue(value any) bool {
+	if value == nil {
+		return true
+	}
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return reflected.IsNil()
+	default:
+		return false
+	}
 }

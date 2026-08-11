@@ -19,7 +19,17 @@ func newTestStore(t *testing.T) *Store {
 	if err != nil {
 		t.Fatalf("NewStore failed: %v", err)
 	}
+	registerStoreCleanup(t, s)
 	return s
+}
+
+func registerStoreCleanup(t *testing.T, store *Store) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("Close failed: %v", err)
+		}
+	})
 }
 
 // TestSaveBytes_Basic 基本落盘 + 路径归一化
@@ -136,6 +146,7 @@ func TestSaveBytes_ReturnedPathIsContainedByRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	registerStoreCleanup(t, s)
 
 	if _, saveErr := s.SaveBytes([]byte("containment"), "../../escaped"); saveErr == nil {
 		t.Fatal("path-escaping extension must be rejected")
@@ -168,6 +179,7 @@ func TestSaveBytes_RejectsSymlinkedStorageSubdirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	registerStoreCleanup(t, s)
 	outside := filepath.Join(parent, "outside")
 	if mkErr := os.Mkdir(outside, 0o755); mkErr != nil {
 		t.Fatal(mkErr)
@@ -248,6 +260,7 @@ func TestOpen_BlocksEscapingSymlink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	registerStoreCleanup(t, s)
 	outside := filepath.Join(parent, "outside")
 	if err := os.Mkdir(outside, 0o755); err != nil {
 		t.Fatal(err)

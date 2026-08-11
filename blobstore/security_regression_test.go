@@ -50,7 +50,16 @@ func TestSetTTLReplacesMetadataAtomically(t *testing.T) {
 	}
 
 	metadataPath := filepath.Join(store.Root(), filepath.FromSlash(relPath)) + ttlSuffix
-	before, err := os.Stat(metadataPath)
+	previous, err := os.Open(metadataPath)
+	if err != nil {
+		t.Fatalf("open first TTL metadata: %v", err)
+	}
+	t.Cleanup(func() {
+		if closeErr := previous.Close(); closeErr != nil {
+			t.Errorf("close first TTL metadata: %v", closeErr)
+		}
+	})
+	before, err := previous.Stat()
 	if err != nil {
 		t.Fatalf("stat first TTL metadata: %v", err)
 	}
@@ -63,6 +72,17 @@ func TestSetTTLReplacesMetadataAtomically(t *testing.T) {
 	}
 	if os.SameFile(before, after) {
 		t.Fatal("SetTTL updated metadata in place; want atomic replacement")
+	}
+	oldMetadata, err := io.ReadAll(previous)
+	if err != nil {
+		t.Fatalf("read first TTL metadata: %v", err)
+	}
+	newMetadata, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatalf("read second TTL metadata: %v", err)
+	}
+	if bytes.Equal(oldMetadata, newMetadata) {
+		t.Fatalf("TTL metadata content was not replaced: %q", newMetadata)
 	}
 }
 
@@ -144,12 +164,14 @@ func TestNewStoreRejectsFilesystemRoot(t *testing.T) {
 	}
 
 	if store, err := NewStore(root); err == nil {
+		registerStoreCleanup(t, store)
 		t.Fatalf("NewStore(%q) = %#v, want error", root, store)
 	}
 }
 
 func TestNewStoreRejectsEmptyRoot(t *testing.T) {
 	if store, err := NewStore(""); err == nil {
+		registerStoreCleanup(t, store)
 		t.Fatalf("NewStore with an empty root = %#v, want error", store)
 	}
 }
@@ -163,9 +185,11 @@ func TestNewStoreTightensExistingRootPermissions(t *testing.T) {
 	if err := os.Mkdir(root, 0o755); err != nil {
 		t.Fatalf("create existing root: %v", err)
 	}
-	if _, err := NewStore(root); err != nil {
+	store, err := NewStore(root)
+	if err != nil {
 		t.Fatalf("NewStore failed: %v", err)
 	}
+	registerStoreCleanup(t, store)
 	info, err := os.Stat(root)
 	if err != nil {
 		t.Fatalf("stat root: %v", err)
@@ -286,6 +310,7 @@ func TestIndependentStoresDoNotLoseSuccessfulTTLRenewal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore for shared root failed: %v", err)
 	}
+	registerStoreCleanup(t, renewStore)
 
 	for attempt := range 5 {
 		relPath, err := purgeStore.SaveBytes([]byte("shared-ttl-race-"+strconv.Itoa(attempt)), "bin")
