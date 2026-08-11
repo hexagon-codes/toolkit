@@ -522,8 +522,8 @@ func TestLinuxDeniedPathCreatedAfterNewRemainsHiddenAndReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(denied, []byte("host-secret"), 0o600); err != nil {
-		t.Fatal(err)
+	if writeErr := os.WriteFile(denied, []byte("host-secret"), 0o600); writeErr != nil {
+		t.Fatal(writeErr)
 	}
 	result, err := sandboxInstance.Exec(context.Background(), Command{
 		Path: "/bin/sh",

@@ -70,12 +70,10 @@ func resolveWindowsWorkspaceExecutable(workspace *windowsWorkspace, absolutePath
 		return nil, errors.Join(fmt.Errorf("workspace executable must be a regular file"), original.Close())
 	}
 	if identity.attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		_ = original.Close()
-		return nil, fmt.Errorf("workspace executable must not be a reparse point")
+		return nil, errors.Join(fmt.Errorf("workspace executable must not be a reparse point"), original.Close())
 	}
 	if identity.links != 1 {
-		_ = original.Close()
-		return nil, fmt.Errorf("workspace executable must not be hard-linked")
+		return nil, errors.Join(fmt.Errorf("workspace executable must not be hard-linked"), original.Close())
 	}
 
 	frozenHandle, err := reopenWindowsHandle(
@@ -86,14 +84,15 @@ func resolveWindowsWorkspaceExecutable(workspace *windowsWorkspace, absolutePath
 	)
 	runtime.KeepAlive(original)
 	if err != nil {
-		_ = original.Close()
-		return nil, fmt.Errorf("freeze workspace executable: %w", err)
+		return nil, errors.Join(fmt.Errorf("freeze workspace executable: %w", err), original.Close())
 	}
 	frozen := os.NewFile(uintptr(frozenHandle), filepath.Clean(absolutePath))
 	if frozen == nil {
-		_ = windows.CloseHandle(frozenHandle)
-		_ = original.Close()
-		return nil, fmt.Errorf("wrap frozen workspace executable handle")
+		return nil, errors.Join(
+			fmt.Errorf("wrap frozen workspace executable handle"),
+			windows.CloseHandle(frozenHandle),
+			original.Close(),
+		)
 	}
 	plan, planErr := finalizeWindowsExecutablePlan(frozen, identity, workspace.canonicalPath)
 	closeErr := original.Close()
@@ -132,21 +131,17 @@ func resolveTrustedWindowsExecutable(path string) (*windowsExecutablePlan, error
 	}
 	file := os.NewFile(uintptr(handle), cleanPath)
 	if file == nil {
-		_ = windows.CloseHandle(handle)
-		return nil, fmt.Errorf("wrap trusted Windows executable handle")
+		return nil, errors.Join(fmt.Errorf("wrap trusted Windows executable handle"), windows.CloseHandle(handle))
 	}
 	identity, err := inspectWindowsFileHandle(file)
 	if err != nil {
-		_ = file.Close()
-		return nil, fmt.Errorf("inspect trusted Windows executable: %w", err)
+		return nil, errors.Join(fmt.Errorf("inspect trusted Windows executable: %w", err), file.Close())
 	}
 	if identity.attributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
-		_ = file.Close()
-		return nil, fmt.Errorf("trusted Windows executable must be a regular file")
+		return nil, errors.Join(fmt.Errorf("trusted Windows executable must be a regular file"), file.Close())
 	}
 	if identity.attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		_ = file.Close()
-		return nil, fmt.Errorf("trusted Windows executable must not be a reparse point")
+		return nil, errors.Join(fmt.Errorf("trusted Windows executable must not be a reparse point"), file.Close())
 	}
 	return finalizeWindowsExecutablePlan(file, identity, "")
 }
@@ -265,16 +260,13 @@ func resolveWindowsWorkingDirectory(workspace *windowsWorkspace, commandDir stri
 	}
 	identity, err := inspectWindowsFileHandle(original)
 	if err != nil {
-		_ = original.Close()
-		return nil, fmt.Errorf("inspect Windows Command.Dir: %w", err)
+		return nil, errors.Join(fmt.Errorf("inspect Windows Command.Dir: %w", err), original.Close())
 	}
 	if identity.attributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
-		_ = original.Close()
-		return nil, fmt.Errorf("Windows Command.Dir must be a directory")
+		return nil, errors.Join(fmt.Errorf("Windows Command.Dir must be a directory"), original.Close())
 	}
 	if identity.attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		_ = original.Close()
-		return nil, fmt.Errorf("Windows Command.Dir must not be a reparse point")
+		return nil, errors.Join(fmt.Errorf("Windows Command.Dir must not be a reparse point"), original.Close())
 	}
 
 	frozenHandle, err := reopenWindowsHandle(
@@ -285,31 +277,26 @@ func resolveWindowsWorkingDirectory(workspace *windowsWorkspace, commandDir stri
 	)
 	runtime.KeepAlive(original)
 	if err != nil {
-		_ = original.Close()
-		return nil, fmt.Errorf("freeze Windows Command.Dir: %w", err)
+		return nil, errors.Join(fmt.Errorf("freeze Windows Command.Dir: %w", err), original.Close())
 	}
 	frozen := os.NewFile(uintptr(frozenHandle), commandDir)
 	if frozen == nil {
-		_ = windows.CloseHandle(frozenHandle)
-		_ = original.Close()
-		return nil, fmt.Errorf("wrap frozen Windows Command.Dir handle")
+		return nil, errors.Join(
+			fmt.Errorf("wrap frozen Windows Command.Dir handle"),
+			windows.CloseHandle(frozenHandle),
+			original.Close(),
+		)
 	}
 	frozenIdentity, err := inspectWindowsFileHandle(frozen)
 	if err != nil || !identity.sameObjectAndContent(frozenIdentity) {
-		_ = frozen.Close()
-		_ = original.Close()
-		return nil, fmt.Errorf("Windows Command.Dir changed while being frozen")
+		return nil, errors.Join(fmt.Errorf("Windows Command.Dir changed while being frozen"), frozen.Close(), original.Close())
 	}
 	canonicalPath, err := canonicalWindowsPathFromHandle(frozen)
 	if err != nil {
-		_ = frozen.Close()
-		_ = original.Close()
-		return nil, fmt.Errorf("resolve Windows Command.Dir handle: %w", err)
+		return nil, errors.Join(fmt.Errorf("resolve Windows Command.Dir handle: %w", err), frozen.Close(), original.Close())
 	}
 	if !windowsPathWithin(workspace.canonicalPath, canonicalPath) {
-		_ = frozen.Close()
-		_ = original.Close()
-		return nil, fmt.Errorf("Windows Command.Dir resolved outside the sandbox workspace")
+		return nil, errors.Join(fmt.Errorf("Windows Command.Dir resolved outside the sandbox workspace"), frozen.Close(), original.Close())
 	}
 	if err := original.Close(); err != nil {
 		return nil, errors.Join(fmt.Errorf("close Windows Command.Dir audit handle: %w", err), frozen.Close())

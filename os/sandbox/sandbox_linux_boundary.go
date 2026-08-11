@@ -44,10 +44,6 @@ type linuxGuardedPath struct {
 	identity linuxObjectIdentity
 }
 
-func newLinuxExecutionGuard(cfg Config, command Command) (*linuxExecutionGuard, error) {
-	return newLinuxExecutionGuardContext(context.Background(), cfg, command)
-}
-
 func newLinuxExecutionGuardContext(ctx context.Context, cfg Config, command Command) (*linuxExecutionGuard, error) {
 	if err := auditLinuxWorkspaceContext(ctx, cfg.Workspace); err != nil {
 		return nil, err
@@ -104,7 +100,7 @@ func (g *linuxExecutionGuard) Verify() error {
 
 func (g *linuxExecutionGuard) VerifyContext(ctx context.Context) error {
 	if g == nil {
-		return fmt.Errorf("Linux execution guard is unavailable")
+		return fmt.Errorf("linux execution guard is unavailable")
 	}
 	if err := checkPOSIXPreparationContext(ctx, "revalidate Linux execution identity"); err != nil {
 		return err
@@ -126,10 +122,7 @@ func (g *linuxExecutionGuard) VerifyContext(ctx context.Context) error {
 			return err
 		}
 	}
-	if err := auditLinuxWorkspaceContext(ctx, g.workspacePath); err != nil {
-		return err
-	}
-	return nil
+	return auditLinuxWorkspaceContext(ctx, g.workspacePath)
 }
 
 func readLinuxObjectIdentity(path string) (linuxObjectIdentity, error) {
@@ -139,10 +132,10 @@ func readLinuxObjectIdentity(path string) (linuxObjectIdentity, error) {
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat == nil {
-		return linuxObjectIdentity{}, fmt.Errorf("Linux stat identity is unavailable")
+		return linuxObjectIdentity{}, fmt.Errorf("linux stat identity is unavailable")
 	}
 	return linuxObjectIdentity{
-		device: uint64(stat.Dev),
+		device: stat.Dev,
 		inode:  stat.Ino,
 		mode:   info.Mode(),
 		size:   info.Size(),
@@ -174,10 +167,6 @@ type linuxInodeKey struct {
 type linuxInodeLinks struct {
 	observed uint64
 	total    uint64
-}
-
-func auditLinuxWorkspace(workspace string) error {
-	return auditLinuxWorkspaceContext(context.Background(), workspace)
 }
 
 func auditLinuxWorkspaceContext(ctx context.Context, workspace string) error {
@@ -226,10 +215,10 @@ func auditLinuxWorkspaceContext(ctx context.Context, workspace string) error {
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("sandbox workspace contains an unsupported file type: %q", path)
 		}
-		key := linuxInodeKey{device: uint64(stat.Dev), inode: stat.Ino}
+		key := linuxInodeKey{device: stat.Dev, inode: stat.Ino}
 		value := links[key]
 		value.observed++
-		value.total = uint64(stat.Nlink)
+		value.total = stat.Nlink
 		links[key] = value
 		return nil
 	})
@@ -267,7 +256,9 @@ func copyLinuxBoundaryProbeExecutable(workspace string) (resultPath string, resu
 		return "", fmt.Errorf("open Linux boundary probe executable: %w", err)
 	}
 	defer func() {
-		resultErr = errors.Join(resultErr, fmt.Errorf("close Linux boundary probe executable source: %w", source.Close()))
+		if closeErr := source.Close(); closeErr != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("close Linux boundary probe executable source: %w", closeErr))
+		}
 	}()
 
 	destinationPath := filepath.Join(workspace, ".toolkit-linux-boundary-probe")

@@ -41,8 +41,11 @@ type posixExecutionOptions struct {
 }
 
 type posixProcessIdentity struct {
-	pid       int
-	startSec  int64
+	//lint:ignore U1000 darwin 构建填充的进程身份字段（防 PGID 复用）
+	pid int
+	//lint:ignore U1000 darwin 构建填充的进程身份字段（防 PGID 复用）
+	startSec int64
+	//lint:ignore U1000 darwin 构建填充的进程身份字段（防 PGID 复用）
 	startUsec int64
 }
 

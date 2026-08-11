@@ -162,16 +162,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # 镜像自带 pip3 缺失 pip 模块；优先用 CPython 自带的 ensurepip 修复，
-          # ensurepip 缺失时回退官方 get-pip.py（仅下载到 $RUNNER_TEMP，不落入工作目录）。
-          if python3 -m ensurepip --version >/dev/null 2>&1; then
-            python3 -m ensurepip --upgrade
-          else
-            curl -fsSL -o "$RUNNER_TEMP/get-pip.py" https://bootstrap.pypa.io/get-pip.py
-            python3 "$RUNNER_TEMP/get-pip.py"
-          fi
+          # 镜像自带 pip3 缺失 pip 模块，且 homebrew 为 externally-managed 环境，
+          # ensurepip 会触发 PEP 668 拒绝；统一用官方 get-pip.py --break-system-packages
+          # 修复（仅下载到 $RUNNER_TEMP，不落入工作目录）。
+          curl -fsSL -o "$RUNNER_TEMP/get-pip.py" https://bootstrap.pypa.io/get-pip.py
+          python3 "$RUNNER_TEMP/get-pip.py" --break-system-packages
           node --version
           pip3 --version
+      - name: Normalize metadata line endings for tidy checks (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          git config core.autocrlf false
+          git checkout -- go.sum
       - name: Verify root module metadata
         run: go mod tidy -diff
       - run: go mod download
@@ -380,18 +383,18 @@ jobs:
           $policyXml = @'
           <AppLockerPolicy Version="1">
             <RuleCollection Type="Exe" EnforcementMode="Enabled">
-              <FilePathRule Id="{39501A67-9B8E-4CF8-B8DC-9B207457E325}" Name="Deny Toolkit executable fixture" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
+              <FilePathRule Id="{39501a67-9b8e-4cf8-b8dc-9b207457e325}" Name="Deny Toolkit executable fixture" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
                 <Conditions><FilePathCondition Path="*\toolkit-policy-blocked.exe" /></Conditions>
               </FilePathRule>
-              <FilePathRule Id="{3F21DB7D-4D79-4F38-94BD-62B5D98649E6}" Name="Allow other executables" Description="" UserOrGroupSid="S-1-1-0" Action="Allow">
+              <FilePathRule Id="{3f21db7d-4d79-4f38-94bd-62b5d98649e6}" Name="Allow other executables" Description="" UserOrGroupSid="S-1-1-0" Action="Allow">
                 <Conditions><FilePathCondition Path="*" /></Conditions>
               </FilePathRule>
             </RuleCollection>
             <RuleCollection Type="Script" EnforcementMode="Enabled">
-              <FilePathRule Id="{23DFA1EC-B201-46D5-BB70-673A3C59DB5D}" Name="Deny Toolkit script fixture" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
+              <FilePathRule Id="{23dfa1ec-b201-46d5-bb70-673a3c59db5d}" Name="Deny Toolkit script fixture" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
                 <Conditions><FilePathCondition Path="*\toolkit-policy-blocked.ps1" /></Conditions>
               </FilePathRule>
-              <FilePathRule Id="{E1B6D98E-B45B-4818-9398-D05A2E2DC654}" Name="Allow other scripts" Description="" UserOrGroupSid="S-1-1-0" Action="Allow">
+              <FilePathRule Id="{e1b6d98e-b45b-4818-9398-d05a2e2dc654}" Name="Allow other scripts" Description="" UserOrGroupSid="S-1-1-0" Action="Allow">
                 <Conditions><FilePathCondition Path="*" /></Conditions>
               </FilePathRule>
             </RuleCollection>
@@ -798,6 +801,12 @@ jobs:
         with:
           go-version: '1.25.12'
           check-latest: false
+      - name: Normalize metadata line endings for tidy checks (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          git config core.autocrlf false
+          git checkout -- examples/go.sum
       - name: Verify examples module metadata
         shell: bash
         working-directory: examples

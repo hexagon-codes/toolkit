@@ -331,7 +331,7 @@ func verifyLinuxPrlimitMemoryLimit(ctx context.Context, prlimitPath string, maxM
 		return err
 	}
 	if prlimitPath == "" || maxMemoryBytes <= 0 {
-		return fmt.Errorf("Linux memory limit verification requires a launcher and a positive limit")
+		return fmt.Errorf("linux memory limit verification requires a launcher and a positive limit")
 	}
 	payloadPath, err := resolveTrustedPOSIXLauncher("Linux memory limit probe payload", []string{"/usr/bin/true", "/bin/true"})
 	if err != nil {
@@ -347,7 +347,7 @@ func verifyLinuxPrlimitMemoryLimit(ctx context.Context, prlimitPath string, maxM
 	)
 	cmd.Env = posixTrustedLauncherEnvironment()
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("Linux prlimit memory probe failed: %w", err)
+		return fmt.Errorf("linux prlimit memory probe failed: %w", err)
 	}
 	return nil
 }

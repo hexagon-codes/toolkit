@@ -299,7 +299,7 @@ func TestLinuxRootBwrapHidesHostUnixSocket(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(runRoot) })
 	socketPath := filepath.Join(runRoot, "host.sock")
-	listener, err := net.Listen("unix", socketPath)
+	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", socketPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -411,8 +411,8 @@ func TestLinuxSandboxLaunchersIgnoreHostPATHPoisoning(t *testing.T) {
 	writeForwardingLauncher := func(name, target, marker string) {
 		t.Helper()
 		body := fmt.Sprintf("#!/bin/sh\nprintf poisoned > %q\nexec %q \"$@\"\n", marker, target)
-		if err := os.WriteFile(filepath.Join(poisonDirectory, name), []byte(body), 0o700); err != nil {
-			t.Fatal(err)
+		if writeErr := os.WriteFile(filepath.Join(poisonDirectory, name), []byte(body), 0o700); writeErr != nil {
+			t.Fatal(writeErr)
 		}
 	}
 	writeForwardingLauncher("bwrap", bwrap, bwrapMarker)
@@ -605,7 +605,7 @@ func TestLinuxUnixSocketProbePayload(t *testing.T) {
 	if separator < 0 || separator+1 >= len(os.Args) {
 		return
 	}
-	connection, err := net.DialTimeout("unix", os.Args[separator+1], time.Second)
+	connection, err := (&net.Dialer{Timeout: time.Second}).DialContext(context.Background(), "unix", os.Args[separator+1])
 	if err != nil {
 		fmt.Print("BLOCKED")
 		return
