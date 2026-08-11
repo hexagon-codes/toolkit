@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // Command 描述一次无需 shell 拼接的结构化进程执行请求。
@@ -28,6 +29,9 @@ type sandboxPathIdentity struct {
 	path      string
 	canonical string
 	info      os.FileInfo
+	// creationTime 是平台额外身份（Windows 目录创建时间），用于识别文件索引
+	// 可能复用的替换场景；非 Windows 平台保持零值。
+	creationTime time.Time
 }
 
 func snapshotSandboxDirectoryIdentity(field, path string) (sandboxPathIdentity, error) {
@@ -46,9 +50,10 @@ func snapshotSandboxDirectoryIdentity(field, path string) (sandboxPathIdentity, 
 		return sandboxPathIdentity{}, fmt.Errorf("resolve sandbox %s: %w", field, err)
 	}
 	return sandboxPathIdentity{
-		path:      filepath.Clean(path),
-		canonical: filepath.Clean(canonical),
-		info:      info,
+		path:         filepath.Clean(path),
+		canonical:    filepath.Clean(canonical),
+		info:         info,
+		creationTime: sandboxCreationTime(path),
 	}, nil
 }
 
@@ -66,9 +71,7 @@ func (identity sandboxPathIdentity) revalidate(field string) error {
 	if !os.SameFile(identity.info, current) {
 		return fmt.Errorf("sandbox %s identity changed", field)
 	}
-	// NTFS 的文件索引可能被新目录复用，SameFile 不足以证明身份未替换；
-	// 补充修改时间与大小对比（目录替换必然产生差异）。
-	if !identity.info.ModTime().Equal(current.ModTime()) || identity.info.Size() != current.Size() {
+	if !sandboxIdentityExtraMatches(identity, current) {
 		return fmt.Errorf("sandbox %s identity changed", field)
 	}
 	canonical, err := filepath.EvalSymlinks(identity.path)

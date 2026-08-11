@@ -88,7 +88,7 @@ func writeTTLMetadata(root *os.Root, sidecarPath string, data []byte) (err error
 	if err := tmp.close(); err != nil {
 		return err
 	}
-	if err := root.Rename(tmp.path, sidecarPath); err != nil {
+	if err := replaceRootFile(root, tmp.path, sidecarPath); err != nil {
 		return fmt.Errorf("replace ttl metadata: %w", err)
 	}
 	return nil
