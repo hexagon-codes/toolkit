@@ -1,202 +1,56 @@
-# Toolkit 下一次执行接手文档
+# Toolkit 当前接手文档
 
-> 更新时间：2026-08-11（Asia/Shanghai）  
-> 基线提交：`d8396a6a7373db54b513def8dcffebefc5964524`  
-> 最近标签：`v0.2.6`  
-> 当前状态：共享工作区存在大量未提交改动，禁止 reset、checkout、clean 或覆盖。
+> 更新时间：2026-08-12（Asia/Shanghai）
+>
+> 目标版本：`v0.3.0`
+>
+> 发布基线：以 `v0.3.0` 标签指向的提交为准
+>
+> 最近已发布标签：`v0.2.6`
 
-## 1. 本轮范围决定
+## 1. 范围与约束
 
-- 本轮只继续闭环 macOS 沙箱及 HexClaw 在 macOS 上的实际使用链。
-- Linux、Windows 沙箱立即冻结：保留已有实现和测试，不继续修改，不把阶段性结果表述为发布级 GREEN。
-- Toolkit 其他尚未完成的审计任务同时冻结，详见附录。
-- 不打 Tag、不 Push；不得用旧构建产物冒充当前源码结果。
-- 不调用真实模型或钉钉，不修改 HexClaw Desktop UI。
+- 只闭环已经重构或当前已修改的代码；未修改代码不再扩展审计或重构。
+- 只做有确定 RED 证据的最小修复。任何新重构都必须先说明原因并取得用户审批。
+- macOS、Linux、Windows 都要保留平台合同；本地交叉编译不能冒充 Windows 原生运行证据。
+- 共享工作树中的既有改动必须全部保留，禁止 `reset`、`checkout`、`clean`、覆盖或回滚。
+- 最终门禁通过后仅提交 Toolkit 当前改动；不打 Tag、不 Push，`v0.3.0` 的发布由用户自行完成。
+- 新增代码注释使用中文；新增错误、状态提示和提示语使用英文。
+- 不调用真实模型或钉钉，不改 HexClaw Desktop UI，不使用旧 DMG 冒充当前源码构建。
 
-## 2. 固定执行环境
+## 2. 当前事实
 
-```bash
-TOOLKIT_ROOT=/Users/guoyanjun/work/toolkit
-GO_ROOT=/Users/guoyanjun/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.25.12.darwin-amd64
-GO_BIN="$GO_ROOT/bin/go"
+- `go.mod` 声明的最低 Go 版本是 `1.25.12`，不是要求所有开发机只能安装该版本。发布门禁使用 Go 1.25.12、`GOWORK=off` 和 `-mod=readonly` 固定最低版本证据。
+- 根模块与 `examples` 已删除不再可达的 `github.com/bytedance/gopkg`；tidy、verify、list、test、vet、build 门禁均取得过通过证据。
+- API 目标已统一为 `v0.3.0`；`gorelease -base=v0.2.6 -version=v0.3.0` 与当前 34 个不兼容包段的 baseline 校验已通过。源码再次变化后必须按最终指纹重跑。
+- `util/retry` 只保留 `If`，旧 `RetryIf` 等入口有意删除；下游已经迁移，不恢复兼容 facade。
+- `util/hash` 不恢复 MD5/SHA1 公共 API；只有下游明确公开的 `text_hash(md5)` 合同在工具内部使用标准库 `crypto/md5`。
 
-cd "$TOOLKIT_ROOT"
-env GOROOT="$GO_ROOT" GOTOOLCHAIN=local GOENV=off GOWORK=off \
-  GOFLAGS=-mod=readonly "$GO_BIN" version
-```
+## 3. 已取得的本地证据
 
-最低编译版本是 Go `1.25.12`。仓库没有 `toolchain` 指令；不要把最低版本误写为固定用户机器工具链。
+以下记录最终冻结源码已经取得的本地证据。
 
-## 3. macOS 沙箱闭环门禁
+| 范围 | 证据 |
+|---|---|
+| 根模块 | 全仓普通测试、Race、build、vet、golangci-lint 均通过。 |
+| macOS Sandbox | `os/sandbox` 全包普通、Race 与关键原生 no-skip 门禁通过；hostedtoolcache 改为基于当前用户主目录后，聚焦回归及全包普通/Race 均通过。 |
+| Linux Sandbox | Ubuntu 22.04、Go 1.25.12 的隔离 Docker 环境中，root 13/13、non-root 4/4 原生测试零 skip 通过。 |
+| Windows | Windows/Linux 交叉 build、vet 通过；当前候选提交的 Windows Server 2022 原生 28 项 `windows_security` 只能在推送后由 CI 证明。 |
+| 集成与安全 | MySQL 8.4、Redis 7.4 ACL 集成通过；`govulncheck` 无可达或导入漏洞；敏感信息与二进制范围扫描通过。 |
+| API 与工作流 | 4 个 workflow 的 actionlint、cicheck、API checker 及 34 段 breaking baseline 校验通过；远端 CI 状态仍以当前提交推送后的结果为准。 |
+| 下游 | legacy-downstream、HexClaw、Hexagon、ai-core 对当前 Toolkit API 的编译与定向合同通过。 |
+| Desktop | Ollama 固定归档的 PAX/AppleDouble 处理已完成 RED→GREEN，相关解包与敏感边界测试 50/50 通过，真实固定归档 49 个成员成功解析且未发布元数据伪文件。正式 package-local、verify 与 DMG 挂载结果以最终会话报告为准。 |
+| 文档示例 | 中英文 README 的 API 签名与本轮新增注释已按当前合同更新；CHANGELOG 已固化 `v0.3.0` 发布记录。 |
 
-### 3.1 必须保持的不变量
+## 4. 发布检查清单
 
-- `ExecutionProfileUntrusted` 是安全零值，macOS 通过 Seatbelt no-fork 提供不可信执行边界。
-- 可信构建必须同时显式设置：
-  - `ExecutionProfileTrustedBuild`
-  - `TrustedBuildIsolationCapabilities`
-- capability 只是准入断言，不能隐式切换 execution profile。
-- `Close` 只是生命周期屏障，不是构件提升。
-- 可信构建产物必须在构建沙箱关闭后，按字节复制到独立 runtime workspace 的全新普通文件和全新 inode；必须校验格式、大小、哈希、身份、权限与同步结果。禁止复用构建路径、硬链接或 inode。
-- 根进程成功退出、超时或取消后，都不能遗留可逃逸后代、未回收根进程、stdout/stderr FD 或复制 goroutine。
-- 输出排空超时必须返回稳定错误，不得在函数返回后继续修改结果缓冲。
-- `Close` 失败后必须保留资源所有权，并允许再次调用收敛。
-- 命令路径只解析和冻结一次；取消在启动前已经可观察时不得产生载荷副作用。
-- 内存 rlimit 能力只能通过辅助子进程探测，绝不能临时下调宿主进程限制。
-- `Config.Timeout` 秒数转换必须在任何副作用前拒绝溢出。
+1. 源码冻结后按最终指纹重跑范围、敏感信息、tidy/verify、build、vet、lint、全仓普通/Race、受影响 Sandbox 与 API 门禁。
+2. 使用同一冻结源码执行 HexClaw Desktop `make package-local`、`make verify-package-local`，并挂载新 DMG 校验应用树、版本、主程序摘要与未签名策略。
+3. Toolkit 改动只做本地 Commit；不 Push、不打 Tag。
+4. 用户 Push/Tag 后，由远端 CI 补齐 Windows 原生 28 项 `windows_security`、Tag 触发与发布工作流证据。
 
-### 3.2 重点文件
+Desktop 打包结果不会在构建后回写本文件，避免修改五仓源码清单并使刚生成的制品失去精确源码身份；请以最终会话报告中的 generation、DMG 摘要和验收命令为准。
 
-```text
-os/sandbox/sandbox.go
-os/sandbox/sandbox_darwin.go
-os/sandbox/execution_guard_darwin.go
-os/sandbox/command.go
-os/sandbox/exec_posix.go
-os/sandbox/posix_execution.go
-os/sandbox/process_lifecycle.go
-os/sandbox/env_posix.go
-os/sandbox/resource_limits.go
-os/sandbox/close_basic.go
-os/sandbox/close_darwin.go
-os/sandbox/posix_execution_lifecycle_test.go
-os/sandbox/trusted_build_darwin_test.go
-os/sandbox/no_child_darwin_test.go
-os/sandbox/workspace_isolation_darwin_test.go
-```
+## 5. 完成标准
 
-### 3.3 最终验证
-
-在源码冻结后使用独立缓存，避免共享 Go 1.26 缓存污染证据：
-
-```bash
-cd /Users/guoyanjun/work/toolkit
-GO_ROOT=/Users/guoyanjun/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.25.12.darwin-amd64
-GO_BIN="$GO_ROOT/bin/go"
-MAC_CACHE="$(mktemp -d /tmp/toolkit-sandbox-macos.XXXXXX)"
-
-git diff --check -- os/sandbox
-rg --files os/sandbox -g '*.go' -0 | xargs -0 "$GO_BIN" gofmt -d
-
-env GOROOT="$GO_ROOT" GOCACHE="$MAC_CACHE" GOTOOLCHAIN=local GOENV=off \
-  GOWORK=off GOFLAGS=-mod=readonly GOOS=darwin GOARCH=amd64 CGO_ENABLED=1 \
-  GOMAXPROCS=4 "$GO_BIN" test ./os/sandbox -count=1 -shuffle=on -timeout=20m
-
-env GOROOT="$GO_ROOT" GOCACHE="$MAC_CACHE" GOTOOLCHAIN=local GOENV=off \
-  GOWORK=off GOFLAGS=-mod=readonly GOOS=darwin GOARCH=amd64 CGO_ENABLED=1 \
-  GOMAXPROCS=4 "$GO_BIN" test -race ./os/sandbox -count=1 -shuffle=on -timeout=30m
-
-env GOROOT="$GO_ROOT" GOCACHE="$MAC_CACHE" GOTOOLCHAIN=local GOENV=off \
-  GOWORK=off GOFLAGS=-mod=readonly "$GO_BIN" vet ./os/sandbox
-
-env GOROOT="$GO_ROOT" GOCACHE="$MAC_CACHE" GOTOOLCHAIN=local GOENV=off \
-  GOWORK=off GOFLAGS=-mod=readonly "$GO_BIN" test -json ./os/sandbox -count=1 \
-  -run '^(TestDarwinTrustedBuildProfileAllowsChildrenWithoutClaimingContainment|TestDarwinTrustedBuildRunsFrozenGoCompilerChild|TestDarwinRejectsProcessCreationAndContainmentBeforePayload)$'
-```
-
-最后一条 JSON 中三个顶层用例必须全部 PASS 且没有 SKIP。只通过编译或源码字符串检查不算闭环。
-
-## 4. HexClaw macOS 使用链
-
-重点文件：
-
-```text
-/Users/guoyanjun/work/hexclaw/skill/builtin/code_exec.go
-/Users/guoyanjun/work/hexclaw/skill/builtin/code_exec_go_execution.go
-/Users/guoyanjun/work/hexclaw/skill/builtin/code_exec_go_execution_test.go
-```
-
-必须验证：可信 Go 构建显式选择 trusted-build profile；构件通过全新 inode 提升到独立 runtime workspace；运行阶段重新使用 untrusted profile；成功和失败路径都清理构建缓存及两个工作区。macOS 上不可信 npm/pnpm 项目执行必须 fail-closed，不能用 TrustedBuild 执行不可信脚本。
-
-禁止调用真实模型或钉钉。使用临时 Go 1.25.12 workspace 绑定当前 `toolkit`、`ai-core`、`hexagon`、`hexclaw` 后运行 focused ordinary、race 和 vet。
-
-## 5. Linux 沙箱冻结状态：已有实现，发布 NO-GO
-
-### 已有/阶段性完成
-
-- 已有 bubblewrap 后端、PID namespace、deny-by-default 文件系统与网络模式。
-- 已改为 bubblewrap 不可用时 fail-closed，不再退化为裸进程。
-- 不再用 `RLIMIT_NPROC` 冒充精确进程树总预算。
-- 资源能力与调用方实际请求分开报告。
-
-### 未完成
-
-- `prlimit` 目前不能只凭可信路径存在就声明 Memory enforced；必须在启动载荷前用固定辅助子进程验证同一限制链。
-- 最新共享 POSIX 生命周期修改对 Linux 的影响尚未原生验证。
-- 新鲜 Linux 容器的 root/non-root、离线 bubblewrap、ordinary/race、no-skip 和零僵尸门禁未完成。
-- 不得把旧容器或旧测试日志当作当前源码证据。
-
-### 下一次优先 RED
-
-- 根进程正常退出、后代关闭 stdout/stderr 后继续存活时，必须终止并证明收敛，不能误报 ProcessContainment。
-- `prlimit` 可执行文件存在但实际调用失败时，载荷不得启动，Memory capability 不得报告 enforced。
-
-## 6. Windows 沙箱冻结状态：已有实现，发布 NO-GO
-
-### 已有/阶段性完成
-
-- 已有 AppContainer、工作区 ACL、LowBox token、Job Object 和受限句柄继承。
-- 六个 post-creation 故障阶段已统一为单向所有权状态机。
-- 已覆盖同步释放、quarantine 单次转移、Close 失败重试，以及 normal-wait/timeout/cancel 的 retained ownership。
-- 阶段性普通/race 与 Windows amd64/arm64 交叉编译曾通过。
-
-### 未完成
-
-- 最后修改后的 ordinary/race 尚未复验。
-- 本机没有 Windows 原生证据；`windows_security` 测试必须在 Windows CI 运行。
-- CI 原生必跑名单尚未纳入三个新增生命周期测试。
-
-### 下一次验证
-
-```powershell
-go test -race -tags windows_security ./os/sandbox `
-  -run '^(TestWindowsNativePostCreationFaultOwnership|TestWindowsNativePostCreationFaultCloseRetriesQuarantine|TestWindowsNativeRetainExecutionOwnership)$' `
-  -count=10 -parallel=1
-```
-
-## 7. 其他冻结工作（不是本轮 macOS 闭环范围）
-
-- `cache/crypto`：`TestCacheRecognizesLocalNegativeCacheByDefault` 仍是预期 RED；缺少加载期间 `Del` 的代际回填保护，AES 未完成专项审计。
-- `collection/lang`：`lang/timex.TestNowProviderConcurrentAccess` 暴露可变全局时钟 race，尚未修复；最终 ordinary/race/vet 未跑。
-- `util/logger`：`TestNewWithHandlerSetLevelControlsOutput` 已新增但未执行/修复；最终验证早于该测试。
-- `config/env/encoding/json/validator`：主体修复已完成，最新 SSE/NDJSON 修改后的五包最终 ordinary/race/vet 尚未跑。
-- `idgen/rand/rate/lease/pagination`：focused 已 GREEN，最终全组 ordinary/race/count/vet 与 README 同步未完成。
-- `infra/db/queue/redisconn`：Manager/Redis/Lease/凭据错误链已有 focused GREEN；各数据库生命周期与最终全组门禁未完成。
-- `examples`：大量示例已加固，最终 tidy/mod verify/test/race/vet/build 未完成。
-- `net/ip/ssrf/sse`：当前实现曾通过 ordinary/race/vet/staticcheck；仓库全量、README/CHANGELOG 和最终下游验证未完成。
-- 根模块和 examples 的 `go mod tidy -diff` 均要求删除不再可达的 `github.com/bytedance/gopkg v0.1.3`；只能在源码最终冻结后执行 tidy。
-- README/README.en/CHANGELOG 仍需同步 context-first HTTPX、TrustedBuild 构件提升、event/poolx/blobstore/OTel 生命周期，并固化 `## [0.3.0] - 2026-08-11`。
-- API breaking baseline 在后续导出 API 变化前生成，不能作为最终基线。
-
-## 8. 临时资源与清理边界
-
-已知由本轮 Agent 创建、可在确认不再复验后单独删除的临时目录：
-
-```text
-/tmp/toolkit-ssrf-downstream.re1hGC
-/tmp/toolkit-readonly-audit.66lKaD
-/tmp/toolkit-cross-verify.PmzsaF
-/tmp/toolkit-event-stress-20260811.LYJ2HF
-```
-
-Linux 容器/临时资源的历史精确名称：
-
-```text
-toolkit-linux-native-20260811
-toolkit-bwrap-probe-20260811
-toolkit-linux-final-20260811
-/tmp/toolkit-bwrap-final-20260811.imo2n0
-```
-
-不要执行广泛 `rm -rf`、`docker system prune` 或清理未知资源。只处理已经逐项确认归属的精确目标。
-
-## 9. 接手顺序
-
-1. 先读取本文件和 `git status --short --untracked-files=all`；不要恢复或覆盖共享改动。
-2. 确认没有遗留 `go test`/sandbox 测试进程。
-3. 完成并冻结 macOS/POSIX 生命周期，再跑第 3 节完整门禁。
-4. 验证 HexClaw macOS `code_exec` 的 trusted build → fresh inode → untrusted runtime 链。
-5. 若恢复 Linux，先修 `prlimit` 预检，再创建全新容器；不要复用旧结果。
-6. 若恢复 Windows，先更新 CI 原生必跑名单，再在真实 Windows Runner 验证。
-7. 最后恢复附录中的其他 Toolkit RED，完成 tidy、文档、全量发布矩阵后才可打 Tag。
-
+Toolkit 本地可发布条件是：最终冻结源码的全仓门禁、macOS/Linux 原生 Sandbox、Windows 交叉门禁、API baseline 与下游兼容全部通过，并完成 Toolkit Commit。HexClaw Desktop 当前源码 DMG 属于后续下游打包验证，不阻塞 Toolkit Tag。Windows 当前提交的原生运行证据必须在用户 Push 后由远端 CI 补齐；在该证据出现前，不把“本地可发布”表述为“三平台远端 CI 已通过”。

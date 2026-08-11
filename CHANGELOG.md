@@ -2,9 +2,7 @@
 
 本文件记录 toolkit 的用户可见变更，遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
-
-> 本节包含不兼容的公共 API 变更，下一次发布必须提升 minor 版本；在提交与 Tag 决策前保持 Unreleased。
+## [0.3.0] - 2026-08-12
 
 ### Changed
 - **BREAKING** 构建基线：`go.mod` 的最低 Go 版本由 v0.2.6 的 1.25.7 提升至 1.25.12；仓库未声明 `toolchain`，因此这是最低编译版本要求，不是对本机 Go 可执行文件的额外固定。
@@ -16,16 +14,17 @@
 - **BREAKING** `os/sandbox`：新增 `CapabilityProcessContainment` 与 `LimitReport.ProcessContainment`；macOS no-fork、Linux PID namespace 与 Windows Job Object 证明同一不可逃逸不变量，只有确认全部退出后才能报告 `enforced`。
 - **BREAKING** `os/sandbox`：`Config` 新增必填的 `RequiredCapabilities` 执行前安全合同，`RequiredCapabilities == 0` 会在工作区创建前被拒绝；新增 `UntrustedCodeIsolationCapabilities`，它只保证 filesystem、network、process-containment 与 output 隔离。Memory、Processes、Storage 限额的零值表示未请求且不设置上限，正值必须额外声明对应能力；`New` 在产生文件系统副作用前完成纯配置语义校验。
 - **BREAKING** `os/sandbox`：新增只供固定可信构建工具使用的 `TrustedBuildIsolationCapabilities` 与 `CapabilityProcessCreation`。macOS 选择该合同后允许工具链派生子进程，同时明确将 `ProcessContainment` 报告为 `unsupported`；构建沙箱不得执行不可信产物，产物必须在关闭构建沙箱并完成校验后交给新的严格沙箱执行。
-- **BREAKING** `blobstore`：TTL 元数据文件由 `<blob>.ttl` 改为 `<blob>.blobstore.ttl`，旧 sidecar 不会被读取或自动迁移；升级前必须重命名或重新生成现有 TTL 元数据，否则对应 blob 将被视为未设置 TTL。`NewStore` 现在拒绝空路径和文件系统根目录，将存储根目录规范化并收紧为 `0700`；扩展名仅接受 1–16 位 ASCII 字母或数字并统一为小写。文件访问改用 `os.Root` 防止符号链接逃逸，blob 文件使用 `0600`，TTL 更新与清理通过跨进程文件锁线性化；`SaveFromURL` 对超过 200 MiB 的响应返回错误，不再静默截断后落盘。
+- **BREAKING** `blobstore`：`Blobstore` 接口和本地 `Store` 新增 `Close() error` 生命周期合同；`Store` 不再可比较。TTL 元数据文件由 `<blob>.ttl` 改为 `<blob>.blobstore.ttl`，旧 sidecar 不会被读取或自动迁移；升级前必须重命名或重新生成现有 TTL 元数据，否则对应 blob 将被视为未设置 TTL。`NewStore` 现在拒绝空路径和文件系统根目录，将存储根目录规范化并收紧为 `0700`；扩展名仅接受 1–16 位 ASCII 字母或数字并统一为小写。文件访问改用 `os.Root` 防止符号链接逃逸，blob 文件使用 `0600`，TTL 更新与清理通过跨进程文件锁线性化；`SaveFromURL` 对超过 200 MiB 的响应返回错误，不再静默截断后落盘。
 - **BREAKING** `util/hash`：移除弱摘要公共 API `MD5`、`MD5Bytes`、`SHA1` 与 `SHA1Bytes`；内容摘要统一使用 `SHA256`/`SHA256Bytes` 或 `SHA512`/`SHA512Bytes`。
 - **BREAKING** `crypto/aes`：移除 CBC/CTR 公共 API `EncryptCBC`、`DecryptCBC`、`EncryptCBCString`、`DecryptCBCString`、`EncryptCTR`、`DecryptCTR` 及对应 `ErrInvalidBlockSize`、`ErrInvalidPadding`，加密调用统一迁移到 AEAD GCM。
 - **BREAKING** `crypto/rsa`：移除 PKCS#1 v1.5 加解密及签名 API `EncryptPKCS1v15*`、`DecryptPKCS1v15*`、`SignPKCS1v15`、`VerifyPKCS1v15`，分别迁移到 OAEP 和 PSS；`KeyPair.PrivateKeyToPEM`、`PublicKeyToPEM` 改为返回 `(string, error)`。
 - **BREAKING** `util/circuit`：`New`、`NewAIBreaker` 开始返回构造错误；`NewBreakerManager` 不再接受 `func() *Breaker` 工厂回调，改为 `NewBreakerManager(opts ...Option) (*BreakerManager, error)`。`OpenAIConfig`、`ClaudeConfig`、`GeminiConfig`、`AggressiveConfig`、`ConservativeConfig` 由共享变量改为返回独立选项切片的函数。移除 `Breaker.Allow/Success/Failure`，每次调用必须使用同一次 `Acquire() (*Permit, error)` 获得的许可并且只调用一次 `Permit.Complete(error) error`；`Reset`、`OnStateChange` 及 manager 的 `Get`/`Reset`/`ResetAll` 开始返回错误。
 - **BREAKING** `util/retry`：重试条件入口统一为 `If`、`IfHTTP` 与 `IfHTTPOrNetwork`，移除 `RetryIf`、`RetryIfHTTP`、`RetryIfHTTPOrNetwork`；所有 AI/网络/数据库预设策略由共享变量改为函数。移除 `ExponentialBackoffWithJitter`、`LinearBackoffWithJitter`、`WithOnRetryZeroBased`、`WithReturnLastError` 与 `WithUnwrapFinalError`；`OnRetry` 固定公开一基尝试次数，重试耗尽错误固定同时包装 `ErrMaxAttemptsReached` 与最终业务错误。
 - **BREAKING** `util/rate`：`NewTokenBucket`、`NewLeakyBucket`、`NewSlidingWindow`、`NewTokenBucketV2`、`NewTokenRateLimiter`、`NewMultiDimensionLimiter` 全部改为返回 `(*T, error)`。`TokenBucketV2` 移除 `ConsumeN`、`Reserve`、`ReserveN`、`TryAllowN`，`TokenRateLimiter` 移除 `ConsumeN`、`Reserve`、`TryAllowN`，统一使用 `AllowN`/`WaitN`。
-- **BREAKING** `net/sse`：`ReaderOption`、`ClientOption` 改为返回错误；`NewReader`、`NewReaderWithSize`、`NewReaderWithOptions`、`NewWriter`、`NewClient` 改为返回 `(*T, error)`，静态可信配置可使用对应 `MustNew*`。`Reader.Close` 改为返回关闭错误，`FormatEvent` 改为 `(string, error)`。移除客户端内建重连配置 `RetryInterval`、`MaxRetries`、`WithRetryInterval`、`WithMaxRetries` 与 `ErrConnectionFailed`；`Stream` 因持有取消函数而不再可比较。
+- **BREAKING** `net/sse`：`ReaderOption`、`ClientOption` 改为返回错误；`NewReader`、`NewReaderWithSize`、`NewReaderWithOptions`、`NewWriter`、`NewClient` 改为返回 `(*T, error)`，静态可信配置可使用对应 `MustNew*`。`Reader.Close` 改为返回关闭错误，`FormatEvent` 改为 `(string, error)`，`CollectOpenAIStream` 改为必须显式传入 `CollectConfig`。移除客户端内建重连配置 `RetryInterval`、`MaxRetries`、`WithRetryInterval`、`WithMaxRetries` 与 `ErrConnectionFailed`；`Stream` 因持有取消函数而不再可比较。
 - **BREAKING** `net/sse`：`Reader` 默认增加单行 1 MiB、单事件 8 MiB 的硬上限；`Client` 拒绝非 `text/event-stream` 响应，其 `Timeout` 只约束连接、TLS 握手和响应头阶段，不限制长连接的完整生命周期。
 - **BREAKING** `net/httpx`：`Option`、`RawOption` 改为返回错误；`NewClient` 以及 `OpenAIClient`、`AzureOpenAIClient`、`ClaudeClient`、`GeminiClient`、`DeepSeekClient`、`QwenClient`、`DoubaoClient`、`MoonshotClient`、`ZhipuClient`、`BaichuanClient`、`SparkClient`、`CohereClient`、`MistralClient`、`VertexAIClient` 和 `CustomAIClient*` 等全部 AI 客户端构造函数开始返回错误。移除 `RawClient`，改用 `NewRawClient`/`MustNewRawClient`；移除 `WithTransport`，原生客户端 transport 注入使用 `WithRawTransport`。
+- **BREAKING** `net/httpx`：包级 `Get`、`Post`、`PostForm`、`Put`、`Delete`，以及 `Client.R`、`Client.ChatCompletion`、`Client.ChatCompletionStream` 改为 context-first；移除 `GetWithContext`、`PostWithContext` 与 `Request.SetContext`。
 - **BREAKING** `net/httpx`：`NewPool(PoolConfig)`、`NewRetryPool(*Pool, RetryConfig)`、`NewRateLimitedPool`、`NewCircuitBreakerPool`、`NewHostPool(HostPoolConfig)` 全部开始返回错误，`DefaultPoolConfig` 与 `DefaultRetryConfig` 由变量改为函数。移除私有熔断状态机的 `CircuitBreakerConfig`、`CircuitBreakerState` 与状态常量，统一使用 `util/circuit`；`CircuitBreakerPool.Reset`、`HostPool.GetPool`、`HostPool.SetHostConfig`、`SetGlobalPool` 开始返回错误，`RateLimitedPool.Close` 不再返回错误。`PoolStats` 移除连接数、等待及响应时间公开字段，统计读取统一使用 `GetStats() PoolStatsSnapshot`。
 - **BREAKING** `net/httpx`：客户端和 `RetryPool` 只重试幂等方法或携带 `Idempotency-Key` 的请求；需要重试的请求体必须可重放，否则返回 `ErrRequestBodyNotReplayable`。普通响应超过 `maxBodySize` 时改为返回 `ErrResponseBodyTooLarge`，不再静默截断；流式 SSE 单事件默认上限为 1 MiB。
 - **BREAKING** 数据库生命周期：`clickhouse.Reset`、`elasticsearch.Reset`、`mongodb.Reset` 开始返回资源关闭错误。
@@ -38,23 +37,39 @@
 - **BREAKING** `infra/observe`/`infra/prometheus`：指标标签由 `...string` 改为 `...observe.Tag`，`Metrics.Counter/Gauge/Histogram/Timer` 及 Prometheus registry/adapter 构造与操作开始返回错误；`NewExporter` 改为返回 `(*Exporter, error)`，调用方必须处理运行时收集器注册和工厂构造错误；`Counter.Add` 返回错误，`Gauge` 不再实现 `Counter`。移除 `Prometheus*` 类型、`Collector`、`NewCollector` 与 `Exporter.Collector`，`DefaultBuckets`/`DefaultQuantiles` 由变量改为函数，`Registry.Gather` 返回 `(string, error)`，`Exporter.Shutdown` 改为 `Shutdown(ctx) error`。
 - **BREAKING** `infra/otel`：移除 `OTelTracer`、`OTelConfig`、`OTelOption`、`OTelSpan`、`NewOTelTracer`、`DefaultOTelConfig`、`WithEndpoint` 与 `WithBatchConfig`，统一使用 `Tracer`、`Config`、`Option`、`Span`、`NewTracer` 与 `DefaultConfig`。`NewOTLPExporter` 改为返回 `(*OTLPExporter, error)`；`Tracer.SetExporter(ctx, exporter) error` 接管 exporter 生命周期并返回旧 exporter 的关闭错误。
 - **BREAKING** `lang/errorx`：`MultiError.Append`/`AppendResult` 不再返回接收者，错误聚合改为有界保留并拒绝循环引用；并行执行统一返回 `error`、按输入顺序聚合并限制默认并发；`SafeGo(func()) <-chan error` 返回唯一一次完成结果，`Result.UnwrapOrElse(func(error) T) (T, error)` 对 nil 回调返回可诊断错误。`lang/syncx.OnceErr.Value` 返回顺序改为 `(value, initialized, error)`。
-- **BREAKING** `lang/contextx`：`Run(ctx, func(context.Context) error)` 与 `RunTimeout(parent, timeout, func(context.Context) error)` 改为同步协作取消；`NewPool(ctx, size) (*Pool, error)` 校验 nil context 与非正数容量。
+- **BREAKING** `lang/contextx`：包级 `Go`、`(*WaitGroupContext).Go` 与 `(*Pool).Go` 开始返回 `error`；`Run(ctx, func(context.Context) error)` 与 `RunTimeout(parent, timeout, func(context.Context) error)` 改为同步协作取消；`NewPool(ctx, size) (*Pool, error)` 校验 nil context 与非正数容量。
+- **BREAKING** `lang/timex`：`Now` 由可替换的函数变量改为并发安全函数；需要替换时间提供函数的调用方改用 `SetNowProvider(provider)`，并调用其返回的恢复函数。
 - **BREAKING** `cache/multi`：`Option` 由 `func(*Options)` 改为 `func(*Options) error`；`NewCache(layers, opts...) (*Cache, error)` 与 `Builder.Build() (*Cache, error)` 统一校验空层、nil 层及无效选项，不再通过 panic 或无效实例表达配置错误。
 - **BREAKING** `event`：`BusOption` 由 `func(*Bus)` 改为 `func(*Bus) error`；`New`、`Subscribe`、`SubscribeAll`、`Publish` 与 `PublishSync` 显式返回配置或生命周期错误；`Close` 仅启动非阻塞关闭流程，`Shutdown(ctx)` 负责等待活跃处理器完成；panic 回调自身的 panic 会被隔离。
 - **BREAKING** `util/poolx`：`Go`、`GoWait`、`GoBatch`、`Parallel`、`SetDefaultPool` 开始返回调度错误；`GoCtx` 在 v0.2.6 已返回 `error`，本次不兼容变更是回调由 `func()` 改为 `func(context.Context)`。`SubmitWithContext` 回调同样改为 `func(context.Context)`，`SubmitFuncCtx` 改为 context-first。`NewMultiPool`、`NewObjectPool` 开始返回构造错误。移除任务级 `Timeout` 字段、`WithTaskTimeout`、`HookOnTimeout`、`HookBuilder.OnTimeout` 与 `StealingScheduler.Steal`；删除 timeout hook 后，`HookOnWorkerStart`、`HookOnWorkerStop`、`HookOnScaleUp`、`HookOnScaleDown` 的数值发生重排，依赖枚举数值的调用方必须迁移。
 - **BREAKING** `net/ip`：`GetLocalIP`、`GetOutboundIP`、`ResolveHost`、`ReverseLookup` 全部改为 context-first 签名。
+- **BREAKING** `net/ssrf`：`ValidateURL` 改为 `ValidateURL(ctx, rawURL)` context-first 签名。
+- **BREAKING** `util/config`：`Config.LoadEnv` 与 `SetGlobal` 开始返回错误。
+- **BREAKING** `util/encoding`：`JoinURL` 由返回 `string` 改为返回 `(string, error)`。
+- **BREAKING** `util/idgen`：`Snowflake` 不再可比较。
+- **BREAKING** `util/lease`：`ErrNotHolder` 的静态类型由私有 `*leaseError` 改为 `error`。
+- **BREAKING** `util/pagination`：`Pagination.Page`、`Offset`、`TotalPages`，`New`/`NewWithOffset` 的页码或偏移量参数，以及 `GetRange`、`PrevPage`、`NextPage` 的返回值由 `int` 改为 `int64`；`GetPageNumbers` 改为返回 `[]int64`。
+- **BREAKING** `util/validator`：`FieldError` 移除公开字段 `Value`。
 - **BREAKING** `util/file`：默认文件权限收紧为 `0600`、目录权限收紧为 `0750`；写入与复制改为同目录临时文件、文件同步、原子替换和父目录同步协议，空删除路径与 nil 遍历回调会返回错误。
+- 依赖治理：根模块与 `examples` 移除不再可达的 `github.com/bytedance/gopkg`，减少无效依赖与供应链表面。
+- `cache/local`、`cache/redis`、`cache/multi`：通过私有 NotFound 标记合同识别跨缓存层负缓存错误，避免包耦合、字符串匹配及重复回源。
+- `util/logger`：自定义 `slog.Handler` 共享动态 `LevelVar`，`SetLevel` 现在可以控制 `UseHandler`、`UseHandlerWithConfig` 和 `NewWithHandler` 创建的日志器。
 
 ### Fixed
 - 补齐数据库、HTTP/SSE、文件复制和可观测性链路中的资源关闭与错误传播，避免关闭错误或异步导出错误被静默丢弃。
-- OTLP 批量导出失败时重新入队未发送 span，并在 `Shutdown` 汇总异步导出错误。
+- `infra/otel`：OTLP 批量导出失败时重新入队未发送 Span；`Tracer.Shutdown` 先等待代际排空并刷新最终 Span，再使用调用方 context 停止 exporter 自有任务，并汇总异步导出、刷新和关闭错误。
 - MySQL 超时查询不再在调用方读取结果前提前取消派生上下文。
 - `crypto/sign`：未知 `HMACHash` 不再静默降级为 SHA-256，而是使签名失败；时间窗口验证拒绝负时间戳、非正 `maxAge` 和整数溢出，nonce 验证拒绝空 nonce、nil/typed-nil checker；`TimestampSigner` 复制并独占调用方提供的密钥字节。
 - `util/rand`：Unicode 字符集改为按 rune 采样，整数随机区间改用无溢出计算，完整 `int`/`int64` 范围不再触发区间溢出。
+- `util/encoding`：`JoinURL` 重新校验拼接后的最终 URL，畸形 authority 不再作为无效 URL 静默返回。
+- `os/sandbox`：macOS/Linux 的 hostedtoolcache 路径改为从当前用户主目录派生，不再把固定 Runner 主目录写入二进制。
 
 ### Tests
 - 新增 MySQL 8.4 与 Redis 7.4 具名 ACL 的隔离容器集成测试脚本，并纳入 CI。
 - CI 全量 lint 门禁改为检查整个仓库。
+- API 兼容工作流新增 `v*` Tag 触发与候选版本一致性校验，`v0.3.0` breaking baseline 固定为 34 个不兼容包段。
+- Windows 原生沙箱门禁扩充为 28 项，并修复 PowerShell 将 `git config` 的预期退出码 1 遗留到后续命令的问题。
+- Linux 原生沙箱门禁修正 root/non-root 测试归属，分别验证宿主 Unix Socket 隐藏和非特权外部工作区隔离。
 
 ## [0.2.6] - 2026-07-04
 
