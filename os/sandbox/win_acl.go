@@ -835,8 +835,8 @@ func verifyWindowsDeniedRootTree(root *os.Root, relativePath string, blockedSIDs
 	if identity.attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
 		return fmt.Errorf("denied path entry %q is a reparse point", relativePath)
 	}
-	if err := verifyWindowsHandleDeniedByAppContainer(windows.Handle(file.Fd()), blockedSIDs); err != nil {
-		return fmt.Errorf("audit denied path entry %q: %w", relativePath, err)
+	if verifyErr := verifyWindowsHandleDeniedByAppContainer(windows.Handle(file.Fd()), blockedSIDs); verifyErr != nil {
+		return fmt.Errorf("audit denied path entry %q: %w", relativePath, verifyErr)
 	}
 	if identity.attributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
 		return nil

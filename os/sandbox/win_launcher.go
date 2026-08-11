@@ -346,11 +346,11 @@ func launchSandboxedProcess(
 	}
 
 	// 7. 启动前再次按句柄核验可执行文件与工作目录。
-	if err := executable.revalidate(); err != nil {
-		return nil, errors.Join(err, cleanupWindowsLaunch(stdinR, stdoutR, stdoutW, stderrR, stderrW, job))
+	if revalidateErr := executable.revalidate(); revalidateErr != nil {
+		return nil, errors.Join(revalidateErr, cleanupWindowsLaunch(stdinR, stdoutR, stdoutW, stderrR, stderrW, job))
 	}
-	if err := workingDirectory.revalidate(); err != nil {
-		return nil, errors.Join(err, cleanupWindowsLaunch(stdinR, stdoutR, stdoutW, stderrR, stderrW, job))
+	if revalidateErr := workingDirectory.revalidate(); revalidateErr != nil {
+		return nil, errors.Join(revalidateErr, cleanupWindowsLaunch(stdinR, stdoutR, stdoutW, stderrR, stderrW, job))
 	}
 
 	// 8. 以挂起状态创建进程，确保进入 Job 后才开始执行用户代码。

@@ -24,6 +24,8 @@ var (
 		"/usr/lib",
 		"/usr/libexec",
 		"/usr/share",
+		"/usr/local/bin",
+		"/opt/homebrew/bin",
 		"/Library/Apple",
 		"/Library/Frameworks",
 		"/private/var/db/timezone",
@@ -50,6 +52,8 @@ var (
 		"/usr/sbin",
 		"/usr/lib",
 		"/usr/libexec",
+		"/usr/local/bin",
+		"/opt/homebrew/bin",
 		"/Library/Apple",
 		"/Library/Frameworks",
 	}
