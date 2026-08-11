@@ -173,13 +173,19 @@ jobs:
           pip3 --version
       - name: Normalize checkout line endings (Windows)
         if: runner.os == 'Windows'
-        shell: bash
+        shell: powershell
         run: |
           # Windows runner 的 autocrlf 会把文本文件检出为 CRLF，导致 gofmt/tidy/
           # 合同测试在 Windows 上假失败；不依赖 git 属性转换，直接归一化行尾。
-          find . -type f \( -name '*.go' -o -name '*.go.sum' -o -name '*.txt' \
-            -o -name '*.yml' -o -name '*.yaml' -o -name '*.md' -o -name '*.sh' \
-            -o -name '*.json' \) -print0 | xargs -0 sed -i 's/\r$//'
+          Get-ChildItem -Recurse -File | Where-Object {
+            $_.Extension -in @('.go', '.go.sum', '.txt', '.yml', '.yaml', '.md', '.sh', '.json')
+          } | ForEach-Object {
+            $content = [System.IO.File]::ReadAllText($_.FullName)
+            if ($content.Contains("`r`n")) {
+              $content = $content.Replace("`r`n", "`n")
+              [System.IO.File]::WriteAllText($_.FullName, $content)
+            }
+          }
       - name: Verify root module metadata
         run: go mod tidy -diff
       - run: go mod download
@@ -283,15 +289,6 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - name: Normalize checkout line endings (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          # Windows runner 的 autocrlf 会把文本文件检出为 CRLF，导致 gofmt/tidy/
-          # 合同测试在 Windows 上假失败；不依赖 git 属性转换，直接归一化行尾。
-          find . -type f \( -name '*.go' -o -name '*.go.sum' -o -name '*.txt' \
-            -o -name '*.yml' -o -name '*.yaml' -o -name '*.md' -o -name '*.sh' \
-            -o -name '*.json' \) -print0 | xargs -0 sed -i 's/\r$//'
       - name: Verify hosted runner and checkout credentials
         shell: powershell
         run: |
@@ -329,6 +326,21 @@ jobs:
             }
           }
           $global:LASTEXITCODE = 0
+      - name: Normalize checkout line endings (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          # Windows runner 的 autocrlf 会把文本文件检出为 CRLF，导致 gofmt/tidy/
+          # 合同测试在 Windows 上假失败；不依赖 git 属性转换，直接归一化行尾。
+          Get-ChildItem -Recurse -File | Where-Object {
+            $_.Extension -in @('.go', '.go.sum', '.txt', '.yml', '.yaml', '.md', '.sh', '.json')
+          } | ForEach-Object {
+            $content = [System.IO.File]::ReadAllText($_.FullName)
+            if ($content.Contains("`r`n")) {
+              $content = $content.Replace("`r`n", "`n")
+              [System.IO.File]::WriteAllText($_.FullName, $content)
+            }
+          }
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: '1.25.12'
@@ -397,18 +409,18 @@ jobs:
           $policyXml = @'
           <AppLockerPolicy Version="1">
             <RuleCollection Type="Exe" EnforcementMode="Enabled">
-              <FilePathRule Id="{39501a67-9b8e-4cf8-b8dc-9b207457e325}" Name="Deny Toolkit executable fixture" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
+              <FilePathRule Id="{GUID_RULE_EXE_DENY}" Name="Deny Toolkit executable fixture" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
                 <Conditions><FilePathCondition Path="*\toolkit-policy-blocked.exe" /></Conditions>
               </FilePathRule>
-              <FilePathRule Id="{3f21db7d-4d79-4f38-94bd-62b5d98649e6}" Name="Allow other executables" Description="" UserOrGroupSid="S-1-1-0" Action="Allow">
+              <FilePathRule Id="{GUID_RULE_EXE_ALLOW}" Name="Allow other executables" Description="" UserOrGroupSid="S-1-1-0" Action="Allow">
                 <Conditions><FilePathCondition Path="*" /></Conditions>
               </FilePathRule>
             </RuleCollection>
             <RuleCollection Type="Script" EnforcementMode="Enabled">
-              <FilePathRule Id="{23dfa1ec-b201-46d5-bb70-673a3c59db5d}" Name="Deny Toolkit script fixture" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
+              <FilePathRule Id="{GUID_RULE_SCRIPT_DENY}" Name="Deny Toolkit script fixture" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
                 <Conditions><FilePathCondition Path="*\toolkit-policy-blocked.ps1" /></Conditions>
               </FilePathRule>
-              <FilePathRule Id="{e1b6d98e-b45b-4818-9398-d05a2e2dc654}" Name="Allow other scripts" Description="" UserOrGroupSid="S-1-1-0" Action="Allow">
+              <FilePathRule Id="{GUID_RULE_SCRIPT_ALLOW}" Name="Allow other scripts" Description="" UserOrGroupSid="S-1-1-0" Action="Allow">
                 <Conditions><FilePathCondition Path="*" /></Conditions>
               </FilePathRule>
             </RuleCollection>
@@ -417,6 +429,12 @@ jobs:
             <RuleCollection Type="Appx" EnforcementMode="NotConfigured" />
           </AppLockerPolicy>
           '@
+          # AppLocker 的 GuidType 只接受无花括号的标准 GUID；占位符在运行时生成，
+          # 避免硬编码 GUID 触发 XML schema pattern 校验失败。
+          $policyXml = $policyXml.Replace('{GUID_RULE_EXE_DENY}', [guid]::NewGuid().ToString())
+          $policyXml = $policyXml.Replace('{GUID_RULE_EXE_ALLOW}', [guid]::NewGuid().ToString())
+          $policyXml = $policyXml.Replace('{GUID_RULE_SCRIPT_DENY}', [guid]::NewGuid().ToString())
+          $policyXml = $policyXml.Replace('{GUID_RULE_SCRIPT_ALLOW}', [guid]::NewGuid().ToString())
           Set-Content -LiteralPath $policyPath -Encoding UTF8 -Value $policyXml
           Set-AppLockerPolicy -XmlPolicy $policyPath
 
@@ -834,13 +852,19 @@ jobs:
           check-latest: false
       - name: Normalize checkout line endings (Windows)
         if: runner.os == 'Windows'
-        shell: bash
+        shell: powershell
         run: |
           # Windows runner 的 autocrlf 会把文本文件检出为 CRLF，导致 gofmt/tidy/
           # 合同测试在 Windows 上假失败；不依赖 git 属性转换，直接归一化行尾。
-          find . -type f \( -name '*.go' -o -name '*.go.sum' -o -name '*.txt' \
-            -o -name '*.yml' -o -name '*.yaml' -o -name '*.md' -o -name '*.sh' \
-            -o -name '*.json' \) -print0 | xargs -0 sed -i 's/\r$//'
+          Get-ChildItem -Recurse -File | Where-Object {
+            $_.Extension -in @('.go', '.go.sum', '.txt', '.yml', '.yaml', '.md', '.sh', '.json')
+          } | ForEach-Object {
+            $content = [System.IO.File]::ReadAllText($_.FullName)
+            if ($content.Contains("`r`n")) {
+              $content = $content.Replace("`r`n", "`n")
+              [System.IO.File]::WriteAllText($_.FullName, $content)
+            }
+          }
       - name: Verify examples module metadata
         shell: bash
         working-directory: examples
@@ -877,15 +901,6 @@ jobs:
         with:
           fetch-depth: 0  # only-new-issues 需完整历史以计算与基线的差异
           persist-credentials: false
-      - name: Normalize checkout line endings (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          # Windows runner 的 autocrlf 会把文本文件检出为 CRLF，导致 gofmt/tidy/
-          # 合同测试在 Windows 上假失败；不依赖 git 属性转换，直接归一化行尾。
-          find . -type f \( -name '*.go' -o -name '*.go.sum' -o -name '*.txt' \
-            -o -name '*.yml' -o -name '*.yaml' -o -name '*.md' -o -name '*.sh' \
-            -o -name '*.json' \) -print0 | xargs -0 sed -i 's/\r$//'
       - name: Verify checkout credentials are absent
         shell: bash
         run: |
@@ -903,6 +918,21 @@ jobs:
               exit 1
             fi
           done
+      - name: Normalize checkout line endings (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          # Windows runner 的 autocrlf 会把文本文件检出为 CRLF，导致 gofmt/tidy/
+          # 合同测试在 Windows 上假失败；不依赖 git 属性转换，直接归一化行尾。
+          Get-ChildItem -Recurse -File | Where-Object {
+            $_.Extension -in @('.go', '.go.sum', '.txt', '.yml', '.yaml', '.md', '.sh', '.json')
+          } | ForEach-Object {
+            $content = [System.IO.File]::ReadAllText($_.FullName)
+            if ($content.Contains("`r`n")) {
+              $content = $content.Replace("`r`n", "`n")
+              [System.IO.File]::WriteAllText($_.FullName, $content)
+            }
+          }
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: '1.25.12'
