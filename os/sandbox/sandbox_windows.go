@@ -256,10 +256,16 @@ func (s *windowsSandbox) prepareCommand(requested Command) (Command, error) {
 	if strings.IndexByte(requested.Path, 0) >= 0 {
 		return Command{}, fmt.Errorf("sandbox command path contains NUL")
 	}
-	command := Command{
-		Path: requested.Path,
-		Args: append([]string(nil), requested.Args...),
-		Dir:  requested.Dir,
+	// 与 POSIX 路径一致，先快照 workspace 与 command directory 身份，使
+	// revalidateSandboxExecutionPaths 能在启动前检测目录替换；Windows 专属的
+	// 短名/句柄校验由后续 resolveWindows* 负责。
+	workspacePath := s.workspace.canonicalPath
+	if workspacePath == "" {
+		workspacePath = s.cfg.Workspace
+	}
+	command, err := snapshotSandboxCommandPaths(Config{Workspace: workspacePath}, requested)
+	if err != nil {
+		return Command{}, err
 	}
 	for index, argument := range command.Args {
 		if strings.IndexByte(argument, 0) >= 0 {
