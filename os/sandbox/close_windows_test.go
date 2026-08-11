@@ -61,8 +61,9 @@ func TestWindowsWorkspaceClosePreservesEveryHandleError(t *testing.T) {
 	if !ok {
 		t.Fatalf("workspace close error type = %T, want joined error", err)
 	}
-	if got := len(joined.Unwrap()); got != 2 {
-		t.Fatalf("workspace close error count = %d, want 2", got)
+	// os.Root.Close 幂等（二次调用返回 nil），只有 rootGuard 的二次关闭报 ErrClosed。
+	if got := len(joined.Unwrap()); got != 1 {
+		t.Fatalf("workspace close error count = %d, want 1", got)
 	}
 }
 

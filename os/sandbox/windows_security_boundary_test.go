@@ -181,7 +181,8 @@ func TestWindows_ContextCanceledRootPayload(t *testing.T) {
 		return
 	}
 	childReadyPath := "cancel-child.ready"
-	child := exec.Command(
+	child := exec.CommandContext(
+		context.Background(),
 		os.Args[0],
 		"-test.run=^TestWindows_ContextCanceledChildPayload$",
 		"-test.count=1",
@@ -224,7 +225,7 @@ func TestWindows_ContextCanceledChildPayload(t *testing.T) {
 }
 
 func windowsTCP4Fixture() (string, func(), error) {
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp4", "127.0.0.1:0")
 	if err != nil {
 		return "", nil, err
 	}
@@ -232,7 +233,7 @@ func windowsTCP4Fixture() (string, func(), error) {
 }
 
 func windowsTCP6Fixture() (string, func(), error) {
-	listener, err := net.Listen("tcp6", "[::1]:0")
+	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp6", "[::1]:0")
 	if err != nil {
 		return "", nil, err
 	}
@@ -240,7 +241,7 @@ func windowsTCP6Fixture() (string, func(), error) {
 }
 
 func windowsUDP4Fixture() (string, func(), error) {
-	connection, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	connection, err := (&net.ListenConfig{}).ListenPacket(context.Background(), "udp4", "127.0.0.1:0")
 	if err != nil {
 		return "", nil, err
 	}

@@ -179,15 +179,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # 镜像自带 pip3 缺失 pip 模块，且 homebrew 为 externally-managed 环境；
-          # PYTHONBREAKSYSTEMPACKAGES=1 绕过 PEP 668，用 ensurepip 重建完整 pip 包
-          # 与脚本（--ignore-installed 只会装脚本不装包，导致 ModuleNotFoundError）。
-          if PYTHONBREAKSYSTEMPACKAGES=1 python3 -m ensurepip --upgrade >/dev/null 2>&1; then
-            :
-          else
-            curl -fsSL -o "$RUNNER_TEMP/get-pip.py" https://bootstrap.pypa.io/get-pip.py
-            PYTHONBREAKSYSTEMPACKAGES=1 python3 "$RUNNER_TEMP/get-pip.py" --break-system-packages
-          fi
+          # 镜像自带 pip3 缺失 pip 模块且残留损坏的 dist-info 记录（ensurepip/get-pip
+          # 升级时卸载报 uninstall-no-record-file、--ignore-installed 跳过包安装）。
+          # 物理清理 site-packages 的 pip 痕迹后全新安装包与脚本。
+          SITE_PACKAGES="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+          rm -rf "$SITE_PACKAGES"/pip "$SITE_PACKAGES"/pip-*.dist-info
+          curl -fsSL -o "$RUNNER_TEMP/get-pip.py" https://bootstrap.pypa.io/get-pip.py
+          PYTHONBREAKSYSTEMPACKAGES=1 python3 "$RUNNER_TEMP/get-pip.py" --break-system-packages
           node --version
           pip3 --version
       - name: Verify root module metadata

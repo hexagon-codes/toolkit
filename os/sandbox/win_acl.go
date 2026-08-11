@@ -92,11 +92,11 @@ func prepareWindowsWorkspace(cfg Config) (_ *windowsWorkspace, resultErr error) 
 	if err != nil {
 		return nil, fmt.Errorf("inspect Windows workspace handle: %w", err)
 	}
-	if identity.attributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
-		return nil, fmt.Errorf("Windows sandbox workspace must be a directory")
-	}
 	if identity.attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
 		return nil, fmt.Errorf("Windows sandbox workspace must not be a reparse point")
+	}
+	if identity.attributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+		return nil, fmt.Errorf("Windows sandbox workspace must be a directory")
 	}
 	if !guardIdentity.sameObjectAndContent(identity) {
 		return nil, fmt.Errorf("Windows sandbox workspace changed while opening the root")
