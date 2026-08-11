@@ -15,7 +15,9 @@ func TestWriteReplacesDestinationInsteadOfTruncatingItInPlace(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	previous, err := os.Open(path)
+	// Windows 上 os.Open 的 share 模式不含 FILE_SHARE_DELETE，保持其打开的
+	// 句柄会阻止原子替换；改用带 DELETE share 的句柄验证替换语义。
+	previous, err := openWithDeleteShare(path)
 	if err != nil {
 		t.Fatal(err)
 	}

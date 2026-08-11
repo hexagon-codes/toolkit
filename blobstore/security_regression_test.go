@@ -50,7 +50,9 @@ func TestSetTTLReplacesMetadataAtomically(t *testing.T) {
 	}
 
 	metadataPath := filepath.Join(store.Root(), filepath.FromSlash(relPath)) + ttlSuffix
-	previous, err := os.Open(metadataPath)
+	// Windows 上 os.Open 的 share 模式不含 FILE_SHARE_DELETE，保持其打开的
+	// 句柄会阻止原子替换；改用带 DELETE share 的句柄验证替换语义。
+	previous, err := openWithDeleteShare(metadataPath)
 	if err != nil {
 		t.Fatalf("open first TTL metadata: %v", err)
 	}

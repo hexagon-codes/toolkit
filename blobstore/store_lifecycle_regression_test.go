@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -81,6 +82,11 @@ func TestStoreOperationsRemainBoundToOpenedRootAfterPathRebind(t *testing.T) {
 		t.Fatalf("ExpiresAt before rebind = (_, %v, %v), want metadata", ok, err)
 	}
 
+	// Windows 上 os.OpenRoot 的句柄 share 模式不含 FILE_SHARE_DELETE，打开着的
+	// 根目录无法被 rename；该场景（打开句柄 + 重命名根）是 Unix 专属语义。
+	if runtime.GOOS == "windows" {
+		t.Skip("renaming an open root directory is unsupported on Windows (os.Root share mode lacks FILE_SHARE_DELETE)")
+	}
 	openedRootPath := filepath.Join(parent, "opened-root")
 	if renameErr := os.Rename(rootPath, openedRootPath); renameErr != nil {
 		t.Fatalf("rename opened root: %v", renameErr)
