@@ -109,8 +109,6 @@ jobs:
         with:
           path: toolkit
           persist-credentials: false
-          git-config: |
-            core.autocrlf=false
 
       - name: Checkout ai-core
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -119,8 +117,6 @@ jobs:
           ref: main
           path: ai-core
           persist-credentials: false
-          git-config: |
-            core.autocrlf=false
 
       - name: Checkout hexagon
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -129,8 +125,6 @@ jobs:
           ref: main
           path: hexagon
           persist-credentials: false
-          git-config: |
-            core.autocrlf=false
 
       - name: Checkout hexclaw
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -139,8 +133,6 @@ jobs:
           ref: ${{ env.HEXCLAW_REF }}
           path: hexclaw
           persist-credentials: false
-          git-config: |
-            core.autocrlf=false
 
       - name: Remove checkout credentials and verify clean state
         shell: bash
@@ -196,6 +188,23 @@ jobs:
             fi
           done
 
+      - name: Normalize checkout line endings (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Windows runner 全局 autocrlf=true 会把文本文件检出为 CRLF，导致 gofmt/tidy/
+          # 合同测试假失败。先关闭 local autocrlf（git status 按原始字节对比，工作树
+          # LF 不再被误判为改动），再把文本文件归一化为 LF。
+          git config core.autocrlf false
+          Get-ChildItem -Recurse -File | Where-Object {
+            $_.Extension -in @('.go', '.mod', '.sum', '.txt', '.yml', '.yaml', '.md', '.sh', '.json')
+          } | ForEach-Object {
+            $content = [System.IO.File]::ReadAllText($_.FullName)
+            if ($content.Contains("`r`n")) {
+              $content = $content.Replace("`r`n", "`n")
+              [System.IO.File]::WriteAllText($_.FullName, $content)
+            }
+          }
       - name: Setup Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:

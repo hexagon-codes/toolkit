@@ -2,6 +2,7 @@ package cicheck
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -1575,7 +1576,7 @@ func readContractFile(t *testing.T, path string) string {
 
 // validateInstallerIndexMode 校验安装器在 git index 中的可执行位（跨平台权威来源）。
 func validateInstallerIndexMode(path string) error {
-	cmd := exec.Command("git", "ls-files", "--stage", "--", path)
+	cmd := exec.CommandContext(context.Background(), "git", "ls-files", "--stage", "--", path)
 	output, err := cmd.Output()
 	if err != nil {
 		return fmt.Errorf("query installer index mode: %w", err)
