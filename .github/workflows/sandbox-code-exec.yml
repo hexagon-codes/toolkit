@@ -115,7 +115,6 @@ jobs:
           repository: hexagon-codes/hexclaw
           ref: ${{ env.HEXCLAW_REF }}
           path: hexclaw
-          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           persist-credentials: false
 
       - name: Remove checkout credentials and verify clean state
@@ -163,7 +162,7 @@ jobs:
             exit 1
           fi
 
-          for name in PRIVATE_REPO_TOKEN GH_TOKEN GITHUB_TOKEN GIT_ASKPASS SSH_ASKPASS GIT_SSH GIT_SSH_COMMAND GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+          for name in GH_TOKEN GITHUB_TOKEN GIT_ASKPASS SSH_ASKPASS GIT_SSH GIT_SSH_COMMAND GIT_CONFIG_COUNT; do
             if printenv "$name" >/dev/null 2>&1; then
               echo "Credential environment remains after cleanup: $name" >&2
               exit 1
@@ -188,85 +187,6 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
-
-      - name: Download private dependencies with ephemeral credentials
-        shell: bash
-        working-directory: hexclaw
-        env:
-          GOWORK: "off"
-          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [[ -z "${PRIVATE_REPO_TOKEN:-}" ]]; then
-            echo "PRIVATE_REPO_TOKEN is required." >&2
-            exit 1
-          fi
-
-          credential="x-access-token:$PRIVATE_REPO_TOKEN"
-          encoded="$(printf '%s' "$credential" | base64 | tr -d '\r\n')"
-          unset PRIVATE_REPO_TOKEN credential
-          export GIT_CONFIG_COUNT=1
-          export GIT_CONFIG_KEY_0='http.https://github.com/hexagon-codes/.extraheader'
-          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $encoded"
-
-          cleanup_environment() {
-            unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 encoded
-          }
-          trap cleanup_environment EXIT
-          go mod download all
-
-      - name: Remove dependency credentials and verify clean state
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          pattern='^(http\..*\.extraheader|credential\..*|core\.askpass|url\..*\.insteadof)$'
-
-          remove_git_auth_config() {
-            label="$1"
-            shift
-            set +e
-            keys="$(git "$@" --name-only --get-regexp "$pattern" 2>/dev/null)"
-            query_exit=$?
-            set -e
-            if [[ $query_exit -ne 0 && $query_exit -ne 1 ]]; then
-              echo "Failed to inspect Git credential configuration: $label" >&2
-              return 1
-            fi
-            if [[ -n "$keys" ]]; then
-              while IFS= read -r key; do
-                git "$@" --unset-all "$key"
-              done <<<"$keys"
-            fi
-
-            set +e
-            remaining="$(git "$@" --name-only --get-regexp "$pattern" 2>/dev/null)"
-            verify_exit=$?
-            set -e
-            if [[ $verify_exit -eq 0 || -n "$remaining" ]]; then
-              echo "Git credential configuration remains after cleanup: $label" >&2
-              return 1
-            fi
-            if [[ $verify_exit -ne 1 ]]; then
-              echo "Failed to verify Git credential cleanup: $label" >&2
-              return 1
-            fi
-          }
-
-          remove_git_auth_config toolkit -C toolkit config --local
-          remove_git_auth_config hexclaw -C hexclaw config --local
-
-          if git config --global --name-only --get-regexp "$pattern"; then
-            echo "Global Git credential configuration remains after dependency download." >&2
-            exit 1
-          fi
-
-          for name in PRIVATE_REPO_TOKEN GH_TOKEN GITHUB_TOKEN GIT_ASKPASS SSH_ASKPASS GIT_SSH GIT_SSH_COMMAND GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
-            if printenv "$name" >/dev/null 2>&1; then
-              echo "Credential environment remains after dependency download: $name" >&2
-              exit 1
-            fi
-          done
 
       - name: Install Linux sandbox dependencies
         if: runner.os == 'Linux'
