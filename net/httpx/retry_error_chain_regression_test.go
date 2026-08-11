@@ -98,7 +98,7 @@ func TestClientPreservesAttemptErrorWhenContextCancelsBackoff(t *testing.T) {
 		return nil, attemptErr
 	})
 
-	response, err := client.R().SetContext(ctx).Get("https://example.com/resource")
+	response, err := client.R(ctx).Get("https://example.com/resource")
 	if response != nil {
 		t.Fatalf("Client.Get() response = %#v, want nil", response)
 	}

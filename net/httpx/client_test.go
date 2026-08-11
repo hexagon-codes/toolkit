@@ -58,7 +58,7 @@ func TestRequest_ResponseBodyLimitIsEnforced(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := MustNewClient(WithMaxBodySize(4)).R().Get(server.URL)
+	_, err := MustNewClient(WithMaxBodySize(4)).R(context.Background()).Get(server.URL)
 	if !errors.Is(err, ErrResponseBodyTooLarge) {
 		t.Fatalf("expected ErrResponseBodyTooLarge, got %v", err)
 	}
@@ -70,7 +70,7 @@ func TestRequest_ResponseBodyAtLimitSucceeds(t *testing.T) {
 	}))
 	defer server.Close()
 
-	resp, err := MustNewClient(WithMaxBodySize(4)).R().Get(server.URL)
+	resp, err := MustNewClient(WithMaxBodySize(4)).R(context.Background()).Get(server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestRequest_SetBodyRejectsNonReplayableReaderWhenRetrying(t *testing.T) {
 	client := MustNewClient(WithRetry(1, time.Millisecond))
 	reader := ioReaderOnly{Reader: strings.NewReader("payload")}
 
-	_, err := client.R().SetBody(reader).Put("http://example.invalid")
+	_, err := client.R(context.Background()).SetBody(reader).Put("http://example.invalid")
 	if !errors.Is(err, ErrRequestBodyNotReplayable) {
 		t.Fatalf("expected ErrRequestBodyNotReplayable, got %v", err)
 	}
@@ -103,7 +103,7 @@ func TestRequest_SetBodyReplaysKnownReader(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := MustNewClient(WithRetry(1, time.Millisecond)).R().
+	_, err := MustNewClient(WithRetry(1, time.Millisecond)).R(context.Background()).
 		SetHeader("Idempotency-Key", "request-1").
 		SetBody(strings.NewReader("payload")).
 		Post(server.URL)
@@ -139,7 +139,7 @@ func TestRequest_SetBodySnapshotsMutableReaders(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			reader, mutate := test.reader()
-			request := MustNewClient(WithRetry(1, time.Millisecond)).R().SetBody(reader)
+			request := MustNewClient(WithRetry(1, time.Millisecond)).R(context.Background()).SetBody(reader)
 			mutate()
 
 			var replay bytes.Buffer
@@ -229,7 +229,7 @@ func TestGet(t *testing.T) {
 	}))
 	defer server.Close()
 
-	resp, err := Get(server.URL)
+	resp, err := Get(context.Background(), server.URL)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestGet(t *testing.T) {
 	}
 }
 
-func TestGetWithContext(t *testing.T) {
+func TestGetUsesContext(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -252,7 +252,7 @@ func TestGetWithContext(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	resp, err := GetWithContext(ctx, server.URL)
+	resp, err := Get(ctx, server.URL)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestPost(t *testing.T) {
 	}))
 	defer server.Close()
 
-	resp, err := Post(server.URL, map[string]string{"name": "test"})
+	resp, err := Post(context.Background(), server.URL, map[string]string{"name": "test"})
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -307,7 +307,7 @@ func TestPostForm(t *testing.T) {
 	}))
 	defer server.Close()
 
-	resp, err := PostForm(server.URL, map[string]string{"name": "test"})
+	resp, err := PostForm(context.Background(), server.URL, map[string]string{"name": "test"})
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -326,7 +326,7 @@ func TestPut(t *testing.T) {
 	}))
 	defer server.Close()
 
-	resp, err := Put(server.URL, map[string]string{"name": "test"})
+	resp, err := Put(context.Background(), server.URL, map[string]string{"name": "test"})
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -345,7 +345,7 @@ func TestDelete(t *testing.T) {
 	}))
 	defer server.Close()
 
-	resp, err := Delete(server.URL)
+	resp, err := Delete(context.Background(), server.URL)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -368,7 +368,7 @@ func TestRequestWithQuery(t *testing.T) {
 	defer server.Close()
 
 	c := MustNewClient()
-	resp, err := c.R().
+	resp, err := c.R(context.Background()).
 		SetQuery("name", "test").
 		SetQueries(map[string]string{"page": "1"}).
 		Get(server.URL)
@@ -395,7 +395,7 @@ func TestRequestWithHeaders(t *testing.T) {
 	defer server.Close()
 
 	c := MustNewClient()
-	resp, err := c.R().
+	resp, err := c.R(context.Background()).
 		SetHeader("X-Custom", "value").
 		SetHeaders(map[string]string{"X-Another": "value2"}).
 		Get(server.URL)
@@ -417,7 +417,7 @@ func TestResponseJSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	resp, err := Get(server.URL)
+	resp, err := Get(context.Background(), server.URL)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -485,7 +485,7 @@ func TestBaseURL(t *testing.T) {
 	defer server.Close()
 
 	c := MustNewClient(WithBaseURL(server.URL))
-	resp, err := c.R().Get("/api/users")
+	resp, err := c.R(context.Background()).Get("/api/users")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -508,7 +508,7 @@ func TestQueryWithExistingQuery(t *testing.T) {
 	defer server.Close()
 
 	c := MustNewClient()
-	_, err := c.R().
+	_, err := c.R(context.Background()).
 		SetQuery("b", "2").
 		Get(server.URL + "?a=1")
 
@@ -530,7 +530,7 @@ func TestRetry(t *testing.T) {
 	defer server.Close()
 
 	c := MustNewClient(WithRetry(3, 10*time.Millisecond))
-	resp, err := c.R().Get(server.URL)
+	resp, err := c.R(context.Background()).Get(server.URL)
 
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -555,7 +555,7 @@ func TestPatch(t *testing.T) {
 	defer server.Close()
 
 	c := MustNewClient()
-	resp, err := c.R().Patch(server.URL)
+	resp, err := c.R(context.Background()).Patch(server.URL)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -576,7 +576,7 @@ func TestHead(t *testing.T) {
 	defer server.Close()
 
 	c := MustNewClient()
-	resp, err := c.R().Head(server.URL)
+	resp, err := c.R(context.Background()).Head(server.URL)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -597,7 +597,7 @@ func TestContextCancellation(t *testing.T) {
 	cancel() // Cancel immediately
 
 	c := MustNewClient()
-	_, err := c.R().SetContext(ctx).Get(server.URL)
+	_, err := c.R(ctx).Get(server.URL)
 
 	if err == nil {
 		t.Error("expected error for canceled context")
@@ -610,7 +610,7 @@ func TestRequestBodyReplacementClearsPreviousJSONError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	request := MustNewClient().R().SetJSONBody(func() {})
+	request := MustNewClient().R(context.Background()).SetJSONBody(func() {})
 	if _, err := request.Post(server.URL); err == nil {
 		t.Fatal("Post() error = nil after an unsupported JSON value")
 	}

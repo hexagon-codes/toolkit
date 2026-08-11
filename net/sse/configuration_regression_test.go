@@ -95,6 +95,7 @@ func TestClientRejectsInvalidConfiguration(t *testing.T) {
 func TestClientConnectRejectsNilContext(t *testing.T) {
 	client := mustClient(NewClient("https://example.com/events"))
 	defer client.CloseIdleConnections()
+	//lint:ignore SA1012 需要验证公开 API 对 nil context 的错误合同。
 	//nolint:staticcheck // 需要验证公开 API 对 nil context 的错误合同。
 	stream, err := client.Connect(nil)
 	if stream != nil || !errors.Is(err, ErrInvalidContext) {

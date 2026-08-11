@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"net"
 	"net/http"
@@ -50,6 +51,10 @@ var (
 	ErrMaxLineBytesExceeded = errors.New("sse: exceeded maximum line bytes limit")
 	// ErrMaxEventBytesExceeded 表示单个事件超过读取器上限。
 	ErrMaxEventBytesExceeded = errors.New("sse: exceeded maximum event bytes limit")
+	// ErrInvalidCollectionConfig 表示聚合读取缺少明确的资源预算。
+	ErrInvalidCollectionConfig = errors.New("sse: invalid collection configuration")
+	// ErrMaxEventsExceeded 表示聚合事件数超过调用方设置的上限。
+	ErrMaxEventsExceeded = errors.New("sse: exceeded maximum collected events limit")
 )
 
 const (
@@ -111,6 +116,7 @@ type Reader struct {
 	retrySet         bool
 	atStart          bool
 	skipLeadingLF    bool
+	pendingCRBytes   int64
 	terminalErr      error
 	readMu           sync.Mutex
 	mu               sync.RWMutex
@@ -372,11 +378,12 @@ func (r *Reader) Read() (*Event, error) {
 			line = strings.TrimPrefix(line, "\ufeff")
 			r.atStart = false
 		}
+		if rawLineBytes > math.MaxInt64-eventBytes ||
+			r.maxEventBytes > 0 && rawLineBytes > r.maxEventBytes-eventBytes {
+			return nil, r.setTerminalError(ErrMaxEventBytesExceeded)
+		}
+		eventBytes += rawLineBytes
 		if line != "" {
-			if r.maxEventBytes > 0 && rawLineBytes > r.maxEventBytes-eventBytes {
-				return nil, r.setTerminalError(ErrMaxEventBytesExceeded)
-			}
-			eventBytes += rawLineBytes
 			r.parseField(event, &dataLines, line)
 		}
 
@@ -482,6 +489,7 @@ func (r *Reader) setTerminalError(err error) error {
 // readLine 识别 CRLF、单独 LF 和单独 CR，并在追加前执行字节上限检查。
 func (r *Reader) readLine() (text string, rawBytes int64, err error) {
 	line := make([]byte, 0, 128)
+	var lineBytes int64
 	var firstByte byte
 	hasFirstByte := false
 
@@ -489,12 +497,21 @@ func (r *Reader) readLine() (text string, rawBytes int64, err error) {
 		character, err := r.readByte()
 		r.skipLeadingLF = false
 		if err != nil {
+			r.pendingCRBytes = 0
 			return "", 0, err
 		}
-		if character != '\n' {
+		if character == '\n' {
+			rawBytes = 1
+			if r.pendingCRBytes == math.MaxInt64 ||
+				r.maxLineBytes > 0 && r.pendingCRBytes >= r.maxLineBytes {
+				r.pendingCRBytes = 0
+				return "", rawBytes, ErrMaxLineBytesExceeded
+			}
+		} else {
 			firstByte = character
 			hasFirstByte = true
 		}
+		r.pendingCRBytes = 0
 	}
 
 	for {
@@ -510,8 +527,12 @@ func (r *Reader) readLine() (text string, rawBytes int64, err error) {
 			}
 		}
 
+		if rawBytes == math.MaxInt64 || lineBytes == math.MaxInt64 {
+			return "", rawBytes, ErrMaxLineBytesExceeded
+		}
 		rawBytes++
-		if r.maxLineBytes > 0 && rawBytes > r.maxLineBytes {
+		lineBytes++
+		if r.maxLineBytes > 0 && lineBytes > r.maxLineBytes {
 			return "", rawBytes, ErrMaxLineBytesExceeded
 		}
 		switch character {
@@ -519,6 +540,7 @@ func (r *Reader) readLine() (text string, rawBytes int64, err error) {
 			return string(line), rawBytes, nil
 		case '\r':
 			r.skipLeadingLF = true
+			r.pendingCRBytes = lineBytes
 			return string(line), rawBytes, nil
 		default:
 			line = append(line, character)
@@ -531,7 +553,7 @@ func (r *Reader) readByte() (byte, error) {
 	if err != nil {
 		return 0, err
 	}
-	if r.maxTotalBytes > 0 && r.totalBytes >= r.maxTotalBytes {
+	if r.totalBytes == math.MaxInt64 || r.maxTotalBytes > 0 && r.totalBytes >= r.maxTotalBytes {
 		return 0, ErrMaxBytesExceeded
 	}
 	r.totalBytes++
@@ -740,6 +762,8 @@ type ClientConfig struct {
 	HTTPClient *http.Client
 	// LastEventID 上次事件 ID（用于断点续传）
 	LastEventID string
+	// ReaderOptions 配置响应流解析器的资源与协议策略。
+	ReaderOptions []ReaderOption
 }
 
 // Client SSE 客户端
@@ -773,6 +797,7 @@ func NewClient(url string, opts ...ClientOption) (*Client, error) {
 
 	immutableConfig := config
 	immutableConfig.Headers = cloneHeaders(config.Headers)
+	immutableConfig.ReaderOptions = append([]ReaderOption(nil), config.ReaderOptions...)
 
 	if immutableConfig.HTTPClient == nil {
 		defaultTransport, ok := http.DefaultTransport.(*http.Transport)
@@ -839,6 +864,22 @@ func validateClientConfig(config ClientConfig) error {
 			return err
 		}
 	}
+	if err := validateReaderOptions(config.ReaderOptions); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateReaderOptions(options []ReaderOption) error {
+	probe := &Reader{}
+	for index, option := range options {
+		if option == nil {
+			return fmt.Errorf("%w: reader option %d must not be nil", ErrInvalidReaderConfig, index)
+		}
+		if err := option(probe); err != nil {
+			return fmt.Errorf("%w: reader option %d: %w", ErrInvalidReaderConfig, index, err)
+		}
+	}
 	return nil
 }
 
@@ -879,6 +920,15 @@ func WithLastEventID(id string) ClientOption {
 			return err
 		}
 		c.LastEventID = id
+		return nil
+	}
+}
+
+// WithReaderOptions 设置响应流 Reader 使用的协议与资源上限。
+func WithReaderOptions(options ...ReaderOption) ClientOption {
+	copied := append([]ReaderOption(nil), options...)
+	return func(config *ClientConfig) error {
+		config.ReaderOptions = append(config.ReaderOptions, copied...)
 		return nil
 	}
 }
@@ -975,7 +1025,7 @@ func (c *Client) Connect(ctx context.Context) (*Stream, error) {
 		return nil, errors.Join(contentTypeErr, closeResponseBody(resp.Body))
 	}
 
-	reader, err := NewReader(resp.Body)
+	reader, err := NewReaderWithOptions(resp.Body, c.config.ReaderOptions...)
 	if err != nil {
 		return nil, errors.Join(err, closeResponseBody(resp.Body))
 	}
@@ -1390,16 +1440,26 @@ func IsOpenAIDone(event *Event) bool {
 	return strings.TrimSpace(event.Data) == OpenAIDoneToken
 }
 
-// ReadOpenAIStream 读取 OpenAI 格式的流式响应
-func ReadOpenAIStream[T any](r io.Reader, handler func(T) error) error {
-	if handler == nil {
-		return ErrInvalidHandler
-	}
+// ReadOpenAIStream 读取 OpenAI 格式的流式响应。
+//
+// Reader 创建成功后，本函数接管实现 io.Closer 的输入，并在返回前恰好关闭一次。
+// 关闭错误会与读取、解码或处理错误合并，调用方可通过 errors.Is/As 分别判定。
+func ReadOpenAIStream[T any](r io.Reader, handler func(T) error) (err error) {
 	reader, err := NewReader(r)
 	if err != nil {
 		return err
 	}
+	defer func() {
+		err = errors.Join(err, reader.Close())
+	}()
+	if handler == nil {
+		return ErrInvalidHandler
+	}
+	return consumeOpenAIStream(reader, 0, handler)
+}
 
+func consumeOpenAIStream[T any](reader *Reader, maxEvents int, handler func(T) error) error {
+	consumed := 0
 	for {
 		event, err := reader.Read()
 		if err != nil {
@@ -1412,6 +1472,9 @@ func ReadOpenAIStream[T any](r io.Reader, handler func(T) error) error {
 		if IsOpenAIDone(event) {
 			return nil
 		}
+		if maxEvents > 0 && consumed >= maxEvents {
+			return ErrMaxEventsExceeded
+		}
 
 		var item T
 		if err := event.JSON(&item); err != nil {
@@ -1421,15 +1484,56 @@ func ReadOpenAIStream[T any](r io.Reader, handler func(T) error) error {
 		if err := handler(item); err != nil {
 			return err
 		}
+		consumed++
 	}
 }
 
-// CollectOpenAIStream 收集 OpenAI 格式的所有流式响应
-func CollectOpenAIStream[T any](r io.Reader) ([]T, error) {
-	var results []T
-	err := ReadOpenAIStream(r, func(item T) error {
+// CollectConfig 定义聚合流必须遵守的显式资源预算。
+type CollectConfig struct {
+	// MaxEvents 限制最多保留的业务事件数，必须为正数。
+	MaxEvents int
+	// MaxTotalBytes 限制整个输入流读取的原始字节数，必须为正数。
+	MaxTotalBytes int64
+}
+
+func (config CollectConfig) validate() error {
+	if config.MaxEvents <= 0 {
+		return fmt.Errorf("%w: maximum events must be positive", ErrInvalidCollectionConfig)
+	}
+	if config.MaxTotalBytes <= 0 {
+		return fmt.Errorf("%w: maximum total bytes must be positive", ErrInvalidCollectionConfig)
+	}
+	return nil
+}
+
+// CollectOpenAIStream 在显式事件数与总字节预算内聚合 OpenAI 格式流。
+//
+// Reader 创建成功后，本函数接管实现 io.Closer 的输入，并在返回前恰好关闭一次。
+// 任意读取、解码、预算或关闭错误都会返回 nil，避免把部分结果误认为完整聚合结果；
+// 关闭错误会与原错误合并，调用方可通过 errors.Is/As 分别判定。
+func CollectOpenAIStream[T any](r io.Reader, config CollectConfig) (results []T, err error) {
+	reader, err := NewReader(r)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		err = errors.Join(err, reader.Close())
+		if err != nil {
+			results = nil
+		}
+	}()
+	if err := config.validate(); err != nil {
+		return nil, err
+	}
+	if err := WithMaxTotalBytes(config.MaxTotalBytes)(reader); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidCollectionConfig, err)
+	}
+	err = consumeOpenAIStream(reader, config.MaxEvents, func(item T) error {
 		results = append(results, item)
 		return nil
 	})
-	return results, err
+	if err != nil {
+		return nil, err
+	}
+	return results, nil
 }

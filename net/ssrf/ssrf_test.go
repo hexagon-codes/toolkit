@@ -1,7 +1,9 @@
 package ssrf
 
 import (
+	"context"
 	"fmt"
+	"net/netip"
 	"strings"
 	"testing"
 )
@@ -10,9 +12,9 @@ import (
 // resolver (including proxy fake-IP DNS). Public entries use documentation-only
 // address ranges; private entries exercise every blocked address family.
 var deterministicDNSFixtures = map[string][]string{
-	"example.com":      {"192.0.2.10"},
-	"google.com":       {"2001:db8::10"},
-	"api.github.com":   {"198.51.100.10", "2001:db8::20"},
+	"example.com":      {"8.8.8.8"},
+	"google.com":       {"2606:4700:4700::1111"},
+	"api.github.com":   {"1.1.1.1", "2606:4700:4700::1001"},
 	"private-v4.test":  {"10.23.4.5"},
 	"private-v6.test":  {"fe80::10"},
 	"private-ula.test": {"fdfe:dcba:9876::98"},
@@ -26,12 +28,23 @@ var deterministicDNSFixtures = map[string][]string{
 	"169.254.169.254":  {"169.254.169.254"},
 }
 
-func deterministicLookupHost(host string) ([]string, error) {
+func deterministicLookupNetIP(ctx context.Context, _, host string) ([]netip.Addr, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	ips, ok := deterministicDNSFixtures[strings.ToLower(host)]
 	if !ok {
 		return nil, fmt.Errorf("no deterministic DNS fixture for %q", host)
 	}
-	return append([]string(nil), ips...), nil
+	result := make([]netip.Addr, 0, len(ips))
+	for _, value := range ips {
+		address, err := netip.ParseAddr(value)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, address)
+	}
+	return result, nil
 }
 
 func TestValidateURL(t *testing.T) {
@@ -55,13 +68,13 @@ func TestValidateURL(t *testing.T) {
 		{"resolved IPv6 loopback blocked", "http://loopback-v6.test/internal", true, "SSRF blocked"},
 		{"AWS metadata blocked", "http://169.254.169.254/", true, "SSRF blocked"},
 		{"GCP metadata blocked", "http://metadata.google.internal/", true, "SSRF blocked"},
-		{"empty URL", "", true, "missing host"},
+		{"empty URL", "", true, "invalid URL"},
 		{"no host", "http://", true, "missing host"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateURLWithResolver(tt.url, deterministicLookupHost)
+			err := validateURLWithResolver(context.Background(), tt.url, deterministicLookupNetIP)
 			if tt.wantErr && err == nil {
 				t.Errorf("expected error for %q", tt.url)
 			}
@@ -81,11 +94,11 @@ func TestValidateURL(t *testing.T) {
 // not special-case proxy fake-IP ULA space as public.
 func TestValidateURLProductionDefaultResolverRejectsFakeIPULA(t *testing.T) {
 	const fakeIPULA = "fdfe:dcba:9876::98"
-	err := ValidateURL("http://[" + fakeIPULA + "]/")
+	err := ValidateURL(context.Background(), "http://["+fakeIPULA+"]/")
 	if err == nil {
 		t.Fatal("expected production resolver path to block fake-IP ULA")
 	}
-	if !strings.Contains(err.Error(), "private IP "+fakeIPULA) {
+	if !strings.Contains(err.Error(), "private or reserved IP "+fakeIPULA) {
 		t.Fatalf("unexpected fake-IP ULA error: %v", err)
 	}
 }

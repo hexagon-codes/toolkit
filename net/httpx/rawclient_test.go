@@ -29,8 +29,8 @@ func TestRawClient_DefaultsAreSane(t *testing.T) {
 		t.Fatal("RawClient returned nil")
 		return
 	}
-	if c.Timeout != 0 {
-		t.Errorf("default Timeout should be 0 (ctx-controlled), got %v", c.Timeout)
+	if c.Timeout != DefaultRawClientTimeout {
+		t.Errorf("default Timeout should be %v, got %v", DefaultRawClientTimeout, c.Timeout)
 	}
 	tr, ok := c.Transport.(*http.Transport)
 	if !ok {

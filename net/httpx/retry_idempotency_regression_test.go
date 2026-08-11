@@ -20,7 +20,7 @@ func TestClientDoesNotRetryNonIdempotentRequestWithoutKey(t *testing.T) {
 	}))
 	defer server.Close()
 
-	response, err := MustNewClient(WithRetry(3, time.Millisecond)).R().
+	response, err := MustNewClient(WithRetry(3, time.Millisecond)).R(context.Background()).
 		SetBody(ioReaderOnly{Reader: strings.NewReader("payload")}).
 		Post(server.URL)
 	if err != nil {
@@ -90,7 +90,7 @@ func TestStreamAllowsSingleUseBodyWhenClientRetryIsConfigured(t *testing.T) {
 	}))
 	defer server.Close()
 
-	stream, err := MustNewClient(WithRetry(3, time.Millisecond)).R().
+	stream, err := MustNewClient(WithRetry(3, time.Millisecond)).R(context.Background()).
 		SetBody(ioReaderOnly{Reader: strings.NewReader("payload")}).
 		PostStream(server.URL)
 	if err != nil {

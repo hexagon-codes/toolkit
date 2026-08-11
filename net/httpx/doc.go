@@ -10,7 +10,7 @@
 //	if err != nil {
 //	    return err
 //	}
-//	resp, err := client.R().SetContext(ctx).Get("https://api.example.com/data")
+//	resp, err := client.R(ctx).Get("https://api.example.com/data")
 //
 // 有界主机连接池:
 //
@@ -39,7 +39,7 @@
 //	if err != nil {
 //	    return err
 //	}
-//	resp, err := client.R().SetContext(ctx).Get("https://api.example.com/data")
+//	resp, err := client.R(ctx).Get("https://api.example.com/data")
 //
 // 有界主机连接池:
 //

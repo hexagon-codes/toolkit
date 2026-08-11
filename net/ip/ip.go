@@ -7,11 +7,39 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
+	"reflect"
 	"strings"
 )
 
 // ErrNilContext 表示网络调用收到 nil context。
 var ErrNilContext = errors.New("context must not be nil")
+
+// specialUsePrefixes 收敛标准库 IsGlobalUnicast 仍会视为全局单播、
+// 但不应作为通用公网目标使用的特殊用途地址段。
+var specialUsePrefixes = [...]netip.Prefix{
+	netip.MustParsePrefix("100.64.0.0/10"),  // 共享地址空间
+	netip.MustParsePrefix("192.0.0.0/24"),   // IETF 协议分配
+	netip.MustParsePrefix("192.0.2.0/24"),   // 文档地址
+	netip.MustParsePrefix("192.88.99.0/24"), // 已废弃的 6to4 中继
+	netip.MustParsePrefix("198.18.0.0/15"),  // 基准测试地址
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("::/96"),
+	netip.MustParsePrefix("64:ff9b::/96"),
+	netip.MustParsePrefix("64:ff9b:1::/48"),
+	netip.MustParsePrefix("100::/64"),
+	netip.MustParsePrefix("2001::/32"),
+	netip.MustParsePrefix("2001:2::/48"),
+	netip.MustParsePrefix("2001:10::/28"),
+	netip.MustParsePrefix("2001:20::/28"),
+	netip.MustParsePrefix("2001:db8::/32"),
+	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("3fff::/20"),
+	netip.MustParsePrefix("5f00::/16"),
+	netip.MustParsePrefix("fec0::/10"),
+}
 
 // IsValid 验证 IP 地址是否有效
 func IsValid(ip string) bool {
@@ -79,12 +107,21 @@ func IsPrivateOrReservedIP(ip net.IP) bool {
 	if ip == nil {
 		return false
 	}
-	return !ip.IsGlobalUnicast() ||
-		ip.IsLoopback() ||
-		ip.IsPrivate() ||
-		ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() ||
-		ip.IsUnspecified()
+	address, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	address = address.Unmap()
+	if !address.IsGlobalUnicast() || address.IsPrivate() || address.IsLoopback() ||
+		address.IsLinkLocalUnicast() || address.IsMulticast() || address.IsUnspecified() {
+		return true
+	}
+	for _, prefix := range specialUsePrefixes {
+		if prefix.Contains(address) {
+			return true
+		}
+	}
+	return false
 }
 
 // IsInCIDR 判断 IP 是否在 CIDR 范围内
@@ -153,7 +190,7 @@ func GetLocalIPs() ([]string, error) {
 
 // GetLocalIP 获取本机首选 IP 地址
 func GetLocalIP(ctx context.Context) (_ string, err error) {
-	if ctx == nil {
+	if isNilContext(ctx) {
 		return "", ErrNilContext
 	}
 
@@ -398,7 +435,7 @@ func GetMACAddress() (string, error) {
 
 // ResolveHost 解析主机名为 IP 地址
 func ResolveHost(ctx context.Context, host string) ([]string, error) {
-	if ctx == nil {
+	if isNilContext(ctx) {
 		return nil, ErrNilContext
 	}
 
@@ -416,8 +453,21 @@ func ResolveHost(ctx context.Context, host string) ([]string, error) {
 
 // ReverseLookup 反向 DNS 查询
 func ReverseLookup(ctx context.Context, ip string) ([]string, error) {
-	if ctx == nil {
+	if isNilContext(ctx) {
 		return nil, ErrNilContext
 	}
 	return net.DefaultResolver.LookupAddr(ctx, ip)
+}
+
+func isNilContext(ctx context.Context) bool {
+	if ctx == nil {
+		return true
+	}
+	value := reflect.ValueOf(ctx)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }

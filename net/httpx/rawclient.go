@@ -8,18 +8,21 @@ import (
 	"time"
 )
 
+// DefaultRawClientTimeout 是原生客户端默认的请求总超时。
+const DefaultRawClientTimeout = 10 * time.Minute
+
 // NewRawClient 校验配置并返回带常用 Transport 预设的原生 *http.Client。
 //
 // 与 NewClient() 的关系：
-//   - NewClient() 是业务级封装（Response 缓存成 []byte、.R().Post() 链式 API），
+//   - NewClient() 是业务级封装（Response 缓存成 []byte、.R(ctx).Post() 链式 API），
 //     适合"POST 一个 JSON 拿一个 JSON"这种同步场景
 //   - NewRawClient() 返回原生 *http.Client，保留 .Do(req) 调用契约，适合：
 //   - 流式 SSE / WebSocket upgrade（不能预读 body）
 //   - 需要自己注入 Transport 做 mock（如 test 中的 http.RoundTripper）
-//   - 长耗时请求（thinking 模型 / 视频生成），超时由调用方 ctx 控制而非 Client.Timeout
+//   - 长耗时请求（thinking 模型 / 视频生成），调用方 ctx 的更短截止时间优先
 //
 // 默认行为（不传 options）：
-//   - 无全局 Timeout（由 request ctx 控制）
+//   - 总超时 10 分钟，避免无 deadline 请求无限挂起
 //   - ResponseHeaderTimeout 120s（防止服务端连接成功但不发数据的挂死）
 //   - 合理的连接池参数（MaxIdleConns=100、IdleConnTimeout=90s）
 //
@@ -35,6 +38,7 @@ import (
 //	c := httpx.MustNewRawClient(httpx.WithRawTransport(mockTransport))
 func NewRawClient(opts ...RawOption) (*http.Client, error) {
 	cfg := &rawConfig{
+		timeout:               DefaultRawClientTimeout,
 		responseHeaderTimeout: 120 * time.Second,
 		maxIdleConns:          100,
 		maxIdleConnsPerHost:   10,
@@ -73,7 +77,7 @@ func NewRawClient(opts ...RawOption) (*http.Client, error) {
 	}
 	return &http.Client{
 		Transport: transport,
-		Timeout:   cfg.timeout, // 默认 0 = 不限，由 ctx 控制
+		Timeout:   cfg.timeout,
 	}, nil
 }
 
@@ -101,12 +105,12 @@ type rawConfig struct {
 	customTransport       http.RoundTripper
 }
 
-// WithRawTimeout 设置整体请求超时（默认 0 = 不限，推荐由 ctx 控制）。
-// 注意：对流式请求应留 0，否则 Client.Timeout 会强制切断长流。
+// WithRawTimeout 设置整体请求超时。
+// 调用方上下文中更短的截止时间仍然优先；长流应显式设置足够长的正值。
 func WithRawTimeout(d time.Duration) RawOption {
 	return func(c *rawConfig) error {
-		if d < 0 {
-			return errors.New("timeout must not be negative")
+		if d <= 0 {
+			return errors.New("timeout must be positive")
 		}
 		c.timeout = d
 		return nil

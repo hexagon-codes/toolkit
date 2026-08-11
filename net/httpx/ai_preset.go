@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"context"
 	"fmt"
 	neturl "net/url"
 	"strings"
@@ -301,12 +302,12 @@ type AIUsage struct {
 	TotalTokens      int `json:"total_tokens"`
 }
 
-// ChatCompletion 发送聊天补全请求
-func (c *Client) ChatCompletion(req *AIRequest) (*AIResponse, error) {
+// ChatCompletion 使用调用方上下文发送聊天补全请求。
+func (c *Client) ChatCompletion(ctx context.Context, req *AIRequest) (*AIResponse, error) {
 	if req == nil {
 		return nil, fmt.Errorf("%w: AI request must not be nil", ErrInvalidRequest)
 	}
-	resp, err := c.R().SetJSONBody(req).Post("/chat/completions")
+	resp, err := c.R(ctx).SetJSONBody(req).Post("/chat/completions")
 	if err != nil {
 		return nil, err
 	}
@@ -326,14 +327,14 @@ func (c *Client) ChatCompletion(req *AIRequest) (*AIResponse, error) {
 	return &result, nil
 }
 
-// ChatCompletionStream 发送流式聊天补全请求
-func (c *Client) ChatCompletionStream(req *AIRequest) (*StreamResponse, error) {
+// ChatCompletionStream 使用调用方上下文发送流式聊天补全请求。
+func (c *Client) ChatCompletionStream(ctx context.Context, req *AIRequest) (*StreamResponse, error) {
 	if req == nil {
 		return nil, fmt.Errorf("%w: AI request must not be nil", ErrInvalidRequest)
 	}
 	streamRequest := *req
 	streamRequest.Stream = true
-	return c.R().SetJSONBody(&streamRequest).PostStream("/chat/completions")
+	return c.R(ctx).SetJSONBody(&streamRequest).PostStream("/chat/completions")
 }
 
 // AIError AI API 错误

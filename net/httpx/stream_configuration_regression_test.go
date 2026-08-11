@@ -2,6 +2,7 @@ package httpx
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -39,7 +40,7 @@ func TestStreamRejectsInvalidOptionsWithoutNetworkCall(t *testing.T) {
 					t.Fatalf("GetStream() panicked: %v", recovered)
 				}
 			}()
-			stream, err := client.R().GetStream(server.URL, test.option)
+			stream, err := client.R(context.Background()).GetStream(server.URL, test.option)
 			if stream != nil {
 				_ = stream.Close()
 				t.Fatalf("GetStream() stream = %#v, want nil", stream)
@@ -58,7 +59,7 @@ func TestStreamRejectsNilContext(t *testing.T) {
 	client := MustNewClient()
 	defer client.CloseIdleConnections()
 	//nolint:staticcheck // 需要验证公开 API 对 nil context 的错误合同。
-	stream, err := client.R().SetContext(nil).GetStream("https://example.com/events")
+	stream, err := client.R(nil).GetStream("https://example.com/events")
 	if stream != nil {
 		_ = stream.Close()
 		t.Fatalf("GetStream() stream = %#v, want nil", stream)
@@ -109,7 +110,7 @@ func TestStreamRejectsOversizedSSEEventAndClosesBody(t *testing.T) {
 
 	client := MustNewClient()
 	defer client.CloseIdleConnections()
-	stream, err := client.R().GetStream(server.URL, WithBufferSize(256))
+	stream, err := client.R(context.Background()).GetStream(server.URL, WithBufferSize(256))
 	if err != nil {
 		t.Fatalf("GetStream() error = %v", err)
 	}

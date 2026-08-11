@@ -1,9 +1,18 @@
 package ip
 
 import (
+	"context"
 	"errors"
 	"testing"
+	"time"
 )
+
+type typedNilContext struct{}
+
+func (*typedNilContext) Deadline() (time.Time, bool) { panic("typed nil context used") }
+func (*typedNilContext) Done() <-chan struct{}       { panic("typed nil context used") }
+func (*typedNilContext) Err() error                  { panic("typed nil context used") }
+func (*typedNilContext) Value(any) any               { panic("typed nil context used") }
 
 func TestIsPublicRejectsNonGlobalUnicastAddresses(t *testing.T) {
 	for _, address := range []string{
@@ -75,18 +84,52 @@ func TestRequestHelpersAcceptNilRequest(t *testing.T) {
 func TestNetworkHelpersRejectNilContext(t *testing.T) {
 	tests := map[string]func() error{
 		"GetLocalIP": func() error {
+			//lint:ignore SA1012 需要验证公开 API 对 nil context 的错误合同。
 			//nolint:staticcheck // 需要验证公开 API 对 nil context 的错误合同。
 			_, err := GetLocalIP(nil)
 			return err
 		},
 		"ResolveHost": func() error {
+			//lint:ignore SA1012 需要验证公开 API 对 nil context 的错误合同。
 			//nolint:staticcheck // 需要验证公开 API 对 nil context 的错误合同。
 			_, err := ResolveHost(nil, "localhost")
 			return err
 		},
 		"ReverseLookup": func() error {
+			//lint:ignore SA1012 需要验证公开 API 对 nil context 的错误合同。
 			//nolint:staticcheck // 需要验证公开 API 对 nil context 的错误合同。
 			_, err := ReverseLookup(nil, "127.0.0.1")
+			return err
+		},
+	}
+	for name, call := range tests {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					t.Fatalf("network helper panicked: %v", recovered)
+				}
+			}()
+			if err := call(); !errors.Is(err, ErrNilContext) {
+				t.Fatalf("expected ErrNilContext, got %v", err)
+			}
+		})
+	}
+}
+
+func TestNetworkHelpersRejectTypedNilContext(t *testing.T) {
+	var concrete *typedNilContext
+	var ctx context.Context = concrete
+	tests := map[string]func() error{
+		"GetLocalIP": func() error {
+			_, err := GetLocalIP(ctx)
+			return err
+		},
+		"ResolveHost": func() error {
+			_, err := ResolveHost(ctx, "localhost")
+			return err
+		},
+		"ReverseLookup": func() error {
+			_, err := ReverseLookup(ctx, "127.0.0.1")
 			return err
 		},
 	}

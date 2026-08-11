@@ -22,10 +22,18 @@ var (
 	ErrInvalidSSE = errors.New("invalid SSE format")
 	// ErrStreamEventTooLarge 表示单个流事件超过允许的内存上限。
 	ErrStreamEventTooLarge = errors.New("stream event exceeds configured limit")
+	// ErrStreamCollectionLimit 表示流式响应聚合结果超过配置的总量上限。
+	ErrStreamCollectionLimit = errors.New("stream collection exceeds configured limit")
 )
 
-// DefaultMaxStreamEventSize 是单个流事件默认允许的最大字节数。
-const DefaultMaxStreamEventSize = 1 << 20
+const (
+	// DefaultMaxStreamEventSize 是单个流事件默认允许的最大字节数。
+	DefaultMaxStreamEventSize = 1 << 20
+	// DefaultMaxCollectionBytes 是聚合器默认允许收集的 SSE data 总字节数。
+	DefaultMaxCollectionBytes int64 = 16 << 20
+	// DefaultMaxCollectionEvents 是聚合器默认允许收集的事件总数。
+	DefaultMaxCollectionEvents = 10_000
+)
 
 // StreamResponse 流式响应
 type StreamResponse struct {
@@ -57,6 +65,20 @@ type streamConfig struct {
 	maxEventSize int
 }
 
+// CollectionOption 配置一次流聚合操作的内存边界。
+type CollectionOption func(*collectionConfig) error
+
+type collectionConfig struct {
+	maxBytes  int64
+	maxEvents int
+}
+
+type collectionTracker struct {
+	config collectionConfig
+	bytes  int64
+	events int
+}
+
 // WithBufferSize 设置读取缓冲区大小
 func WithBufferSize(size int) StreamOption {
 	return func(c *streamConfig) {
@@ -69,6 +91,65 @@ func WithMaxEventSize(size int) StreamOption {
 	return func(c *streamConfig) {
 		c.maxEventSize = size
 	}
+}
+
+// WithMaxCollectionBytes 设置聚合器允许收集的 SSE data 总字节数。
+func WithMaxCollectionBytes(maxBytes int64) CollectionOption {
+	return func(config *collectionConfig) error {
+		if maxBytes <= 0 {
+			return errors.New("maximum collection byte size must be positive")
+		}
+		config.maxBytes = maxBytes
+		return nil
+	}
+}
+
+// WithMaxCollectionEvents 设置聚合器允许收集的事件总数。
+func WithMaxCollectionEvents(maxEvents int) CollectionOption {
+	return func(config *collectionConfig) error {
+		if maxEvents <= 0 {
+			return errors.New("maximum collection event count must be positive")
+		}
+		config.maxEvents = maxEvents
+		return nil
+	}
+}
+
+func newCollectionTracker(options []CollectionOption) (*collectionTracker, error) {
+	config := collectionConfig{
+		maxBytes:  DefaultMaxCollectionBytes,
+		maxEvents: DefaultMaxCollectionEvents,
+	}
+	for index, option := range options {
+		if option == nil {
+			return nil, fmt.Errorf("%w: collection option %d must not be nil", ErrInvalidClientConfig, index)
+		}
+		if err := option(&config); err != nil {
+			return nil, fmt.Errorf("%w: collection option %d: %w", ErrInvalidClientConfig, index, err)
+		}
+	}
+	return &collectionTracker{config: config}, nil
+}
+
+func (tracker *collectionTracker) add(data string) error {
+	if tracker.events >= tracker.config.maxEvents {
+		return fmt.Errorf(
+			"%w: maximum event count is %d",
+			ErrStreamCollectionLimit,
+			tracker.config.maxEvents,
+		)
+	}
+	dataSize := int64(len(data))
+	if dataSize > tracker.config.maxBytes-tracker.bytes {
+		return fmt.Errorf(
+			"%w: maximum byte size is %d",
+			ErrStreamCollectionLimit,
+			tracker.config.maxBytes,
+		)
+	}
+	tracker.events++
+	tracker.bytes += dataSize
+	return nil
 }
 
 // GetStream 发送流式 GET 请求
@@ -383,12 +464,12 @@ func (it *SSEIterator) Err() error {
 
 // GetStream 发送流式 GET 请求
 func GetStream(ctx context.Context, url string) (*StreamResponse, error) {
-	return getDefaultClient().R().SetContext(ctx).GetStream(url)
+	return getDefaultClient().R(ctx).GetStream(url)
 }
 
 // PostStream 发送流式 POST 请求
 func PostStream(ctx context.Context, url string, body any) (*StreamResponse, error) {
-	return getDefaultClient().R().SetContext(ctx).SetJSONBody(body).PostStream(url)
+	return getDefaultClient().R(ctx).SetJSONBody(body).PostStream(url)
 }
 
 // ============== 流式数据处理 ==============
@@ -423,9 +504,14 @@ func (s *StreamResponse) OnData(handler StreamHandler) (err error) {
 	}
 }
 
-// CollectData 收集所有数据
-func (s *StreamResponse) CollectData() (data []string, err error) {
+// CollectData 在总字节数和总事件数边界内收集全部 data 字段。
+// 任一读取或聚合错误都会返回 nil，避免调用方误用不完整结果。
+func (s *StreamResponse) CollectData(options ...CollectionOption) (data []string, err error) {
 	defer func() { err = errors.Join(err, s.Close()) }()
+	tracker, err := newCollectionTracker(options)
+	if err != nil {
+		return nil, err
+	}
 
 	for {
 		event, err := s.ReadSSE()
@@ -433,32 +519,50 @@ func (s *StreamResponse) CollectData() (data []string, err error) {
 			if err == io.EOF {
 				return data, nil
 			}
-			return data, err
+			return nil, err
 		}
 
 		if event.Data == "[DONE]" {
 			return data, nil
+		}
+		if err := tracker.add(event.Data); err != nil {
+			return nil, err
 		}
 
 		data = append(data, event.Data)
 	}
 }
 
-// CollectJSON 收集所有 JSON 数据
-func (s *StreamResponse) CollectJSON(factory func() any) (results []any, err error) {
+// CollectJSON 在总字节数和总事件数边界内收集并解析全部 JSON data 字段。
+// 任一读取、解析或聚合错误都会返回 nil，避免调用方误用不完整结果。
+func (s *StreamResponse) CollectJSON(factory func() any, options ...CollectionOption) (results []any, err error) {
 	defer func() { err = errors.Join(err, s.Close()) }()
 	if factory == nil {
 		return nil, fmt.Errorf("%w: JSON factory must not be nil", ErrInvalidRequest)
 	}
+	tracker, err := newCollectionTracker(options)
+	if err != nil {
+		return nil, err
+	}
 
 	for {
-		v := factory()
-		err := s.ReadJSON(v)
-		if err != nil {
-			if err == io.EOF {
+		event, readErr := s.ReadSSE()
+		if readErr != nil {
+			if readErr == io.EOF {
 				return results, nil
 			}
-			return results, err
+			return nil, readErr
+		}
+		if event.Data == "[DONE]" {
+			return results, nil
+		}
+		if err := tracker.add(event.Data); err != nil {
+			return nil, err
+		}
+
+		v := factory()
+		if err := json.Unmarshal([]byte(event.Data), v); err != nil {
+			return nil, err
 		}
 
 		results = append(results, v)
@@ -493,18 +597,34 @@ func (s *StreamResponse) ReadOpenAIChunk() (*OpenAIStreamChunk, error) {
 	return &chunk, nil
 }
 
-// CollectOpenAIContent 收集 OpenAI 流式响应的所有内容
-func (s *StreamResponse) CollectOpenAIContent() (content string, err error) {
+// CollectOpenAIContent 在总字节数和总事件数边界内收集 OpenAI 流式内容。
+// 字节上限按原始 SSE data 计算；任一错误都不返回部分内容。
+func (s *StreamResponse) CollectOpenAIContent(options ...CollectionOption) (content string, err error) {
 	defer func() { err = errors.Join(err, s.Close()) }()
+	tracker, err := newCollectionTracker(options)
+	if err != nil {
+		return "", err
+	}
 
 	var builder bytes.Buffer
 	for {
-		chunk, err := s.ReadOpenAIChunk()
-		if err != nil {
-			if err == io.EOF {
+		event, readErr := s.ReadSSE()
+		if readErr != nil {
+			if readErr == io.EOF {
 				return builder.String(), nil
 			}
-			return builder.String(), err
+			return "", readErr
+		}
+		if event.Data == "[DONE]" {
+			return builder.String(), nil
+		}
+		if err := tracker.add(event.Data); err != nil {
+			return "", err
+		}
+
+		var chunk OpenAIStreamChunk
+		if err := json.Unmarshal([]byte(event.Data), &chunk); err != nil {
+			return "", err
 		}
 
 		if len(chunk.Choices) > 0 {

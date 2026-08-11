@@ -78,7 +78,7 @@ func TestClientRejectsNilContext(t *testing.T) {
 	defer client.CloseIdleConnections()
 
 	//nolint:staticcheck // 需要验证公开 API 对 nil context 的错误合同。
-	response, err := client.R().SetContext(nil).Get("http://example.invalid")
+	response, err := client.R(nil).Get("http://example.invalid")
 	if response != nil {
 		t.Fatalf("Get() response = %#v, want nil", response)
 	}

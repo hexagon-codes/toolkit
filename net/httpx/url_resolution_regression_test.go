@@ -29,7 +29,7 @@ func TestRequestURLResolutionPreservesBasePathAndQueryPrecedence(t *testing.T) {
 
 	client := MustNewClient(WithBaseURL(server.URL + "/api/v1?tenant=base&override=base"))
 	defer client.CloseIdleConnections()
-	response, err := client.R().
+	response, err := client.R(context.Background()).
 		SetQuery("extra", "two").
 		SetQuery("override", "builder").
 		Get("/users?request=one&override=request#client-fragment")
@@ -60,8 +60,7 @@ func TestStreamURLResolutionUsesSameRules(t *testing.T) {
 
 	client := MustNewClient(WithBaseURL(server.URL + "/api?tenant=base"))
 	defer client.CloseIdleConnections()
-	stream, err := client.R().
-		SetContext(context.Background()).
+	stream, err := client.R(context.Background()).
 		SetQuery("source", "builder").
 		GetStream("/events?source=request")
 	if err != nil {

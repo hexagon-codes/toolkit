@@ -1,6 +1,7 @@
 package ssrf
 
 import (
+	"context"
 	"testing"
 )
 
@@ -27,7 +28,7 @@ func TestSSRF_PrivateIPs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.url, func(t *testing.T) {
-			err := validateURLWithResolver(tt.url, deterministicLookupHost)
+			err := validateURLWithResolver(context.Background(), tt.url, deterministicLookupNetIP)
 			if tt.safe && err != nil {
 				t.Errorf("expected safe URL, got error: %v", err)
 			}

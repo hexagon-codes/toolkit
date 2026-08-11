@@ -575,7 +575,10 @@ data: [DONE]
 		ID int `json:"id"`
 	}
 
-	items, err := CollectOpenAIStream[Item](strings.NewReader(input))
+	items, err := CollectOpenAIStream[Item](strings.NewReader(input), CollectConfig{
+		MaxEvents:     3,
+		MaxTotalBytes: int64(len(input)),
+	})
 	if err != nil {
 		t.Fatalf("collect error: %v", err)
 	}

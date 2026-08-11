@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -281,7 +282,7 @@ func TestChatCompletion(t *testing.T) {
 		},
 	}
 
-	resp, err := client.ChatCompletion(req)
+	resp, err := client.ChatCompletion(context.Background(), req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -316,7 +317,7 @@ func TestChatCompletion_Error(t *testing.T) {
 		},
 	}
 
-	_, err := client.ChatCompletion(req)
+	_, err := client.ChatCompletion(context.Background(), req)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -363,7 +364,7 @@ data: [DONE]
 		},
 	}
 
-	stream, err := client.ChatCompletionStream(req)
+	stream, err := client.ChatCompletionStream(context.Background(), req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -402,7 +403,7 @@ func TestChatCompletionRejectsNilRequestWithoutNetworkCall(t *testing.T) {
 
 	client := MustNewClient(WithBaseURL(server.URL))
 	defer client.CloseIdleConnections()
-	response, err := client.ChatCompletion(nil)
+	response, err := client.ChatCompletion(context.Background(), nil)
 	if response != nil {
 		t.Fatalf("ChatCompletion(nil) response = %#v, want nil", response)
 	}
@@ -423,7 +424,7 @@ func TestChatCompletionStreamRejectsNilRequestWithoutPanic(t *testing.T) {
 		}
 	}()
 
-	stream, err := client.ChatCompletionStream(nil)
+	stream, err := client.ChatCompletionStream(context.Background(), nil)
 	if stream != nil {
 		_ = stream.Close()
 		t.Fatalf("ChatCompletionStream(nil) stream = %#v, want nil", stream)

@@ -31,6 +31,33 @@ func TestReaderEventLimitBoundsManySmallLines(t *testing.T) {
 	}
 }
 
+func TestReaderLineLimitCountsBothCRLFBytes(t *testing.T) {
+	t.Parallel()
+
+	const lineWithoutLF = "data: x\r"
+	reader := MustNewReaderWithOptions(
+		strings.NewReader(lineWithoutLF+"\n\r\n"),
+		WithMaxLineBytes(int64(len(lineWithoutLF))),
+	)
+	if _, err := reader.Read(); !errors.Is(err, ErrMaxLineBytesExceeded) {
+		t.Fatalf("Read() error = %v, want ErrMaxLineBytesExceeded", err)
+	}
+}
+
+func TestReaderEventLimitCountsCRLFWithoutDroppingLF(t *testing.T) {
+	t.Parallel()
+
+	const input = "data: x\r\ndata: y\r\n\r\n"
+	const countedWithoutLF = int64(len("data: x\r") + len("data: y\r"))
+	reader := MustNewReaderWithOptions(
+		strings.NewReader(input),
+		WithMaxEventBytes(countedWithoutLF),
+	)
+	if _, err := reader.Read(); !errors.Is(err, ErrMaxEventBytesExceeded) {
+		t.Fatalf("Read() error = %v, want ErrMaxEventBytesExceeded", err)
+	}
+}
+
 func TestReaderStoresRetryControlWithoutDispatchingEvent(t *testing.T) {
 	reader := MustNewReader(strings.NewReader("retry: 1500\n\n"))
 	event, err := reader.Read()

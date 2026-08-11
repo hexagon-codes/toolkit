@@ -100,8 +100,8 @@ func MustNewClient(opts ...Option) *Client {
 // WithTimeout 设置超时时间
 func WithTimeout(timeout time.Duration) Option {
 	return func(c *Client) error {
-		if timeout < 0 {
-			return errors.New("timeout must not be negative")
+		if timeout <= 0 {
+			return errors.New("timeout must be positive")
 		}
 		c.timeout = timeout
 		c.client.Timeout = timeout
@@ -340,20 +340,15 @@ type Request struct {
 	jsonErr     error // JSON 编码错误
 }
 
-// R 创建新请求
-func (c *Client) R() *Request {
+// R 使用调用方上下文创建新请求。
+// ctx 必须非 nil；调用方设置的更短截止时间优先于客户端总超时。
+func (c *Client) R(ctx context.Context) *Request {
 	return &Request{
 		client:  c,
 		headers: make(map[string]string),
 		query:   make(neturl.Values),
-		ctx:     context.Background(),
+		ctx:     ctx,
 	}
-}
-
-// SetContext 设置请求上下文
-func (r *Request) SetContext(ctx context.Context) *Request {
-	r.ctx = ctx
-	return r
 }
 
 // SetHeader 设置请求头
@@ -979,37 +974,27 @@ func getDefaultClient() *Client {
 	return defaultClient
 }
 
-// Get 发送 GET 请求
-func Get(url string) (*Response, error) {
-	return getDefaultClient().R().Get(url)
+// Get 使用调用方上下文发送 GET 请求。
+func Get(ctx context.Context, url string) (*Response, error) {
+	return getDefaultClient().R(ctx).Get(url)
 }
 
-// GetWithContext 发送带上下文的 GET 请求
-func GetWithContext(ctx context.Context, url string) (*Response, error) {
-	return getDefaultClient().R().SetContext(ctx).Get(url)
+// Post 使用调用方上下文发送 JSON POST 请求。
+func Post(ctx context.Context, url string, body any) (*Response, error) {
+	return getDefaultClient().R(ctx).SetJSONBody(body).Post(url)
 }
 
-// Post 发送 POST 请求
-func Post(url string, body any) (*Response, error) {
-	return getDefaultClient().R().SetJSONBody(body).Post(url)
+// PostForm 使用调用方上下文发送表单 POST 请求。
+func PostForm(ctx context.Context, url string, data map[string]string) (*Response, error) {
+	return getDefaultClient().R(ctx).SetFormBody(data).Post(url)
 }
 
-// PostWithContext 发送带上下文的 POST 请求
-func PostWithContext(ctx context.Context, url string, body any) (*Response, error) {
-	return getDefaultClient().R().SetContext(ctx).SetJSONBody(body).Post(url)
+// Put 使用调用方上下文发送 JSON PUT 请求。
+func Put(ctx context.Context, url string, body any) (*Response, error) {
+	return getDefaultClient().R(ctx).SetJSONBody(body).Put(url)
 }
 
-// PostForm 发送表单 POST 请求
-func PostForm(url string, data map[string]string) (*Response, error) {
-	return getDefaultClient().R().SetFormBody(data).Post(url)
-}
-
-// Put 发送 PUT 请求
-func Put(url string, body any) (*Response, error) {
-	return getDefaultClient().R().SetJSONBody(body).Put(url)
-}
-
-// Delete 发送 DELETE 请求
-func Delete(url string) (*Response, error) {
-	return getDefaultClient().R().Delete(url)
+// Delete 使用调用方上下文发送 DELETE 请求。
+func Delete(ctx context.Context, url string) (*Response, error) {
+	return getDefaultClient().R(ctx).Delete(url)
 }

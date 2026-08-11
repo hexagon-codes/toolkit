@@ -30,7 +30,7 @@ data: [DONE]
 	defer server.Close()
 
 	client := MustNewClient()
-	stream, err := client.R().SetContext(context.Background()).GetStream(server.URL)
+	stream, err := client.R(context.Background()).GetStream(server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -83,7 +83,7 @@ data: [DONE]
 	defer server.Close()
 
 	client := MustNewClient()
-	stream, err := client.R().SetContext(context.Background()).GetStream(server.URL)
+	stream, err := client.R(context.Background()).GetStream(server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -140,7 +140,7 @@ data: [DONE]
 	defer server.Close()
 
 	client := MustNewClient()
-	stream, err := client.R().SetContext(context.Background()).GetStream(server.URL)
+	stream, err := client.R(context.Background()).GetStream(server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -174,7 +174,7 @@ data: [DONE]
 	defer server.Close()
 
 	client := MustNewClient()
-	stream, err := client.R().SetContext(context.Background()).GetStream(server.URL)
+	stream, err := client.R(context.Background()).GetStream(server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -209,8 +209,7 @@ func TestStreamResponse_PostStream(t *testing.T) {
 	defer server.Close()
 
 	client := MustNewClient()
-	stream, err := client.R().
-		SetContext(context.Background()).
+	stream, err := client.R(context.Background()).
 		SetJSONBody(map[string]string{"msg": "hello"}).
 		PostStream(server.URL)
 	if err != nil {
@@ -241,7 +240,7 @@ data: line3
 	defer server.Close()
 
 	client := MustNewClient()
-	stream, err := client.R().SetContext(context.Background()).GetStream(server.URL)
+	stream, err := client.R(context.Background()).GetStream(server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -273,7 +272,7 @@ data: hello
 	defer server.Close()
 
 	client := MustNewClient()
-	stream, err := client.R().SetContext(context.Background()).GetStream(server.URL)
+	stream, err := client.R(context.Background()).GetStream(server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -308,7 +307,7 @@ data: actual data
 	defer server.Close()
 
 	client := MustNewClient()
-	stream, err := client.R().SetContext(context.Background()).GetStream(server.URL)
+	stream, err := client.R(context.Background()).GetStream(server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -332,7 +331,7 @@ func TestStreamResponse_IsSuccess(t *testing.T) {
 	defer server.Close()
 
 	client := MustNewClient()
-	stream, err := client.R().SetContext(context.Background()).GetStream(server.URL)
+	stream, err := client.R(context.Background()).GetStream(server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -355,7 +354,7 @@ func TestStreamResponse_Closed(t *testing.T) {
 	defer server.Close()
 
 	client := MustNewClient()
-	stream, err := client.R().SetContext(context.Background()).GetStream(server.URL)
+	stream, err := client.R(context.Background()).GetStream(server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -438,7 +437,7 @@ data: item3
 	defer server.Close()
 
 	client := MustNewClient()
-	stream, err := client.R().SetContext(context.Background()).GetStream(server.URL)
+	stream, err := client.R(context.Background()).GetStream(server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -479,7 +478,7 @@ data: [DONE]
 	defer server.Close()
 
 	client := MustNewClient()
-	stream, err := client.R().SetContext(context.Background()).GetStream(server.URL)
+	stream, err := client.R(context.Background()).GetStream(server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -560,8 +559,7 @@ func TestWithBufferSize(t *testing.T) {
 	defer server.Close()
 
 	client := MustNewClient()
-	stream, err := client.R().
-		SetContext(context.Background()).
+	stream, err := client.R(context.Background()).
 		GetStream(server.URL, WithBufferSize(8192))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
