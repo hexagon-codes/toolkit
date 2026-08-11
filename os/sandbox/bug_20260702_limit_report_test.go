@@ -2,29 +2,59 @@ package sandbox
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 )
 
-// bug-20260702 正向契约: 各平台 ExecResult.Limits 的限额报告必须与实际行为一致。
-//
-// 验收标准(与 hexclaw 侧消费契约钉死):
-//   - darwin: Memory=unsupported(内核拒绝下调内存 rlimit), Processes=enforced;
-//   - linux: Memory=enforced, Processes=enforced;
-//   - windows: Job Object 真实执行 → Memory/Processes 均 enforced;
-//   - 所有平台: Storage(walk 检查)/Output(有界缓冲)恒 enforced。
-func TestBug20260702_LimitReportMatchesPlatformCapability(t *testing.T) {
-	sb, err := New(Config{Workspace: t.TempDir(), Network: true})
+// bug-20260702 正向契约：平台能力与本次请求事实必须分开报告。
+func TestBug20260702_LimitReportMatchesRequestAndPlatformCapability(t *testing.T) {
+	networkMode := NetworkHost
+	if runtime.GOOS == "windows" {
+		networkMode = NetworkDisabled
+	}
+	sb, err := New(Config{
+		Workspace:            t.TempDir(),
+		Network:              networkMode,
+		RequiredCapabilities: UntrustedCodeIsolationCapabilities,
+	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() {
+		if closeErr := sb.Close(); closeErr != nil {
+			t.Errorf("Close: %v", closeErr)
+		}
+	})
+	reporter, ok := sb.(CapabilityReporter)
+	if !ok {
+		t.Fatal("sandbox does not expose CapabilityReporter")
+	}
+	available, err := reporter.Capabilities(context.Background())
+	if err != nil {
+		t.Fatalf("Capabilities: %v", err)
 	}
 
 	command, args := "/bin/sh", []string{"-c", "true"}
 	if runtime.GOOS == "windows" {
-		command, args = "cmd", []string{"/c", "exit 0"}
+		command = os.Getenv("ComSpec")
+		if command == "" {
+			command = filepath.Join(os.Getenv("SystemRoot"), "System32", "cmd.exe")
+		}
+		absoluteCommand, absoluteErr := filepath.Abs(command)
+		if absoluteErr != nil {
+			t.Fatalf("resolve canonical Windows command: %v", absoluteErr)
+		}
+		canonicalCommand, canonicalErr := filepath.EvalSymlinks(absoluteCommand)
+		if canonicalErr != nil {
+			t.Fatalf("canonicalize Windows command: %v", canonicalErr)
+		}
+		command, args = filepath.Clean(canonicalCommand), []string{"/d", "/c", "exit", "0"}
 	}
-	res, err := sb.Exec(context.Background(), command, args)
+	res, err := sb.Exec(context.Background(), Command{Path: command, Args: args})
 	if err != nil {
 		skipIfSandboxBackendUnavailable(t, err)
 		t.Fatalf("Exec: %v", err)
@@ -33,21 +63,34 @@ func TestBug20260702_LimitReportMatchesPlatformCapability(t *testing.T) {
 		t.Fatalf("Exec exit code = %d, stderr=%q", res.ExitCode, res.Stderr)
 	}
 
-	wantMemory := LimitStatusEnforced
-	if runtime.GOOS == "darwin" {
-		wantMemory = LimitStatusUnsupported
+	for name, status := range map[string]LimitStatus{
+		"memory":    res.Limits.Memory,
+		"processes": res.Limits.Processes,
+		"storage":   res.Limits.Storage,
+	} {
+		if status != LimitStatusNotRequested {
+			t.Errorf("Limits.%s = %q, want %q", name, status, LimitStatusNotRequested)
+		}
 	}
-	if res.Limits.Memory != wantMemory {
-		t.Errorf("Limits.Memory on %s = %q, want %q", runtime.GOOS, res.Limits.Memory, wantMemory)
+
+	checks := []struct {
+		name       string
+		status     LimitStatus
+		capability CapabilitySet
+	}{
+		{name: "network", status: res.Limits.Network, capability: CapabilityNetwork},
+		{name: "process-containment", status: res.Limits.ProcessContainment, capability: CapabilityProcessContainment},
+		{name: "output", status: res.Limits.Output, capability: CapabilityOutput},
+		{name: "filesystem", status: res.Limits.Filesystem, capability: CapabilityFilesystem},
 	}
-	if res.Limits.Processes != LimitStatusEnforced {
-		t.Errorf("Limits.Processes on %s = %q, want enforced", runtime.GOOS, res.Limits.Processes)
-	}
-	if res.Limits.Storage != LimitStatusEnforced {
-		t.Errorf("Limits.Storage = %q, want enforced (walk 检查恒生效)", res.Limits.Storage)
-	}
-	if res.Limits.Output != LimitStatusEnforced {
-		t.Errorf("Limits.Output = %q, want enforced (有界缓冲恒生效)", res.Limits.Output)
+	for _, check := range checks {
+		want := LimitStatusUnsupported
+		if available.Has(check.capability) {
+			want = LimitStatusEnforced
+		}
+		if check.status != want {
+			t.Errorf("Limits.%s = %q, want %q from capabilities %s", check.name, check.status, want, available)
+		}
 	}
 }
 
@@ -57,15 +100,19 @@ func TestBug20260702_LimitReportOutputEnforcedMatchesBehavior(t *testing.T) {
 		t.Skip("windows 无 /bin/sh, 输出截断行为由 POSIX 平台验证")
 	}
 	sb, err := New(Config{
-		Workspace:      t.TempDir(),
-		Network:        true,
-		MaxOutputBytes: 16,
+		Workspace:            t.TempDir(),
+		Network:              NetworkHost,
+		RequiredCapabilities: CapabilityFilesystem | CapabilityNetwork | CapabilityOutput,
+		MaxOutputBytes:       16,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
-	res, err := sb.Exec(context.Background(), "/bin/sh", []string{"-c", "printf '%0.s0' $(seq 1 4096)"})
+	res, err := sb.Exec(context.Background(), Command{
+		Path: "/usr/bin/printf",
+		Args: []string{"%s", strings.Repeat("0", 4096)},
+	})
 	if err != nil {
 		skipIfSandboxBackendUnavailable(t, err)
 		t.Fatalf("Exec: %v", err)
@@ -77,16 +124,16 @@ func TestBug20260702_LimitReportOutputEnforcedMatchesBehavior(t *testing.T) {
 		t.Fatalf("Limits.Output = %q, want enforced", res.Limits.Output)
 	}
 	if !res.StdoutTruncated {
-		t.Fatalf("报告 Output=enforced 但 4096 字节输出未被 16 字节上限截断, 报告与行为不一致")
+		t.Fatal("Limits.Output is enforced but 4096 bytes were not truncated to 16 bytes")
 	}
 	if int64(len(res.Stdout)) > 16 {
-		t.Fatalf("stdout 保留长度 %d 超过 MaxOutputBytes=16", len(res.Stdout))
+		t.Fatalf("retained stdout length = %d, want at most 16", len(res.Stdout))
 	}
 }
 
 func skipIfSandboxBackendUnavailable(t *testing.T, err error) {
 	t.Helper()
-	if runtime.GOOS == "linux" && strings.Contains(err.Error(), "sandbox unavailable") {
-		t.Skipf("linux runner 无可用 OS sandbox 后端, 跳过行为验证: %v", err)
+	if runtime.GOOS == "linux" && (errors.Is(err, ErrRequiredCapabilitiesUnavailable) || errors.Is(err, ErrFilesystemContainmentUnavailable)) {
+		t.Skipf("Linux runner has no available OS sandbox backend: %v", err)
 	}
 }

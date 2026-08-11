@@ -8,37 +8,24 @@ import (
 	"testing"
 )
 
-// GO-1/GO-2 根修：DenyLoopback 在 Network=true 时禁本机回环、放行外网。
-func TestDarwinDenyLoopbackProfile(t *testing.T) {
-	s := &darwinSandbox{cfg: Config{Network: true, DenyLoopback: true, Workspace: t.TempDir()}}
-	sbpl := s.generateSBPL()
-	if !strings.Contains(sbpl, "(allow network*)") {
-		t.Fatal("Network=true 应仍放行外网")
+func TestDarwinNetworkModeProfileIsExplicit(t *testing.T) {
+	hostProfile := newDarwinSandbox(Config{Network: NetworkHost, Workspace: t.TempDir()}).generateSBPL()
+	if !strings.Contains(hostProfile, "(allow network*)") || strings.Contains(hostProfile, "remote ip") {
+		t.Fatalf("host network profile is not explicit:\n%s", hostProfile)
 	}
-	if !strings.Contains(sbpl, "(deny network-outbound (remote ip \"localhost:*\"))") {
-		t.Fatalf("DenyLoopback=true 应含回环 deny 规则，profile=\n%s", sbpl)
-	}
-	// deny 必须在 allow 之后（seatbelt last-match-wins）
-	if strings.Index(sbpl, "(deny network-outbound") < strings.Index(sbpl, "(allow network*)") {
-		t.Fatal("deny 回环规则必须写在 allow network* 之后才生效")
-	}
-
-	// DenyLoopback=false 不加限制（向后兼容）
-	s2 := &darwinSandbox{cfg: Config{Network: true, Workspace: t.TempDir()}}
-	if strings.Contains(s2.generateSBPL(), "deny network-outbound (remote ip") {
-		t.Fatal("DenyLoopback=false 不应加回环限制")
+	disabledProfile := newDarwinSandbox(Config{Network: NetworkDisabled, Workspace: t.TempDir()}).generateSBPL()
+	if !strings.Contains(disabledProfile, "(deny network*)") || strings.Contains(disabledProfile, "(allow network*)") {
+		t.Fatalf("disabled network profile is not explicit:\n%s", disabledProfile)
 	}
 }
 
-// 真机 seatbelt 语法验证：profile 必须能被 sandbox-exec 接受（语法错会挂掉整个 code_exec）。
-func TestDarwinDenyLoopbackSeatbeltSyntaxValid(t *testing.T) {
-	s := &darwinSandbox{cfg: Config{Network: true, DenyLoopback: true, Timeout: 10, Workspace: t.TempDir()}}
-	// 跑一个最小命令：seatbelt profile 语法无效时 sandbox-exec 直接非零退出报 profile 错。
-	res, err := s.Exec(context.Background(), "/bin/echo", []string{"ok"})
+func TestDarwinNetworkHostSeatbeltSyntaxValid(t *testing.T) {
+	s := newDarwinSandbox(Config{Network: NetworkHost, Timeout: 10, Workspace: t.TempDir()})
+	res, err := s.Exec(context.Background(), Command{Path: "/bin/echo", Args: []string{"ok"}})
 	if err != nil {
-		t.Fatalf("带 DenyLoopback 的 seatbelt profile 应语法有效可执行: %v", err)
+		t.Fatalf("host network Seatbelt profile must execute: %v", err)
 	}
 	if !strings.Contains(res.Stdout, "ok") {
-		t.Fatalf("sandbox-exec 未正常执行，stdout=%q stderr=%q", res.Stdout, res.Stderr)
+		t.Fatalf("sandbox-exec stdout=%q stderr=%q", res.Stdout, res.Stderr)
 	}
 }

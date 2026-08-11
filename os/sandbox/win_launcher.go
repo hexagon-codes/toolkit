@@ -17,7 +17,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// Windows 进程启动器组合令牌、ACL、Job Object 与网络隔离层启动子进程。
+// Windows 进程启动器组合稳定 LowBox 身份、Job Object 与精确句柄继承启动子进程。
 
 var (
 	procResumeThread = modKernel32.NewProc("ResumeThread")
@@ -75,93 +75,228 @@ func (b *windowsOutputBuffer) Truncated() bool {
 }
 
 type windowsSandboxedProcess struct {
-	proc         *os.Process
-	job          *ownedWindowsResource[syscall.Handle]
-	acl          *windowsACLPolicy
-	stdout       *windowsOutputBuffer
-	stderr       *windowsOutputBuffer
+	proc          *ownedWindowsResource[*os.Process]
+	job           *ownedWindowsResource[syscall.Handle]
+	stdout        *windowsOutputBuffer
+	stderr        *windowsOutputBuffer
+	stdoutReader  *windowsActiveResource[syscall.Handle]
+	stderrReader  *windowsActiveResource[syscall.Handle]
+	stdoutDone    chan error
+	stderrDone    chan error
+	completion    *windowsExecutionCompletion
+	retention     *windowsRetainedLifecycle
+	mu            sync.Mutex
+	treeConfirmed bool
+}
+
+type windowsLaunchResources struct {
+	token        *ownedWindowsResource[syscall.Token]
+	lowBoxToken  *ownedWindowsResource[syscall.Token]
+	thread       *ownedWindowsResource[syscall.Handle]
+	process      *ownedWindowsResource[syscall.Handle]
+	stdinReader  *ownedWindowsResource[syscall.Handle]
 	stdoutReader *ownedWindowsResource[syscall.Handle]
+	stdoutWriter *ownedWindowsResource[syscall.Handle]
 	stderrReader *ownedWindowsResource[syscall.Handle]
-	stdoutDone   chan error
-	stderrDone   chan error
-	mu           sync.Mutex
+	stderrWriter *ownedWindowsResource[syscall.Handle]
+	job          *ownedWindowsResource[syscall.Handle]
+}
+
+// windowsLaunchOps 由单个 Windows Sandbox 实例持有，禁止测试通过可变全局函数注入故障。
+type windowsLaunchOps struct {
+	assignProcessToJob func(syscall.Handle, syscall.Handle) error
+	findProcess        func(int) (*os.Process, error)
+	resumeThread       func(syscall.Handle) error
+	settleFailure      func(bool, *ownedWindowsResource[syscall.Handle], *ownedWindowsResource[syscall.Handle], time.Duration) (bool, error)
+	releaseProcess     func(*os.Process) error
+	closeToken         func(syscall.Token) error
+	closeHandle        func(syscall.Handle) error
+	settlementLimit    time.Duration
+}
+
+func newWindowsLaunchOps() windowsLaunchOps {
+	return windowsLaunchOps{
+		assignProcessToJob: assignProcessToJob,
+		findProcess:        os.FindProcess,
+		resumeThread:       resumeWindowsThread,
+		settleFailure:      settleFailedWindowsLaunch,
+		releaseProcess:     releaseWindowsProcess,
+		closeToken:         closeWindowsToken,
+		closeHandle:        closeWindowsHandle,
+		settlementLimit:    windowsExecutionSettlementLimit,
+	}
+}
+
+func (ops windowsLaunchOps) validate() error {
+	switch {
+	case ops.assignProcessToJob == nil:
+		return fmt.Errorf("windows assign-process-to-job operation is required")
+	case ops.findProcess == nil:
+		return fmt.Errorf("windows find-process operation is required")
+	case ops.resumeThread == nil:
+		return fmt.Errorf("windows resume-thread operation is required")
+	case ops.settleFailure == nil:
+		return fmt.Errorf("windows failed-launch settlement operation is required")
+	case ops.releaseProcess == nil:
+		return fmt.Errorf("windows process release operation is required")
+	case ops.closeToken == nil:
+		return fmt.Errorf("windows token close operation is required")
+	case ops.closeHandle == nil:
+		return fmt.Errorf("windows handle close operation is required")
+	case ops.settlementLimit <= 0:
+		return fmt.Errorf("windows execution settlement limit must be positive")
+	default:
+		return nil
+	}
+}
+
+type windowsProcessLauncher func(
+	Config,
+	*windowsWorkspace,
+	*windowsExecutablePlan,
+	*windowsDirectoryPlan,
+	[]string,
+	[]string,
+	*windowsProcessQuarantine,
+	windowsLaunchOps,
+) (*windowsSandboxedProcess, error)
+
+func (resources *windowsLaunchResources) ownedResources() windowsLaunchOwnedResources[syscall.Token, syscall.Handle] {
+	if resources == nil {
+		return windowsLaunchOwnedResources[syscall.Token, syscall.Handle]{}
+	}
+	return windowsLaunchOwnedResources[syscall.Token, syscall.Handle]{
+		token:        resources.token,
+		lowBoxToken:  resources.lowBoxToken,
+		thread:       resources.thread,
+		process:      resources.process,
+		stdinReader:  resources.stdinReader,
+		stdoutReader: resources.stdoutReader,
+		stdoutWriter: resources.stdoutWriter,
+		stderrReader: resources.stderrReader,
+		stderrWriter: resources.stderrWriter,
+		job:          resources.job,
+	}
+}
+
+// take 将资源的唯一所有权转移给新的 Windows 生命周期对象。
+func (r *ownedWindowsResource[T]) take() T {
+	if r == nil {
+		var zero T
+		return zero
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	resource := r.resource
+	var zero T
+	r.resource = zero
+	return resource
+}
+
+func (r *windowsActiveResource[T]) isClosing() bool {
+	if r == nil {
+		return true
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.closing
 }
 
 // launchSandboxedProcess 创建并启动具备完整隔离层的进程。
-func launchSandboxedProcess(cfg Config, command string, args []string) (process *windowsSandboxedProcess, resultErr error) {
+func launchSandboxedProcess(
+	cfg Config,
+	workspace *windowsWorkspace,
+	executable *windowsExecutablePlan,
+	workingDirectory *windowsDirectoryPlan,
+	args []string,
+	env []string,
+	quarantine *windowsProcessQuarantine,
+	ops windowsLaunchOps,
+) (process *windowsSandboxedProcess, resultErr error) {
+	if workspace == nil || executable == nil || workingDirectory == nil {
+		return nil, fmt.Errorf("windows launch plans are required")
+	}
+	if quarantine == nil {
+		return nil, fmt.Errorf("windows process quarantine is required")
+	}
+	if err := ops.validate(); err != nil {
+		return nil, err
+	}
 	// 1. 创建受限令牌。
 	token, err := createSandboxToken()
 	if err != nil {
 		return nil, fmt.Errorf("create sandbox token: %w", err)
 	}
 	tokenOwner := newOwnedWindowsResource(token)
+	launchResourcesTransferred := false
 	defer func() {
-		resultErr = errors.Join(resultErr, tokenOwner.release(closeWindowsToken))
+		if !launchResourcesTransferred {
+			resultErr = errors.Join(resultErr, tokenOwner.release(closeWindowsToken))
+		}
 	}()
 
-	// 2. 创建 LowBox/AppContainer 令牌，使文件 ACL 与网络隔离使用同一身份。
-	lowBoxToken, appContainerSID, err := createLowBoxToken(tokenOwner.value(), cfg.Network)
+	// 2. 使用工作区稳定身份创建 LowBox/AppContainer 令牌。
+	lowBoxToken, err := createLowBoxToken(tokenOwner.value(), workspace.appContainerSID, cfg.Network)
 	if err != nil {
 		return nil, fmt.Errorf("create lowbox token: %w", err)
 	}
 	lowBoxTokenOwner := newOwnedWindowsResource(lowBoxToken)
 	defer func() {
-		resultErr = errors.Join(resultErr, lowBoxTokenOwner.release(closeWindowsToken))
+		if !launchResourcesTransferred {
+			resultErr = errors.Join(resultErr, lowBoxTokenOwner.release(closeWindowsToken))
+		}
 	}()
 
-	// 3. 应用工作区读写、额外路径只读和拒绝路径 ACL。
-	aclPolicy, err := applyWindowsACLPolicy(cfg, appContainerSID)
+	// 3. 创建 Job Object。
+	jobHandle, err := createSandboxJobObject(cfg.MaxMemoryBytes, cfg.MaxProcesses)
 	if err != nil {
-		return nil, fmt.Errorf("apply ACL policy: %w", err)
-	}
-
-	// 4. 创建 Job Object。
-	jobHandle, err := createSandboxJobObject(memoryLimitMB(cfg.MaxMemoryBytes), cfg.MaxProcesses)
-	if err != nil {
-		return nil, errors.Join(fmt.Errorf("create job object: %w", err), aclPolicy.restoreACL())
+		return nil, fmt.Errorf("create job object: %w", err)
 	}
 	job := newOwnedWindowsResource(jobHandle)
 
-	// 5. 构造命令行与环境块。
-	cmdLine := buildCommandLine(command, args)
+	// 4. Command.Path 仅作为 argv[0] 和非空 ApplicationName，不参与 PATH 解析。
+	argv := make([]string, 0, len(args)+1)
+	argv = append(argv, executable.applicationName)
+	argv = append(argv, args...)
+	cmdLine := windows.ComposeCommandLine(argv)
 	cmdLineW, err := syscall.UTF16PtrFromString(cmdLine)
 	if err != nil {
-		return nil, errors.Join(fmt.Errorf("encode command line: %w", err), cleanupWindowsLaunch(aclPolicy, job))
+		return nil, errors.Join(fmt.Errorf("encode command line: %w", err), cleanupWindowsLaunch(job))
 	}
-	workspaceW, err := syscall.UTF16PtrFromString(cfg.Workspace)
+	applicationNameW, err := syscall.UTF16PtrFromString(executable.applicationName)
 	if err != nil {
-		return nil, errors.Join(fmt.Errorf("encode workspace: %w", err), cleanupWindowsLaunch(aclPolicy, job))
+		return nil, errors.Join(fmt.Errorf("encode application name: %w", err), cleanupWindowsLaunch(job))
 	}
-	cleanEnv, err := cleanWindowsEnv(cfg.Workspace)
+	workingDirectoryW, err := syscall.UTF16PtrFromString(workingDirectory.path)
 	if err != nil {
-		return nil, errors.Join(err, cleanupWindowsLaunch(aclPolicy, job))
+		return nil, errors.Join(fmt.Errorf("encode working directory: %w", err), cleanupWindowsLaunch(job))
 	}
-	envBlock, err := windowsEnvBlock(cleanEnv)
+	envBlock, err := windowsEnvBlock(env)
 	if err != nil {
-		return nil, errors.Join(fmt.Errorf("build environment block: %w", err), cleanupWindowsLaunch(aclPolicy, job))
+		return nil, errors.Join(fmt.Errorf("build environment block: %w", err), cleanupWindowsLaunch(job))
 	}
 	var envPtr *uint16
 	if len(envBlock) > 0 {
 		envPtr = &envBlock[0]
 	}
 
-	// 6. 创建标准输入、标准输出与标准错误管道。
+	// 5. 创建标准输入、标准输出与标准错误管道。
 	var stdinRHandle, stdinWHandle syscall.Handle
 	var stdoutRHandle, stdoutWHandle syscall.Handle
 	var stderrRHandle, stderrWHandle syscall.Handle
 	sa := syscall.SecurityAttributes{Length: uint32(unsafe.Sizeof(syscall.SecurityAttributes{})), InheritHandle: 1}
 	if pipeErr := syscall.CreatePipe(&stdinRHandle, &stdinWHandle, &sa, 0); pipeErr != nil {
-		return nil, errors.Join(fmt.Errorf("create stdin pipe: %w", pipeErr), cleanupWindowsLaunch(aclPolicy, job))
+		return nil, errors.Join(fmt.Errorf("create stdin pipe: %w", pipeErr), cleanupWindowsLaunch(job))
 	}
 	stdinR := newOwnedWindowsResource(stdinRHandle)
 	stdinW := newOwnedWindowsResource(stdinWHandle)
 	if pipeErr := syscall.CreatePipe(&stdoutRHandle, &stdoutWHandle, &sa, 0); pipeErr != nil {
-		return nil, errors.Join(fmt.Errorf("create stdout pipe: %w", pipeErr), cleanupWindowsLaunch(aclPolicy, stdinR, stdinW, job))
+		return nil, errors.Join(fmt.Errorf("create stdout pipe: %w", pipeErr), cleanupWindowsLaunch(stdinR, stdinW, job))
 	}
 	stdoutR := newOwnedWindowsResource(stdoutRHandle)
 	stdoutW := newOwnedWindowsResource(stdoutWHandle)
 	if pipeErr := syscall.CreatePipe(&stderrRHandle, &stderrWHandle, &sa, 0); pipeErr != nil {
-		return nil, errors.Join(fmt.Errorf("create stderr pipe: %w", pipeErr), cleanupWindowsLaunch(aclPolicy, stdinR, stdinW, stdoutR, stdoutW, job))
+		return nil, errors.Join(fmt.Errorf("create stderr pipe: %w", pipeErr), cleanupWindowsLaunch(stdinR, stdinW, stdoutR, stdoutW, job))
 	}
 	stderrR := newOwnedWindowsResource(stderrRHandle)
 	stderrW := newOwnedWindowsResource(stderrWHandle)
@@ -170,11 +305,11 @@ func launchSandboxedProcess(cfg Config, command string, args []string) (process 
 	if closeErr := stdinW.release(closeWindowsHandle); closeErr != nil {
 		return nil, errors.Join(
 			fmt.Errorf("close parent stdin writer: %w", closeErr),
-			cleanupWindowsLaunch(aclPolicy, stdinR, stdinW, stdoutR, stdoutW, stderrR, stderrW, job),
+			cleanupWindowsLaunch(stdinR, stdinW, stdoutR, stdoutW, stderrR, stderrW, job),
 		)
 	}
 
-	// 7. 使用精确继承列表，禁止沙箱进程获得宿主的其他可继承句柄。
+	// 6. 使用精确继承列表，禁止沙箱进程获得宿主的其他可继承句柄。
 	inheritedHandles := []windows.Handle{
 		windows.Handle(stdinR.value()),
 		windows.Handle(stdoutW.value()),
@@ -184,7 +319,7 @@ func launchSandboxedProcess(cfg Config, command string, args []string) (process 
 	if err != nil {
 		return nil, errors.Join(
 			fmt.Errorf("create process attribute list: %w", err),
-			cleanupWindowsLaunch(aclPolicy, stdinR, stdoutR, stdoutW, stderrR, stderrW, job),
+			cleanupWindowsLaunch(stdinR, stdoutR, stdoutW, stderrR, stderrW, job),
 		)
 	}
 	defer attributeList.Delete()
@@ -196,7 +331,7 @@ func launchSandboxedProcess(cfg Config, command string, args []string) (process 
 	if attributeErr != nil {
 		return nil, errors.Join(
 			fmt.Errorf("set inherited handle list: %w", attributeErr),
-			cleanupWindowsLaunch(aclPolicy, stdinR, stdoutR, stdoutW, stderrR, stderrW, job),
+			cleanupWindowsLaunch(stdinR, stdoutR, stdoutW, stderrR, stderrW, job),
 		)
 	}
 	si := windows.StartupInfoEx{
@@ -210,6 +345,14 @@ func launchSandboxedProcess(cfg Config, command string, args []string) (process 
 		ProcThreadAttributeList: attributeList.List(),
 	}
 
+	// 7. 启动前再次按句柄核验可执行文件与工作目录。
+	if err := executable.revalidate(); err != nil {
+		return nil, errors.Join(err, cleanupWindowsLaunch(stdinR, stdoutR, stdoutW, stderrR, stderrW, job))
+	}
+	if err := workingDirectory.revalidate(); err != nil {
+		return nil, errors.Join(err, cleanupWindowsLaunch(stdinR, stdoutR, stdoutW, stderrR, stderrW, job))
+	}
+
 	// 8. 以挂起状态创建进程，确保进入 Job 后才开始执行用户代码。
 	var pi windows.ProcessInformation
 	creationFlags := uint32(windows.CREATE_SUSPENDED |
@@ -218,110 +361,151 @@ func launchSandboxedProcess(cfg Config, command string, args []string) (process 
 		windows.EXTENDED_STARTUPINFO_PRESENT)
 	err = windows.CreateProcessAsUser(
 		windows.Token(lowBoxTokenOwner.value()),
-		nil,
+		applicationNameW,
 		cmdLineW,
 		nil,
 		nil,
 		true,
 		creationFlags,
 		envPtr,
-		workspaceW,
+		workingDirectoryW,
 		&si.StartupInfo,
 		&pi,
 	)
 	runtime.KeepAlive(envBlock)
+	runtime.KeepAlive(applicationNameW)
 	runtime.KeepAlive(cmdLineW)
-	runtime.KeepAlive(workspaceW)
+	runtime.KeepAlive(workingDirectoryW)
 	runtime.KeepAlive(inheritedHandles)
+	runtime.KeepAlive(executable.file)
+	runtime.KeepAlive(workingDirectory.file)
 	if err != nil {
 		return nil, errors.Join(
 			fmt.Errorf("CreateProcessAsUser: %w", err),
-			cleanupWindowsLaunch(aclPolicy, stdinR, stdoutR, stdoutW, stderrR, stderrW, job),
+			cleanupWindowsLaunch(stdinR, stdoutR, stdoutW, stderrR, stderrW, job),
 		)
 	}
 	thread := newOwnedWindowsResource(syscall.Handle(pi.Thread))
 	childProcess := newOwnedWindowsResource(syscall.Handle(pi.Process))
-
-	// 进程仍处于挂起态时立即交给 Job，缩短未受 Job 生命周期约束的窗口。
-	if assignErr := assignProcessToJob(job.value(), childProcess.value()); assignErr != nil {
-		return nil, errors.Join(
-			assignErr,
-			terminateOwnedWindowsProcess(childProcess),
-			cleanupWindowsLaunch(aclPolicy, thread, childProcess, stdinR, stdoutR, stdoutW, stderrR, stderrW, job),
-		)
+	launchResources := &windowsLaunchResources{
+		token:        tokenOwner,
+		lowBoxToken:  lowBoxTokenOwner,
+		thread:       thread,
+		process:      childProcess,
+		stdinReader:  stdinR,
+		stdoutReader: stdoutR,
+		stdoutWriter: stdoutW,
+		stderrReader: stderrR,
+		stderrWriter: stderrW,
+		job:          job,
 	}
 
-	// 创建完成后令牌不再参与子进程生命周期，立即关闭以缩短特权句柄存活时间。
-	if closeTokenErr := releaseOwnedWindowsResources(closeWindowsToken, lowBoxTokenOwner, tokenOwner); closeTokenErr != nil {
-		return nil, errors.Join(
-			fmt.Errorf("close process creation tokens: %w", closeTokenErr),
-			settleOwnedWindowsJob(job, 0, windowsJobTerminationLimit),
-			cleanupWindowsLaunch(aclPolicy, thread, childProcess, stdinR, stdoutR, stdoutW, stderrR, stderrW, job),
-		)
-	}
-
-	// 父进程释放子进程侧的管道句柄，避免自身阻止 EOF。
-	if closePipeErr := releaseOwnedWindowsResources(closeWindowsHandle, stdinR, stdoutW, stderrW); closePipeErr != nil {
-		return nil, errors.Join(
-			fmt.Errorf("close inherited pipe handles: %w", closePipeErr),
-			settleOwnedWindowsJob(job, 0, windowsJobTerminationLimit),
-			cleanupWindowsLaunch(aclPolicy, thread, childProcess, stdinR, stdoutR, stdoutW, stderrR, stderrW, job),
-		)
-	}
-
-	proc, err := os.FindProcess(int(pi.ProcessId))
+	// 进程创建成功后的六个阶段由实例级操作表驱动，任一失败都只经过一次统一所有权转移。
+	proc, err := runWindowsLaunchProtocol(windowsLaunchProtocolOps[*os.Process]{
+		assignJob: func() error {
+			return ops.assignProcessToJob(job.value(), childProcess.value())
+		},
+		closeCreationTokens: func() error {
+			if closeErr := releaseOwnedWindowsResources(ops.closeToken, lowBoxTokenOwner, tokenOwner); closeErr != nil {
+				return fmt.Errorf("close process creation tokens: %w", closeErr)
+			}
+			return nil
+		},
+		closeInheritedPipes: func() error {
+			if closeErr := releaseOwnedWindowsResources(ops.closeHandle, stdinR, stdoutW, stderrW); closeErr != nil {
+				return fmt.Errorf("close inherited pipe handles: %w", closeErr)
+			}
+			return nil
+		},
+		findProcess: func() (*os.Process, error) {
+			opened, openErr := ops.findProcess(int(pi.ProcessId))
+			if openErr != nil {
+				return nil, fmt.Errorf("open child process: %w", openErr)
+			}
+			return opened, nil
+		},
+		resumeThread: func() error {
+			return ops.resumeThread(thread.value())
+		},
+		closeLaunchHandles: func() error {
+			if closeErr := releaseOwnedWindowsResources(ops.closeHandle, thread, childProcess); closeErr != nil {
+				return fmt.Errorf("close process launch handles: %w", closeErr)
+			}
+			return nil
+		},
+		onFailure: func(failure windowsLaunchFailure[*os.Process]) error {
+			launchResourcesTransferred = true
+			return quarantineFailedWindowsLaunch(
+				quarantine,
+				failure.assignedToJob,
+				failure.process,
+				launchResources,
+				ops,
+			)
+		},
+	})
 	if err != nil {
-		return nil, errors.Join(
-			fmt.Errorf("open child process: %w", err),
-			settleOwnedWindowsJob(job, 0, windowsJobTerminationLimit),
-			cleanupWindowsLaunch(aclPolicy, thread, childProcess, stdoutR, stderrR, job),
-		)
-	}
-
-	// 9. 恢复进程运行，并释放 CreateProcess 返回的原始句柄。
-	if err := resumeWindowsThread(thread.value()); err != nil {
-		return nil, errors.Join(
-			err,
-			settleOwnedWindowsJob(job, 0, windowsJobTerminationLimit),
-			proc.Release(),
-			cleanupWindowsLaunch(aclPolicy, thread, childProcess, stdoutR, stderrR, job),
-		)
-	}
-	if err := releaseOwnedWindowsResources(closeWindowsHandle, thread, childProcess); err != nil {
-		return nil, errors.Join(
-			fmt.Errorf("close process launch handles: %w", err),
-			settleOwnedWindowsJob(job, 0, windowsJobTerminationLimit),
-			proc.Release(),
-			cleanupWindowsLaunch(aclPolicy, thread, childProcess, stdoutR, stderrR, job),
-		)
+		return nil, err
 	}
 
 	// 读取标准输出与标准错误。
 	stdout := newWindowsOutputBuffer(cfg.MaxOutputBytes)
 	stderr := newWindowsOutputBuffer(cfg.MaxStderrBytes)
+	stdoutReader := newWindowsActiveResource(stdoutR.take())
+	stderrReader := newWindowsActiveResource(stderrR.take())
 	wp := &windowsSandboxedProcess{
-		proc:         proc,
+		proc:         newOwnedWindowsResource(proc),
 		job:          job,
-		acl:          aclPolicy,
 		stdout:       stdout,
 		stderr:       stderr,
-		stdoutReader: stdoutR,
-		stderrReader: stderrR,
+		stdoutReader: stdoutReader,
+		stderrReader: stderrReader,
 		stdoutDone:   make(chan error, 1),
 		stderrDone:   make(chan error, 1),
+		completion:   newWindowsExecutionCompletion(),
 	}
-	go readHandle(stdout, stdoutR, wp.stdoutDone)
-	go readHandle(stderr, stderrR, wp.stderrDone)
+	wp.retention = newWindowsRetainedLifecycle(wp.reclaim)
+	go readHandle(stdout, stdoutReader, wp.stdoutDone)
+	go readHandle(stderr, stderrReader, wp.stderrDone)
 	return wp, nil
 }
 
 func (p *windowsSandboxedProcess) Wait() (*os.ProcessState, error) {
-	if p.proc == nil {
+	done := p.startWait()
+	if done == nil {
+		return nil, fmt.Errorf("sandbox process completion is not initialized")
+	}
+	<-done
+	result, finished := p.completion.wait(0)
+	if !finished {
+		return nil, fmt.Errorf("sandbox process completion is unavailable")
+	}
+	return result.state, result.err
+}
+
+func (p *windowsSandboxedProcess) startWait() <-chan struct{} {
+	if p == nil || p.completion == nil {
+		return nil
+	}
+	return p.completion.start(func() windowsExecutionWaitResult {
+		state, err := p.waitLifecycle()
+		return windowsExecutionWaitResult{state: state, err: err}
+	})
+}
+
+func (p *windowsSandboxedProcess) waitLifecycle() (*os.ProcessState, error) {
+	if p.proc == nil || p.proc.value() == nil {
 		return nil, fmt.Errorf("sandbox process is not initialized")
 	}
 	return runWindowsWaitLifecycle(windowsWaitLifecycle[*os.ProcessState]{
-		waitProcess: p.proc.Wait,
-		settleJob:   p.settleJob,
+		waitProcess: func() (*os.ProcessState, error) {
+			process := p.proc.value()
+			if process == nil {
+				return nil, fmt.Errorf("sandbox process is unavailable")
+			}
+			return process.Wait()
+		},
+		settleJob: p.settleJob,
 		waitOutput: func() error {
 			return waitForWindowsOutput(
 				p.stdoutDone,
@@ -345,10 +529,10 @@ func (p *windowsSandboxedProcess) Kill() error {
 		}
 		return terminateJob(job, 1)
 	}
-	if p.proc == nil {
+	if p.proc == nil || p.proc.value() == nil {
 		return nil
 	}
-	err := p.proc.Kill()
+	err := p.proc.value().Kill()
 	if errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.EINVAL) {
 		return nil
 	}
@@ -359,33 +543,48 @@ func (p *windowsSandboxedProcess) cleanup() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	result := releaseOwnedWindowsResources(closeWindowsHandle, p.job, p.stdoutReader, p.stderrReader)
-	if p.acl != nil {
-		restoreErr := p.acl.restoreACL()
-		result = errors.Join(result, restoreErr)
-		if restoreErr == nil {
-			p.acl = nil
-		}
+	result := errors.Join(
+		p.stdoutReader.closeAfterReads(nil, closeWindowsHandle, windowsOutputDrainTimeLimit),
+		p.stderrReader.closeAfterReads(nil, closeWindowsHandle, windowsOutputDrainTimeLimit),
+		p.proc.release(releaseWindowsProcess),
+	)
+	if p.treeConfirmed {
+		result = errors.Join(result, p.job.release(closeWindowsHandle))
 	}
 	return result
 }
 
 func (p *windowsSandboxedProcess) settleJob() error {
+	_, err := p.settleJobWithin(windowsJobExitGracePeriod, windowsJobTerminationLimit)
+	return err
+}
+
+func (p *windowsSandboxedProcess) settleJobWithin(
+	exitGrace, terminationTimeout time.Duration,
+) (bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	return settleOwnedWindowsJob(p.job, windowsJobExitGracePeriod, windowsJobTerminationLimit)
+	if p.treeConfirmed {
+		return true, nil
+	}
+	confirmed, err := settleOwnedWindowsJob(p.job, exitGrace, terminationTimeout)
+	p.treeConfirmed = confirmed
+	if !confirmed {
+		err = errors.Join(err, errWindowsProcessContainmentUnconfirmed)
+	}
+	return confirmed, err
 }
 
 func settleOwnedWindowsJob(
 	job *ownedWindowsResource[syscall.Handle],
 	exitGrace, terminationTimeout time.Duration,
-) error {
+) (bool, error) {
 	handle := job.value()
 	if handle == 0 {
-		return nil
+		return false, fmt.Errorf("sandbox job handle is unavailable")
 	}
-	return settleWindowsJob(windowsJobLifecycle{
+	return settleWindowsJobConfirmed(windowsJobLifecycle{
 		wait: func(timeout time.Duration) (bool, error) {
 			return waitForWindowsJob(handle, timeout)
 		},
@@ -398,6 +597,62 @@ func settleOwnedWindowsJob(
 	}, exitGrace, terminationTimeout)
 }
 
+func (p *windowsSandboxedProcess) processContainmentConfirmed() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.treeConfirmed
+}
+
+func (p *windowsSandboxedProcess) lifecycleReleased() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.treeConfirmed &&
+		p.proc.value() == nil &&
+		p.job.value() == 0 &&
+		p.stdoutReader.value() == 0 &&
+		p.stderrReader.value() == 0
+}
+
+func (p *windowsSandboxedProcess) retain(quarantine *windowsProcessQuarantine) error {
+	if p == nil || p.retention == nil {
+		return fmt.Errorf("windows execution lifecycle retention is unavailable")
+	}
+	return p.retention.retain(quarantine)
+}
+
+func (p *windowsSandboxedProcess) reclaim(timeout time.Duration) (bool, error) {
+	if p == nil || p.completion == nil {
+		return false, fmt.Errorf("windows execution lifecycle is unavailable")
+	}
+	p.startWait()
+	var result error
+	if _, finished := p.completion.wait(0); !finished || !p.processContainmentConfirmed() {
+		if err := p.Kill(); err != nil {
+			result = errors.Join(result, fmt.Errorf("terminate retained Windows process tree: %w", err))
+		}
+	}
+	wait, finished := p.completion.wait(timeout)
+	if !finished {
+		return false, errors.Join(
+			result,
+			fmt.Errorf("retained Windows process lifecycle did not finish within %s", timeout),
+		)
+	}
+	result = errors.Join(result, wait.err)
+	if !p.processContainmentConfirmed() {
+		confirmed, settleErr := p.settleJobWithin(0, timeout)
+		result = errors.Join(result, settleErr)
+		if !confirmed {
+			return false, errors.Join(result, errWindowsProcessContainmentUnconfirmed)
+		}
+	}
+	result = errors.Join(result, p.cleanup())
+	if !p.lifecycleReleased() {
+		return false, errors.Join(result, fmt.Errorf("retained Windows process resources are not fully released"))
+	}
+	return true, result
+}
+
 func (p *windowsSandboxedProcess) abortOutputReaders() error {
 	return errors.Join(
 		cancelAndReleaseWindowsReader(p.stdoutReader),
@@ -407,25 +662,26 @@ func (p *windowsSandboxedProcess) abortOutputReaders() error {
 
 func readHandle(
 	buf *windowsOutputBuffer,
-	handle *ownedWindowsResource[syscall.Handle],
+	handle *windowsActiveResource[syscall.Handle],
 	done chan<- error,
 ) {
 	var result error
 	defer func() {
-		done <- errors.Join(result, handle.release(closeWindowsHandle))
+		done <- errors.Join(result, handle.closeAfterReads(nil, closeWindowsHandle, windowsOutputDrainTimeLimit))
 		close(done)
 	}()
 	tmp := make([]byte, 4096)
 	for {
-		h := handle.value()
-		if h == 0 {
+		h, ok := handle.beginRead()
+		if !ok {
 			return
 		}
 		var n uint32
 		err := syscall.ReadFile(h, tmp, &n, nil)
+		handle.endRead()
 		if err != nil {
 			if errors.Is(err, syscall.ERROR_BROKEN_PIPE) ||
-				(handle.value() == 0 &&
+				(handle.isClosing() &&
 					(errors.Is(err, windows.ERROR_OPERATION_ABORTED) || errors.Is(err, windows.ERROR_INVALID_HANDLE))) {
 				return
 			}
@@ -450,28 +706,106 @@ func closeWindowsToken(token syscall.Token) error {
 	return token.Close()
 }
 
-func terminateOwnedWindowsProcess(process *ownedWindowsResource[syscall.Handle]) error {
+func terminateOwnedWindowsProcessWithin(
+	process *ownedWindowsResource[syscall.Handle],
+	timeout time.Duration,
+) (bool, error) {
 	handle := process.value()
 	if handle == 0 {
-		return nil
+		return false, fmt.Errorf("sandbox process handle is unavailable")
 	}
-	return terminateWindowsProcess(windowsProcessTerminationLifecycle{
-		terminate: func() error {
-			return syscall.TerminateProcess(handle, 1)
-		},
-		wait: func(timeout time.Duration) (bool, error) {
-			return waitForWindowsProcess(handle, timeout)
-		},
-	}, windowsJobTerminationLimit)
+	var result error
+	if err := syscall.TerminateProcess(handle, 1); err != nil {
+		result = errors.Join(result, fmt.Errorf("terminate sandbox process: %w", err))
+	}
+	exited, err := waitForWindowsProcess(handle, timeout)
+	if err != nil {
+		result = errors.Join(result, fmt.Errorf("wait for terminated sandbox process: %w", err))
+		return false, result
+	}
+	if !exited {
+		result = errors.Join(result, fmt.Errorf("sandbox process did not exit within %s", timeout))
+		return false, result
+	}
+	return true, result
 }
 
-func cleanupWindowsLaunch(
-	policy *windowsACLPolicy,
-	handles ...*ownedWindowsResource[syscall.Handle],
+func cleanupWindowsLaunch(handles ...*ownedWindowsResource[syscall.Handle]) error {
+	return releaseOwnedWindowsResources(closeWindowsHandle, handles...)
+}
+
+func quarantineFailedWindowsLaunch(
+	quarantine *windowsProcessQuarantine,
+	assignedToJob bool,
+	proc *os.Process,
+	resources *windowsLaunchResources,
+	ops windowsLaunchOps,
 ) error {
-	err := releaseOwnedWindowsResources(closeWindowsHandle, handles...)
-	if policy != nil {
-		err = errors.Join(err, policy.restoreACL())
+	lifecycle, ownership, lifecycleErr := newWindowsLaunchRetainedLifecycle(
+		assignedToJob,
+		proc,
+		resources,
+		ops,
+	)
+	if lifecycleErr != nil {
+		return errors.Join(lifecycleErr, errWindowsProcessContainmentUnconfirmed)
+	}
+	return settleOrRetainWindowsLaunchFailure(
+		quarantine,
+		lifecycle,
+		ownership.processContainmentConfirmed,
+		nil,
+		windowsJobTerminationLimit,
+	)
+}
+
+func newWindowsLaunchRetainedLifecycle(
+	assignedToJob bool,
+	proc *os.Process,
+	resources *windowsLaunchResources,
+	ops windowsLaunchOps,
+) (*windowsRetainedLifecycle, *windowsLaunchOwnership[syscall.Token, syscall.Handle, *os.Process], error) {
+	if resources == nil {
+		return nil, nil, fmt.Errorf("windows launch resources are required")
+	}
+	if err := ops.validate(); err != nil {
+		return nil, nil, err
+	}
+	ownership := &windowsLaunchOwnership[syscall.Token, syscall.Handle, *os.Process]{
+		assignedToJob:  assignedToJob,
+		process:        newOwnedWindowsResource(proc),
+		resources:      resources.ownedResources(),
+		settle:         ops.settleFailure,
+		releaseProcess: ops.releaseProcess,
+		closeToken:     ops.closeToken,
+		closeHandle:    ops.closeHandle,
+	}
+	return newWindowsRetainedLifecycle(ownership.reclaim), ownership, nil
+}
+
+func settleFailedWindowsLaunch(
+	assignedToJob bool,
+	process, job *ownedWindowsResource[syscall.Handle],
+	timeout time.Duration,
+) (bool, error) {
+	if assignedToJob {
+		confirmed, err := settleOwnedWindowsJob(job, 0, timeout)
+		if !confirmed {
+			err = errors.Join(err, errWindowsProcessContainmentUnconfirmed)
+		}
+		return confirmed, err
+	}
+	return terminateOwnedWindowsProcessWithin(process, timeout)
+}
+
+func releaseWindowsProcess(proc *os.Process) error {
+	if proc == nil {
+		return nil
+	}
+	err := proc.Release()
+	// Windows Process.Wait 会以 released 状态完成句柄释放，后续 Release 返回 EINVAL。
+	if errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.EINVAL) {
+		return nil
 	}
 	return err
 }
@@ -519,8 +853,8 @@ func windowsWaitMilliseconds(timeout time.Duration) uint32 {
 	return uint32(milliseconds)
 }
 
-func cancelAndReleaseWindowsReader(reader *ownedWindowsResource[syscall.Handle]) error {
-	return reader.releaseAfter(func(handle syscall.Handle) error {
+func cancelAndReleaseWindowsReader(reader *windowsActiveResource[syscall.Handle]) error {
+	return reader.closeAfterReads(func(handle syscall.Handle) error {
 		cancelErr := windows.CancelIoEx(windows.Handle(handle), nil)
 		if errors.Is(cancelErr, windows.ERROR_NOT_FOUND) {
 			return nil
@@ -529,7 +863,7 @@ func cancelAndReleaseWindowsReader(reader *ownedWindowsResource[syscall.Handle])
 			return fmt.Errorf("cancel child output read: %w", cancelErr)
 		}
 		return nil
-	}, closeWindowsHandle)
+	}, closeWindowsHandle, windowsOutputDrainTimeLimit)
 }
 
 func resumeWindowsThread(thread syscall.Handle) error {
@@ -541,63 +875,10 @@ func resumeWindowsThread(thread syscall.Handle) error {
 	return nil
 }
 
-func buildCommandLine(command string, args []string) string {
-	parts := make([]string, 0, 1+len(args))
-	parts = append(parts, command)
-	parts = append(parts, args...)
-	result := ""
-	for i, p := range parts {
-		if i > 0 {
-			result += " "
-		}
-		result += quoteWindowsArg(p)
-	}
-	return result
-}
-
-func quoteWindowsArg(arg string) string {
-	if arg == "" {
-		return `""`
-	}
-	needsQuote := false
-	for _, r := range arg {
-		if r == ' ' || r == '\t' || r == '"' || r == '\\' {
-			needsQuote = true
-			break
-		}
-	}
-	if !needsQuote {
-		return arg
-	}
-	var out []rune
-	out = append(out, '"')
-	backslashes := 0
-	for _, r := range arg {
-		switch r {
-		case '\\':
-			backslashes++
-		case '"':
-			for i := 0; i < backslashes*2+1; i++ {
-				out = append(out, '\\')
-			}
-			out = append(out, '"')
-			backslashes = 0
-		default:
-			for i := 0; i < backslashes; i++ {
-				out = append(out, '\\')
-			}
-			backslashes = 0
-			out = append(out, r)
-		}
-	}
-	for i := 0; i < backslashes*2; i++ {
-		out = append(out, '\\')
-	}
-	out = append(out, '"')
-	return string(out)
-}
-
 func windowsEnvBlock(env []string) ([]uint16, error) {
+	if len(env) == 0 {
+		return []uint16{0, 0}, nil
+	}
 	var block []uint16
 	for _, e := range env {
 		if strings.ContainsRune(e, '\x00') {
@@ -608,15 +889,4 @@ func windowsEnvBlock(env []string) ([]uint16, error) {
 	}
 	block = append(block, 0)
 	return block, nil
-}
-
-func memoryLimitMB(limitBytes int64) int {
-	if limitBytes <= 0 {
-		return 256
-	}
-	mb := int(limitBytes / (1024 * 1024))
-	if mb < 1 {
-		return 1
-	}
-	return mb
 }

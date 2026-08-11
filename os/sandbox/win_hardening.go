@@ -4,80 +4,136 @@ package sandbox
 
 import (
 	"fmt"
-	"os"
+	"path/filepath"
+	"sort"
 	"strings"
+
+	"golang.org/x/sys/windows"
 )
 
-// Phase 8 D34: Security hardening + escape prevention
-
-// cleanWindowsEnv 构造沙箱进程的最小环境，并创建隔离的临时目录。
-func cleanWindowsEnv(workspace string) ([]string, error) {
-	dangerousVars := map[string]bool{
-		"COMSPEC":                true,
-		"PSMODULEPATH":           true,
-		"PROCESSOR_ARCHITECTURE": true,
-		"USERNAME":               true,
-		"USERDOMAIN":             true,
-		"APPDATA":                true,
-		"LOCALAPPDATA":           true,
-		"USERPROFILE":            true,
-		"HOMEPATH":               true,
-		"HOMEDRIVE":              true,
+// cleanWindowsEnv 仅使用内核解析出的系统目录、已冻结的可执行目录和工作区目录。
+// 不继承宿主 PATH、用户配置、凭据或任意环境变量。
+func cleanWindowsEnv(workspace *windowsWorkspace, applicationName string) ([]string, error) {
+	if workspace == nil || workspace.root == nil {
+		return nil, fmt.Errorf("Windows workspace is not initialized")
+	}
+	systemDirectory, err := windows.GetSystemDirectory()
+	if err != nil {
+		return nil, fmt.Errorf("resolve Windows system directory: %w", err)
+	}
+	windowsDirectory, err := windows.GetWindowsDirectory()
+	if err != nil {
+		return nil, fmt.Errorf("resolve Windows directory: %w", err)
 	}
 
-	// 仅保留运行时启动所需的系统变量。
-	var clean []string
-	for _, env := range os.Environ() {
-		parts := strings.SplitN(env, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		key := strings.ToUpper(parts[0])
-		if dangerousVars[key] {
-			continue
-		}
-		if key == "PATH" || key == "SYSTEMROOT" || key == "SYSTEMDRIVE" || key == "WINDIR" {
-			clean = append(clean, env)
-		}
+	executableDirectory := filepath.Dir(applicationName)
+	pathEntries := []string{executableDirectory}
+	if !strings.EqualFold(filepath.Clean(executableDirectory), filepath.Clean(systemDirectory)) {
+		pathEntries = append(pathEntries, systemDirectory)
+	}
+	workspacePath := workspace.canonicalPath
+	volume := filepath.VolumeName(workspacePath)
+	homePath := strings.TrimPrefix(workspacePath, volume)
+	if homePath == "" {
+		homePath = `\`
 	}
 
-	temporaryDir := workspace + "\\_tmp"
-	appDataDir := workspace + "\\_appdata"
-	localAppDataDir := workspace + "\\_localappdata"
-	for _, dir := range []string{temporaryDir, appDataDir, localAppDataDir} {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return nil, fmt.Errorf("create sandbox environment directory %q: %w", dir, err)
-		}
-	}
-
-	// 用工作区内目录覆盖用户身份与临时目录变量。
-	clean = append(clean,
-		"TEMP="+temporaryDir,
-		"TMP="+temporaryDir,
-		"USERPROFILE="+workspace,
-		"HOMEPATH="+workspace,
-		"APPDATA="+appDataDir,
-		"LOCALAPPDATA="+localAppDataDir,
-	)
-	return clean, nil
+	return []string{
+		"PATH=" + strings.Join(pathEntries, ";"),
+		"PATHEXT=.COM;.EXE;.BAT;.CMD",
+		"SYSTEMROOT=" + windowsDirectory,
+		"WINDIR=" + windowsDirectory,
+		"SYSTEMDRIVE=" + filepath.VolumeName(windowsDirectory),
+		"TEMP=" + filepath.Join(workspacePath, "_tmp"),
+		"TMP=" + filepath.Join(workspacePath, "_tmp"),
+		"USERPROFILE=" + workspacePath,
+		"HOMEDRIVE=" + volume,
+		"HOMEPATH=" + homePath,
+		"APPDATA=" + filepath.Join(workspacePath, "_appdata"),
+		"LOCALAPPDATA=" + filepath.Join(workspacePath, "_localappdata"),
+		"GOCACHE=" + filepath.Join(workspacePath, "_gocache"),
+		"GOMODCACHE=" + filepath.Join(workspacePath, "_gomodcache"),
+		"GOPATH=" + filepath.Join(workspacePath, "_gopath"),
+		"GOENV=off",
+		"GOTOOLCHAIN=local",
+	}, nil
 }
 
-// validateWindowsEscapeVectors checks for common escape attempts in command/args.
-func validateWindowsEscapeVectors(command string, args []string) error {
-	all := append([]string{command}, args...)
-	for _, s := range all {
-		if err := validateWindowsPath(s); err != nil {
-			return err
+// validateWindowsCommandEnv 将 Command.Env 视为完整环境块，只校验显式条目，绝不合并宿主环境。
+func validateWindowsCommandEnv(workspace *windowsWorkspace, env []string) ([]string, error) {
+	clean := append([]string(nil), env...)
+	seen := make(map[string]struct{}, len(clean))
+	trustedRoots, trustedRootsErr := trustedWindowsExecutableRoots()
+	windowsDirectory, windowsDirectoryErr := windows.GetWindowsDirectory()
+	for _, entry := range clean {
+		if strings.ContainsAny(entry, "\x00\r\n") {
+			return nil, fmt.Errorf("Windows Command.Env contains unsupported characters")
 		}
-		// Block PowerShell invocation
-		lower := strings.ToLower(s)
-		if strings.Contains(lower, "powershell") || strings.Contains(lower, "pwsh") {
-			return fmt.Errorf("PowerShell invocation blocked: %s", s)
+		separator := strings.IndexByte(entry, '=')
+		if separator <= 0 {
+			return nil, fmt.Errorf("Windows Command.Env entry must use KEY=VALUE form")
 		}
-		// Block cmd.exe invocation
-		if strings.Contains(lower, "cmd.exe") || strings.Contains(lower, "cmd /") {
-			return fmt.Errorf("cmd.exe invocation blocked: %s", s)
+		key := strings.ToUpper(entry[:separator])
+		value := entry[separator+1:]
+		if _, exists := seen[key]; exists {
+			return nil, fmt.Errorf("Windows Command.Env contains duplicate key %s", key)
+		}
+		seen[key] = struct{}{}
+
+		switch key {
+		case "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "GOCACHE", "GOMODCACHE", "GOPATH":
+			if err := validateWindowsPath(value); err != nil {
+				return nil, fmt.Errorf("Windows Command.Env %s contains an unsupported path: %w", key, err)
+			}
+			if !filepath.IsAbs(value) || !windowsPathWithin(workspace.canonicalPath, value) {
+				return nil, fmt.Errorf("Windows Command.Env %s must remain inside the sandbox workspace", key)
+			}
+		case "PATH":
+			if trustedRootsErr != nil {
+				return nil, trustedRootsErr
+			}
+			for _, pathEntry := range filepath.SplitList(value) {
+				if err := validateWindowsPath(pathEntry); err != nil {
+					return nil, fmt.Errorf("Windows Command.Env PATH contains an unsupported path: %w", err)
+				}
+				if pathEntry == "" || !filepath.IsAbs(pathEntry) {
+					return nil, fmt.Errorf("Windows Command.Env PATH entries must be absolute")
+				}
+				if !windowsPathWithin(workspace.canonicalPath, pathEntry) && !windowsPathWithinAny(trustedRoots, pathEntry) {
+					return nil, fmt.Errorf("Windows Command.Env PATH entry is outside trusted roots: %s", pathEntry)
+				}
+			}
+		case "SYSTEMROOT", "WINDIR":
+			if windowsDirectoryErr != nil {
+				return nil, windowsDirectoryErr
+			}
+			if err := validateWindowsPath(value); err != nil {
+				return nil, fmt.Errorf("Windows Command.Env %s contains an unsupported path: %w", key, err)
+			}
+			if !strings.EqualFold(filepath.Clean(value), filepath.Clean(windowsDirectory)) {
+				return nil, fmt.Errorf("Windows Command.Env %s must use the Windows directory", key)
+			}
+		case "SYSTEMDRIVE":
+			if windowsDirectoryErr != nil {
+				return nil, windowsDirectoryErr
+			}
+			if !strings.EqualFold(value, filepath.VolumeName(windowsDirectory)) {
+				return nil, fmt.Errorf("Windows Command.Env SYSTEMDRIVE is invalid")
+			}
+		case "COMSPEC":
+			if trustedRootsErr != nil {
+				return nil, trustedRootsErr
+			}
+			if err := validateWindowsPath(value); err != nil {
+				return nil, fmt.Errorf("Windows Command.Env COMSPEC contains an unsupported path: %w", err)
+			}
+			if !filepath.IsAbs(value) || !windowsPathWithinAny(trustedRoots, value) {
+				return nil, fmt.Errorf("Windows Command.Env COMSPEC is outside trusted roots")
+			}
 		}
 	}
-	return nil
+	sort.Slice(clean, func(first, second int) bool {
+		return strings.ToUpper(clean[first]) < strings.ToUpper(clean[second])
+	})
+	return clean, nil
 }

@@ -31,11 +31,12 @@ var (
 	procTerminateJobObject       = modKernel32.NewProc("TerminateJobObject")
 )
 
-const securityMandatoryUntrustedRID = 0x0000
+const securityMandatoryLowRID = 0x1000
 
 // 下列常量对应 JOBOBJECT_EXTENDED_LIMIT_INFORMATION 的限制位。
 const (
 	jobObjectLimitProcessMemory = 0x00000100
+	jobObjectLimitJobMemory     = 0x00000200
 	jobObjectLimitActiveProcess = 0x00000008
 	jobObjectLimitKillOnClose   = 0x00002000
 )
@@ -69,13 +70,11 @@ type (
 	}
 )
 
-// createJobObject creates a new Job Object with memory and process limits.
-func createJobObject(memoryLimitMB, maxProcesses int) (syscall.Handle, error) {
-	if memoryLimitMB <= 0 || maxProcesses <= 0 {
-		return 0, fmt.Errorf("job object limits must be positive")
-	}
-	if uint64(maxProcesses) > uint64(^uint32(0)) {
-		return 0, fmt.Errorf("job object process limit exceeds uint32")
+// createJobObject 创建始终具备关闭终止语义，并按需启用资源配额的 Job Object。
+func createJobObject(memoryLimitBytes int64, maxProcesses int) (syscall.Handle, error) {
+	info, err := windowsJobLimitInformation(memoryLimitBytes, maxProcesses)
+	if err != nil {
+		return 0, err
 	}
 	h, _, err := procCreateJobObjectW.Call(0, 0)
 	if h == 0 {
@@ -83,16 +82,9 @@ func createJobObject(memoryLimitMB, maxProcesses int) (syscall.Handle, error) {
 	}
 	handle := syscall.Handle(h)
 
-	info := jobObjectExtendedLimitInformation{}
-	info.BasicLimitInformation.LimitFlags = jobObjectLimitProcessMemory |
-		jobObjectLimitActiveProcess |
-		jobObjectLimitKillOnClose
-	info.ProcessMemoryLimit = uintptr(memoryLimitMB) * 1024 * 1024
-	info.BasicLimitInformation.ActiveProcessLimit = uint32(maxProcesses) // #nosec G115 -- 上方已校验 uint32 边界。
-
 	r, _, err := procSetInformationJobObject.Call(
 		uintptr(handle),
-		9,                              // 扩展限制信息类型
+		9,                              // JobObjectExtendedLimitInformation 作业对象扩展限额信息类。
 		uintptr(unsafe.Pointer(&info)), // #nosec G103 -- 结构体布局与 JOBOBJECT_EXTENDED_LIMIT_INFORMATION ABI 一致。
 		unsafe.Sizeof(info),
 	)
@@ -100,4 +92,33 @@ func createJobObject(memoryLimitMB, maxProcesses int) (syscall.Handle, error) {
 		return 0, errors.Join(err, syscall.CloseHandle(handle))
 	}
 	return handle, nil
+}
+
+func windowsJobLimitInformation(memoryLimitBytes int64, maxProcesses int) (jobObjectExtendedLimitInformation, error) {
+	if memoryLimitBytes < 0 {
+		return jobObjectExtendedLimitInformation{}, fmt.Errorf("job object memory limit must not be negative")
+	}
+	if maxProcesses < 0 {
+		return jobObjectExtendedLimitInformation{}, fmt.Errorf("job object process limit must not be negative")
+	}
+	if uint64(maxProcesses) > uint64(^uint32(0)) {
+		return jobObjectExtendedLimitInformation{}, fmt.Errorf("job object process limit exceeds uint32")
+	}
+
+	info := jobObjectExtendedLimitInformation{}
+	info.BasicLimitInformation.LimitFlags = jobObjectLimitKillOnClose
+	if memoryLimitBytes > 0 {
+		memoryBytes := uint64(memoryLimitBytes)
+		if memoryBytes > uint64(^uintptr(0)) {
+			return jobObjectExtendedLimitInformation{}, fmt.Errorf("job object memory limit exceeds uintptr")
+		}
+		info.BasicLimitInformation.LimitFlags |= jobObjectLimitProcessMemory | jobObjectLimitJobMemory
+		info.ProcessMemoryLimit = uintptr(memoryBytes)
+		info.JobMemoryLimit = uintptr(memoryBytes)
+	}
+	if maxProcesses > 0 {
+		info.BasicLimitInformation.LimitFlags |= jobObjectLimitActiveProcess
+		info.BasicLimitInformation.ActiveProcessLimit = uint32(maxProcesses) // #nosec G115 -- 上方已校验 uint32 边界。
+	}
+	return info, nil
 }

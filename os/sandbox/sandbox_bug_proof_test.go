@@ -9,17 +9,6 @@ import (
 	"testing"
 )
 
-func TestBugProofLinuxUnshareBackendMustApplyFilesystemPolicy(t *testing.T) {
-	body := mustFunctionBody(t, "sandbox_linux.go", "func (s *linuxSandbox) unshareArgs")
-
-	required := []string{"ReadablePaths", "DeniedPaths"}
-	for _, token := range required {
-		if !strings.Contains(body, token) {
-			t.Errorf("linux unshare backend does not apply %s; body:\n%s", token, body)
-		}
-	}
-}
-
 func TestBugProofLinuxBwrapMustNotBindHostTmpReadWrite(t *testing.T) {
 	body := mustFunctionBody(t, "sandbox_linux.go", "func (s *linuxSandbox) bwrapArgs")
 
@@ -39,7 +28,10 @@ func TestBugProofLinuxBwrapDistinguishesDeniedFilesAndDirectories(t *testing.T) 
 
 func TestNewCreatesWorkspaceAndRejectsDangerousConfiguration(t *testing.T) {
 	workspace := filepath.Join(t.TempDir(), "nested", "workspace")
-	sandboxInstance, err := New(Config{Workspace: workspace})
+	sandboxInstance, err := New(Config{
+		Workspace:            workspace,
+		RequiredCapabilities: CapabilityFilesystem | CapabilityOutput,
+	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -52,10 +44,10 @@ func TestNewCreatesWorkspaceAndRejectsDangerousConfiguration(t *testing.T) {
 	}
 
 	tests := []Config{
-		{Workspace: string(filepath.Separator)},
-		{Workspace: t.TempDir(), Timeout: -1},
-		{Workspace: t.TempDir(), DeniedPaths: []string{`/tmp/x") (allow network*) (`}},
-		{Workspace: t.TempDir(), ReadablePaths: []string{"relative/path"}},
+		{Workspace: string(filepath.Separator), RequiredCapabilities: CapabilityFilesystem | CapabilityOutput},
+		{Workspace: t.TempDir(), Timeout: -1, RequiredCapabilities: CapabilityFilesystem | CapabilityOutput},
+		{Workspace: t.TempDir(), DeniedPaths: []string{`/tmp/x") (allow network*) (`}, RequiredCapabilities: CapabilityFilesystem | CapabilityOutput},
+		{Workspace: t.TempDir(), ReadablePaths: []string{"relative/path"}, RequiredCapabilities: CapabilityFilesystem | CapabilityOutput},
 	}
 	for _, config := range tests {
 		if _, err := New(config); err == nil {
@@ -65,7 +57,10 @@ func TestNewCreatesWorkspaceAndRejectsDangerousConfiguration(t *testing.T) {
 }
 
 func TestSandboxExecRejectsNilContextWithoutPanic(t *testing.T) {
-	sandboxInstance, err := New(Config{Workspace: t.TempDir()})
+	sandboxInstance, err := New(Config{
+		Workspace:            t.TempDir(),
+		RequiredCapabilities: CapabilityFilesystem | CapabilityOutput,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +69,7 @@ func TestSandboxExecRejectsNilContextWithoutPanic(t *testing.T) {
 			t.Fatalf("Exec(nil, ...) panicked: %v", recovered)
 		}
 	}()
-	if _, err := sandboxInstance.Exec(nil, "true", nil); !errors.Is(err, ErrInvalidContext) { //nolint:staticcheck // 必须覆盖公开 API 的 nil context 防御边界。
+	if _, err := sandboxInstance.Exec(nil, Command{Path: "/usr/bin/true"}); !errors.Is(err, ErrInvalidContext) { //nolint:staticcheck // 必须覆盖公开 API 的 nil context 防御边界。
 		t.Fatalf("Exec(nil, ...) error = %v, want ErrInvalidContext", err)
 	}
 }
@@ -102,32 +97,6 @@ func TestBugProofPosixMemoryAndProcessLimitsMustBeEnforced(t *testing.T) {
 		}
 		if len(hits) == 0 {
 			t.Errorf("%s has no POSIX enforcement reference in %s", token, strings.Join(files, ", "))
-		}
-	}
-}
-
-func TestBugProofWindowsExecMustReturnRealExitCode(t *testing.T) {
-	body := mustFunctionBody(t, "sandbox_windows.go", "func (s *windowsSandbox) Exec")
-
-	if !strings.Contains(body, ".ExitCode()") {
-		t.Fatalf("windows Exec does not use os.ProcessState.ExitCode(), so non-zero child exits are collapsed to 0/1. body:\n%s", body)
-	}
-}
-
-func TestBugProofWindowsExecMustPropagateLifecycleErrors(t *testing.T) {
-	body := mustFunctionBody(t, "sandbox_windows.go", "func (s *windowsSandbox) Exec")
-
-	if strings.Contains(body, "_ = proc.Kill()") {
-		t.Fatalf("windows Exec discards the process termination result; body:\n%s", body)
-	}
-	for _, line := range strings.Split(body, "\n") {
-		if strings.TrimSpace(line) == "<-done" {
-			t.Fatalf("windows Exec discards the process wait result; body:\n%s", body)
-		}
-	}
-	for _, required := range []string{"killErr := proc.Kill()", "wait.err", "sandbox exec wait failed"} {
-		if !strings.Contains(body, required) {
-			t.Fatalf("windows Exec does not propagate %q; body:\n%s", required, body)
 		}
 	}
 }

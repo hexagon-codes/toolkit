@@ -27,11 +27,9 @@ type jobObjectBasicUIRestrictions struct {
 	UIRestrictionsClass uint32
 }
 
-// createSandboxJobObject creates a fully configured Job Object with memory, process,
-// and UI restrictions for sandbox isolation. Wraps the basic createJobObject from
-// win_syscall.go with additional hardening.
-func createSandboxJobObject(memoryMB, maxProcesses int) (syscall.Handle, error) {
-	job, err := createJobObject(memoryMB, maxProcesses)
+// createSandboxJobObject 创建具备终止兜底、可选资源配额和界面限制的 Job Object。
+func createSandboxJobObject(memoryBytes int64, maxProcesses int) (syscall.Handle, error) {
+	job, err := createJobObject(memoryBytes, maxProcesses)
 	if err != nil {
 		return 0, err
 	}

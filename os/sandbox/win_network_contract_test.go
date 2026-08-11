@@ -18,7 +18,7 @@ var (
 )
 
 func TestWindowsSIDHelpersUseTypedPointers(t *testing.T) {
-	sid, err := allocateAppPackageSID(appCapabilitySID, internetClientSID)
+	sid, err := allocateAppPackageSID(appContainerBaseSID, 2)
 	if err != nil {
 		t.Fatalf("allocate capability SID: %v", err)
 	}
@@ -30,8 +30,8 @@ func TestWindowsSIDHelpersUseTypedPointers(t *testing.T) {
 	want := []byte{
 		1, 2, // SID 修订号和子授权项数量
 		0, 0, 0, 0, 0, appPackageAuthority,
-		appCapabilitySID, 0, 0, 0,
-		internetClientSID, 0, 0, 0,
+		appContainerBaseSID, 0, 0, 0,
+		2, 0, 0, 0,
 	}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("capability SID mismatch: got %v, want %v", got, want)

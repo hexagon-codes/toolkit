@@ -25,35 +25,41 @@ import (
 // RED 阶段(旧代码): 违规路径未挂哨兵 → errors.Is 不命中 → FAIL。
 func TestBug20260702_StorageLimitViolationCarriesSentinelAndResult(t *testing.T) {
 	ws := t.TempDir()
-	sb, err := New(Config{
-		Workspace:         ws,
-		Network:           true,
-		MaxWorkspaceBytes: 5, // 执行会写 10 字节 → 后置检查违规
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-
 	// 执行本身成功(exit 0), 但产物把工作区撑过 MaxWorkspaceBytes → 后置违规
-	res, execErr := sb.Exec(context.Background(), "/bin/sh", []string{"-c", "printf 0123456789 > out.bin"})
+	res, execErr := runBoundedCommand(
+		context.Background(),
+		Command{
+			Path: "/bin/sh",
+			Args: []string{"-c", "printf 0123456789 > out.bin"},
+			Dir:  ws,
+			Env:  os.Environ(),
+		},
+		Config{
+			Workspace:         ws,
+			MaxWorkspaceBytes: 5,
+			MaxOutputBytes:    1024,
+			MaxStderrBytes:    1024,
+		},
+		posixExecutionCapabilities{},
+	)
 	if execErr == nil {
-		t.Fatalf("产物超限应返回错误, got nil (res=%+v)", res)
+		t.Fatalf("artifact limit violation returned nil error: result=%+v", res)
 	}
 	if !errors.Is(execErr, ErrStorageLimitExceeded) {
 		skipIfSandboxBackendUnavailable(t, execErr)
 	}
 	if !errors.Is(execErr, ErrStorageLimitExceeded) {
-		t.Fatalf("存储限额违规必须命中 ErrStorageLimitExceeded 哨兵, got: %v", execErr)
+		t.Fatalf("storage limit error = %v, want ErrStorageLimitExceeded", execErr)
 	}
 	if strings.Contains(execErr.Error(), "sandbox unavailable") {
-		t.Fatalf("存储限额违规不是后端故障, 不得误报 sandbox unavailable: %v", execErr)
+		t.Fatalf("storage limit violation was misreported as sandbox unavailable: %v", execErr)
 	}
 	if res == nil {
-		t.Fatalf("后置违规必须保留并返回 ExecResult((res, err) 形态), got nil")
+		t.Fatal("post-execution storage violation returned a nil ExecResult")
 		return
 	}
 	if res.ExitCode != 0 {
-		t.Fatalf("执行本身应成功(exit 0), got %d, stderr=%q", res.ExitCode, res.Stderr)
+		t.Fatalf("payload exit code = %d, want 0; stderr=%q", res.ExitCode, res.Stderr)
 	}
 }
 
@@ -63,27 +69,19 @@ func TestBug20260702_StorageLimitPreCheckCarriesSentinel(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(ws, "big.bin"), []byte("0123456789"), 0o644); err != nil {
 		t.Fatalf("write fixture: %v", err)
 	}
-	sb, err := New(Config{
+	err := enforceSandboxStorageLimits(Config{
 		Workspace:         ws,
 		MaxWorkspaceBytes: 5,
 	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
+	if err == nil {
+		t.Fatal("pre-execution storage violation returned nil error")
 	}
-
-	res, execErr := sb.Exec(context.Background(), "/bin/sh", []string{"-c", "true"})
-	if execErr == nil {
-		t.Fatalf("前置超限应返回错误, got nil")
-	}
-	if !errors.Is(execErr, ErrStorageLimitExceeded) {
-		t.Fatalf("前置违规错误必须命中 ErrStorageLimitExceeded 哨兵, got: %v", execErr)
-	}
-	if res != nil {
-		t.Fatalf("前置违规未执行任何命令, 应保持 (nil, err) 形态, got %+v", res)
+	if !errors.Is(err, ErrStorageLimitExceeded) {
+		t.Fatalf("pre-execution storage error = %v, want ErrStorageLimitExceeded", err)
 	}
 }
 
-// bug-20260702: walk 过程中文件消失(并发 ExecCode 的 defer os.Remove 竞态)不该判为检查失败。
+// bug-20260702：walk 过程中条目因并发执行而消失时不应判为检查失败。
 //
 // RED 阶段(旧代码): d.Info() 的 ErrNotExist 被当成检查失败上抛 → FAIL。
 func TestBug20260702_StorageWalkToleratesConcurrentFileRemoval(t *testing.T) {
@@ -111,7 +109,7 @@ func TestBug20260702_StorageWalkToleratesConcurrentFileRemoval(t *testing.T) {
 		MaxArtifactBytes:  100,
 	})
 	if err != nil {
-		t.Fatalf("walk 期间文件消失应跳过继续, 不该判为检查失败: %v", err)
+		t.Fatalf("disappearing file during storage walk returned an error: %v", err)
 	}
 }
 
@@ -122,16 +120,22 @@ func TestTimeoutPreservesStorageAndProcessWaitErrors(t *testing.T) {
 
 	result, err := runBoundedCommand(
 		ctx,
-		"/bin/sh",
-		[]string{"-c", "printf 0123456789 > out.bin; sleep 5"},
+		Command{
+			Path: "/bin/sh",
+			Args: []string{"-c", "printf 0123456789 > out.bin; sleep 5"},
+			Dir:  workspace,
+			Env:  os.Environ(),
+		},
 		Config{
 			Workspace:         workspace,
 			MaxWorkspaceBytes: 5,
 			MaxOutputBytes:    1024,
 			MaxStderrBytes:    1024,
 		},
-		os.Environ(),
-		LimitStatusWeak,
+		posixExecutionCapabilities{
+			Filesystem:         LimitStatusUnsupported,
+			ProcessContainment: LimitStatusUnsupported,
+		},
 	)
 	if result == nil {
 		t.Fatal("runBoundedCommand() result = nil")

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -17,9 +18,231 @@ const maxCrossPlatformProcessLimit = 1<<31 - 1
 var (
 	// ErrUnsupportedNetworkPolicy 表示当前运行环境无法落实所请求的网络策略。
 	ErrUnsupportedNetworkPolicy = errors.New("sandbox: requested network policy is not enforceable")
+	// ErrInvalidCapabilityContract 表示调用方没有提供完整、有效的能力合同。
+	ErrInvalidCapabilityContract = errors.New("sandbox: invalid required capability contract")
+	// ErrRequiredCapabilitiesUnavailable 表示执行前无法证明调用方要求的全部沙箱能力。
+	ErrRequiredCapabilitiesUnavailable = errors.New("sandbox: required capabilities are unavailable")
 	// ErrInvalidContext 表示执行调用没有提供有效上下文。
 	ErrInvalidContext = errors.New("sandbox: context must not be nil")
+	// ErrSandboxClosed 表示沙箱已经开始关闭，不能再接受任何新操作。
+	ErrSandboxClosed = errors.New("sandbox: closed")
+	// ErrOutputDrainTimeout 表示根进程结束后标准输出流未在边界内收敛。
+	ErrOutputDrainTimeout = errors.New("sandbox: output drain timed out")
+	// ErrProcessReapTimeout 表示根进程未在边界内完成 Wait 回收。
+	ErrProcessReapTimeout = errors.New("sandbox: process reap timed out")
+	// ErrPOSIXExecutionUnsettled 表示前一次 POSIX 执行仍由沙箱持有并等待回收。
+	ErrPOSIXExecutionUnsettled = errors.New("sandbox: previous POSIX execution is not settled")
+	// ErrPOSIXExecutionCapacity 表示单个 POSIX 沙箱的并发执行所有权已达到固定上界。
+	ErrPOSIXExecutionCapacity = errors.New("sandbox: POSIX execution capacity is exhausted")
+	// ErrProcessGroupSurvivedRoot 表示根进程退出时同一受控进程组仍有存活成员。
+	ErrProcessGroupSurvivedRoot = errors.New("sandbox: process group survived root exit")
+	// ErrProcessGroupSettlement 表示受控进程组未在边界内被证明为空。
+	ErrProcessGroupSettlement = errors.New("sandbox: process group did not settle")
 )
+
+// NetworkMode 精确定义载荷获得的网络视图。
+type NetworkMode bool
+
+const (
+	// NetworkDisabled 要求后端阻断载荷的 IP 网络访问。
+	NetworkDisabled NetworkMode = false
+	// NetworkHost 要求载荷继承宿主网络视图，不附加目的地址过滤。
+	NetworkHost NetworkMode = true
+)
+
+// String 返回稳定的英文网络模式名称。
+func (mode NetworkMode) String() string {
+	if mode == NetworkHost {
+		return "host"
+	}
+	return "disabled"
+}
+
+// ExecutionProfile 选择与载荷信任级别匹配的进程派生策略。
+type ExecutionProfile uint8
+
+const (
+	// ExecutionProfileUntrusted 是安全零值，要求后端提供完整进程生命周期收容。
+	ExecutionProfileUntrusted ExecutionProfile = iota
+	// ExecutionProfileTrustedBuild 仅用于固定可信构建工具，允许平台接受无法收容的后代。
+	ExecutionProfileTrustedBuild
+)
+
+// String 返回稳定的英文执行配置名称。
+func (profile ExecutionProfile) String() string {
+	switch profile {
+	case ExecutionProfileUntrusted:
+		return "untrusted"
+	case ExecutionProfileTrustedBuild:
+		return "trusted-build"
+	default:
+		return fmt.Sprintf("unknown(%d)", uint8(profile))
+	}
+}
+
+func executionProfileRequiredCapabilities(profile ExecutionProfile) (CapabilitySet, error) {
+	switch profile {
+	case ExecutionProfileUntrusted:
+		return CapabilityProcessContainment, nil
+	case ExecutionProfileTrustedBuild:
+		return CapabilityProcessCreation, nil
+	default:
+		return 0, fmt.Errorf("%w: execution profile %d is invalid", ErrInvalidCapabilityContract, uint8(profile))
+	}
+}
+
+func processCreationFitsBudget(maxProcesses int) bool {
+	return maxProcesses == 0 || maxProcesses >= 2
+}
+
+// CapabilitySet 使用位集合表达执行前要求和后端已经证明的能力。
+// 同一个集合模型同时用于协商双方，避免为每项能力维护重复布尔状态。
+type CapabilitySet uint16
+
+const (
+	// CapabilityFilesystem 表示 deny-by-default 文件系统隔离。
+	CapabilityFilesystem CapabilitySet = 1 << iota
+	// CapabilityNetwork 表示后端能精确落实所选 NetworkMode。
+	CapabilityNetwork
+	// CapabilityMemory 表示当前配置的正值内存上限在载荷启动前已经落实。
+	CapabilityMemory
+	// CapabilityProcesses 表示当前配置的正值进程数量上限在载荷启动前已经落实。
+	CapabilityProcesses
+	// CapabilityProcessContainment 表示载荷根进程及其后代始终处于不可逃逸的生命周期边界。
+	// 后端可以禁止产生后代，也可以可靠收敛完整后代集合；Exec 只有确认全部退出后才能证明该能力。
+	CapabilityProcessContainment
+	// CapabilityStorage 表示当前配置的正值工作区存储上限已经实时落实。
+	CapabilityStorage
+	// CapabilityOutput 表示标准输出和标准错误均具有实时硬上限。
+	CapabilityOutput
+	// CapabilityProcessCreation 表示所选后端策略允许可信载荷派生子进程。
+	// 该能力不等同于 ProcessContainment；两者能否同时提供取决于平台边界。
+	CapabilityProcessCreation
+	// UntrustedCodeIsolationCapabilities 是执行不可信代码必须显式要求的隔离能力集合。
+	// 该集合不承诺抗拒绝服务配额；调用方显式请求资源限额时必须追加对应能力。
+	UntrustedCodeIsolationCapabilities = CapabilityFilesystem |
+		CapabilityNetwork |
+		CapabilityProcessContainment |
+		CapabilityOutput
+	// TrustedBuildIsolationCapabilities 是可信构建配置的便利要求集合。
+	// 调用方仍必须选择 ExecutionProfileTrustedBuild；该集合不承诺后代生命周期收容，
+	// 绝不能用于执行不可信产物。
+	TrustedBuildIsolationCapabilities = CapabilityFilesystem |
+		CapabilityNetwork |
+		CapabilityOutput |
+		CapabilityProcessCreation
+
+	allSandboxCapabilities = CapabilityFilesystem |
+		CapabilityNetwork |
+		CapabilityMemory |
+		CapabilityProcesses |
+		CapabilityProcessContainment |
+		CapabilityStorage |
+		CapabilityOutput |
+		CapabilityProcessCreation
+
+	resourceLimitCapabilities = CapabilityMemory |
+		CapabilityProcesses |
+		CapabilityStorage |
+		CapabilityOutput
+)
+
+// Has 返回集合是否完整包含目标能力集合。
+func (set CapabilitySet) Has(capabilities CapabilitySet) bool {
+	return capabilities != 0 && set&capabilities == capabilities
+}
+
+// Missing 返回要求集合中尚未由可用集合证明的能力。
+func (set CapabilitySet) Missing(available CapabilitySet) CapabilitySet {
+	return set &^ available
+}
+
+// String 返回稳定、可审计的英文能力名称列表。
+func (set CapabilitySet) String() string {
+	names := make([]string, 0, 8)
+	for _, item := range []struct {
+		capability CapabilitySet
+		name       string
+	}{
+		{CapabilityFilesystem, "filesystem"},
+		{CapabilityNetwork, "network"},
+		{CapabilityMemory, "memory"},
+		{CapabilityProcesses, "processes"},
+		{CapabilityProcessContainment, "process-containment"},
+		{CapabilityStorage, "storage"},
+		{CapabilityOutput, "output"},
+		{CapabilityProcessCreation, "process-creation"},
+	} {
+		if set.Has(item.capability) {
+			names = append(names, item.name)
+		}
+	}
+	if unknown := set &^ allSandboxCapabilities; unknown != 0 {
+		names = append(names, fmt.Sprintf("unknown(0x%x)", uint16(unknown)))
+	}
+	if len(names) == 0 {
+		return "none"
+	}
+	return strings.Join(names, ",")
+}
+
+func validateCapabilitySet(set CapabilitySet) error {
+	if unknown := set &^ allSandboxCapabilities; unknown != 0 {
+		return fmt.Errorf("sandbox capabilities contain unknown bits: 0x%x", uint16(unknown))
+	}
+	return nil
+}
+
+func requireSandboxCapabilities(required, available CapabilitySet) error {
+	if err := validateCapabilitySet(required); err != nil {
+		return err
+	}
+	if err := validateCapabilitySet(available); err != nil {
+		return err
+	}
+	missing := required.Missing(available)
+	if missing == 0 {
+		return nil
+	}
+	return fmt.Errorf("%w: %s", ErrRequiredCapabilitiesUnavailable, missing)
+}
+
+func requestedResourceCapabilities(cfg Config) CapabilitySet {
+	var required CapabilitySet
+	if cfg.MaxOutputBytes > 0 || cfg.MaxStderrBytes > 0 {
+		required |= CapabilityOutput
+	}
+	if cfg.MaxMemoryBytes > 0 {
+		required |= CapabilityMemory
+	}
+	if cfg.MaxProcesses > 0 {
+		required |= CapabilityProcesses
+	}
+	if cfg.MaxWorkspaceBytes > 0 || cfg.MaxArtifactBytes > 0 {
+		required |= CapabilityStorage
+	}
+	return required
+}
+
+func validateRequiredCapabilityContract(cfg Config) error {
+	if err := validateCapabilitySet(cfg.RequiredCapabilities); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidCapabilityContract, err)
+	}
+	if cfg.RequiredCapabilities == 0 {
+		return fmt.Errorf("%w: required capabilities must not be empty", ErrInvalidCapabilityContract)
+	}
+	configured := requestedResourceCapabilities(cfg)
+	declared := cfg.RequiredCapabilities & resourceLimitCapabilities
+	missing := configured.Missing(declared)
+	if missing != 0 {
+		return fmt.Errorf("%w: requested resource limits require %s", ErrInvalidCapabilityContract, missing)
+	}
+	unconfigured := declared.Missing(configured)
+	if unconfigured != 0 {
+		return fmt.Errorf("%w: resource capabilities require configured positive limits: %s", ErrInvalidCapabilityContract, unconfigured)
+	}
+	return nil
+}
 
 // Config 沙箱配置
 type Config struct {
@@ -31,50 +254,64 @@ type Config struct {
 	// 语义：deny-default 沙箱里为每个路径追加只读放行（darwin: file-read* subpath）；
 	// 不授予写权限（写仅限 Workspace）。DeniedPaths 的 deny 规则写在放行之后、保持优先。
 	ReadablePaths []string `yaml:"readable_paths"`
-	Network       bool     `yaml:"network"` // 是否允许网络，默认 false
-	// DenyLoopback 在 Network=true 时额外禁止访问本机回环地址（127.0.0.1 / ::1 /
-	// localhost）。无法真实执行该策略的平台必须返回 ErrUnsupportedNetworkPolicy。
-	DenyLoopback bool `yaml:"deny_loopback"`
+	// Network 只接受两种明确语义：disabled 阻断 IP 网络，host 继承完整宿主网络。
+	// 无法证明所选语义的平台必须在载荷启动前拒绝，不能静默映射为近似能力。
+	Network NetworkMode `yaml:"network"`
+	// ExecutionProfile 独立选择进程派生策略；零值是不允许策略降级的不可信载荷配置。
+	ExecutionProfile ExecutionProfile `yaml:"execution_profile"`
+	// RequiredCapabilities 声明本次载荷启动前必须证明的非空能力集合。
+	// 它只追加单调能力断言，不能改变 ExecutionProfile 对应的平台隔离策略。
+	// 不可信代码从 UntrustedCodeIsolationCapabilities 开始；显式资源配额还要追加对应能力。
+	RequiredCapabilities CapabilitySet `yaml:"required_capabilities"`
 
-	// 面向 Agent 代码执行的保守资源上限。平台无法落实的限制必须通过能力报告显式暴露，
-	// 不得静默伪装为已经生效。
+	// MaxOutputBytes 与 MaxStderrBytes 为零时使用安全的有界输出默认值。
+	// Memory、Processes 与 Storage 类限额为零时表示未请求且不设置上限；正值必须声明对应能力。
 	MaxOutputBytes    int64 `yaml:"max_output_bytes"`
 	MaxStderrBytes    int64 `yaml:"max_stderr_bytes"`
 	MaxWorkspaceBytes int64 `yaml:"max_workspace_bytes"`
 	MaxArtifactBytes  int64 `yaml:"max_artifact_bytes"`
 	MaxMemoryBytes    int64 `yaml:"max_memory_bytes"`
-	// MaxProcesses 进程数上限。注意语义差异: POSIX 上通过 RLIMIT_NPROC 实现,
-	// 是「per-UID 进程总数 ≤ 当前同 UID 进程数 + MaxProcesses」的浮动增量,
-	// 与 Windows Job Object 的 per-job 精确上限语义不同。
+	// MaxProcesses 是包含载荷根进程在内的同时存活进程总预算。
+	// 只有能够证明该树级上界的平台才会报告 CapabilityProcesses。
 	MaxProcesses int `yaml:"max_processes"`
+
+	workspaceIdentity sandboxPathIdentity
 }
 
 // LimitStatus 标记某项资源限制在当前平台/后端是否真实生效
 type LimitStatus string
 
 const (
+	// LimitStatusNotRequested 表示调用方没有为本次执行请求该项可选资源配额。
+	LimitStatusNotRequested LimitStatus = "not_requested"
 	// LimitStatusEnforced 表示资源限制已被当前后端真实执行。
 	LimitStatusEnforced LimitStatus = "enforced"
 	// LimitStatusUnsupported 表示当前平台或后端无法执行该资源限制。
 	LimitStatusUnsupported LimitStatus = "unsupported"
-	// LimitStatusWeak 表示该项在当前后端「有部分约束但非强隔离」——
-	// 后端存在且执行了限制动作, 但不满足 deny-by-default 语义。
-	// 典型: linux unshare 兜底不 pivot_root, 仅掩蔽 DeniedPaths, 其余宿主
-	// 文件系统对载荷仍可见/可写。上层应据此判定是否可承载机密任务。
-	LimitStatusWeak LimitStatus = "weak"
 )
 
-// LimitReport 逐项报告资源限制的实际执行状态（能力缺口显式上报，不许静默假装）
+func requestedLimitStatus(requested bool, capability LimitStatus) LimitStatus {
+	if !requested {
+		return LimitStatusNotRequested
+	}
+	return capability
+}
+
+// LimitReport 记录本次执行结束后的实际状态，仅用于结果审计；执行准入只使用
+// RequiredCapabilities 与执行前 CapabilitySet，不能依赖本报告事后拒载。
 type LimitReport struct {
+	Network   LimitStatus
 	Memory    LimitStatus
 	Processes LimitStatus
-	Storage   LimitStatus // MaxWorkspaceBytes/MaxArtifactBytes 的 walk 检查
-	Output    LimitStatus // stdout/stderr 有界缓冲
+	// ProcessContainment 表示根进程及其后代在整个执行期间不可逃逸，且返回前已经全部退出。
+	// 该能力独立于 Processes 数量限制，不得用 RLIMIT_NPROC 等数量上限替代。
+	ProcessContainment LimitStatus
+	Storage            LimitStatus // MaxWorkspaceBytes/MaxArtifactBytes 的实时硬上限
+	Output             LimitStatus // stdout/stderr 有界缓冲
 	// Filesystem 文件系统隔离(deny-by-default containment)的实际强度:
 	//   enforced    — 强隔离(darwin Seatbelt / linux bubblewrap / windows ACL);
-	//   weak        — 弱隔离(linux unshare 兜底: 仅掩蔽 DeniedPaths, 非 deny-by-default);
 	//   unsupported — 无 OS 级文件系统隔离(basic 后端)。
-	// 降级(weak/unsupported)信号供上层(code_exec)决策是否拒载机密任务。
+	// unsupported 信号供上层(code_exec)决策是否拒载机密任务。
 	Filesystem LimitStatus
 }
 
@@ -93,89 +330,353 @@ type ExecResult struct {
 	Limits LimitReport
 }
 
-// Sandbox 沙箱接口
+// Sandbox 仅负责结构化命令的隔离执行与生命周期收敛；语言构建和源码管理由调用方编排。
 type Sandbox interface {
 	// Exec 在沙箱内执行命令
-	Exec(ctx context.Context, command string, args []string) (*ExecResult, error)
+	Exec(ctx context.Context, command Command) (*ExecResult, error)
 
-	// ExecCode 在沙箱内执行代码 (language: python/javascript/go)
-	ExecCode(ctx context.Context, language, code string) (*ExecResult, error)
+	// Close 等待已经进入的操作完成，再确定性释放沙箱持有的资源。
+	Close() error
+}
+
+// CapabilityReporter 在执行前公开当前后端可以证明的能力集合。
+type CapabilityReporter interface {
+	Capabilities(ctx context.Context) (CapabilitySet, error)
+}
+
+type sandboxCapabilitySource interface {
+	sandboxCapabilities(ctx context.Context) (CapabilitySet, error)
+}
+
+// sandboxRetryableCloser 仅由关闭失败后仍安全持有资源、允许调用方再次收敛的后端实现。
+type sandboxRetryableCloser interface {
+	sandboxCloseRetryable()
+}
+
+type capabilitySandbox struct {
+	backend   Sandbox
+	cfg       Config
+	lifecycle sandboxLifecycle
+}
+
+// sandboxLifecycle 以引用计数跟踪已经进入的操作。
+// closing 在线性化点先置位；等待活动操作时不持有互斥锁，因此新操作无需等待
+// 旧操作结束即可稳定返回 ErrSandboxClosed。
+type sandboxLifecycle struct {
+	mu        sync.Mutex
+	closing   bool
+	active    int
+	drained   chan struct{}
+	closeOnce sync.Once
+	closeErr  error
+	// closeStartOnce 保证普通关闭与可重试关闭共用同一个拒绝新操作、等待活动操作的线性化点。
+	closeStartOnce sync.Once
+	retryCloseMu   sync.Mutex
+	retryComplete  bool
+	// beforeCloseOnce 仅供同包并发测试在调用 closeOnce.Do 前取得确定性回执。
+	// 生产环境保持 nil；如需测试注入，必须在并发使用生命周期之前完成设置且不再修改。
+	beforeCloseOnce func()
+}
+
+func (lifecycle *sandboxLifecycle) begin() (func(), error) {
+	lifecycle.mu.Lock()
+	if lifecycle.closing {
+		lifecycle.mu.Unlock()
+		return nil, ErrSandboxClosed
+	}
+	lifecycle.active++
+	lifecycle.mu.Unlock()
+	return lifecycle.end, nil
+}
+
+func (lifecycle *sandboxLifecycle) end() {
+	lifecycle.mu.Lock()
+	defer lifecycle.mu.Unlock()
+	lifecycle.active--
+	if lifecycle.closing && lifecycle.active == 0 && lifecycle.drained != nil {
+		close(lifecycle.drained)
+		lifecycle.drained = nil
+	}
+}
+
+func (lifecycle *sandboxLifecycle) close(closeBackend func() error) error {
+	if lifecycle.beforeCloseOnce != nil {
+		lifecycle.beforeCloseOnce()
+	}
+	lifecycle.closeOnce.Do(func() {
+		lifecycle.startClosing()
+		lifecycle.closeErr = closeSandboxBackend(closeBackend)
+	})
+	return lifecycle.closeErr
+}
+
+func (lifecycle *sandboxLifecycle) closeRetryable(closeBackend func() error) error {
+	lifecycle.startClosing()
+	lifecycle.retryCloseMu.Lock()
+	defer lifecycle.retryCloseMu.Unlock()
+	if lifecycle.retryComplete {
+		return nil
+	}
+	lifecycle.closeErr = closeSandboxBackend(closeBackend)
+	if lifecycle.closeErr == nil {
+		lifecycle.retryComplete = true
+	}
+	return lifecycle.closeErr
+}
+
+func (lifecycle *sandboxLifecycle) startClosing() {
+	lifecycle.closeStartOnce.Do(func() {
+		lifecycle.mu.Lock()
+		lifecycle.closing = true
+		if lifecycle.active > 0 {
+			lifecycle.drained = make(chan struct{})
+		}
+		drained := lifecycle.drained
+		lifecycle.mu.Unlock()
+		if drained != nil {
+			<-drained
+		}
+	})
+}
+
+const closeBackendPanicMessage = "sandbox: backend close panicked"
+
+// closeBackendPanicError 保存后端 Close 的原始 panic 值，但错误文本不调用该值的
+// Error、String 或 Format 方法，避免恢复路径再次 panic。
+type closeBackendPanicError struct {
+	value any
+	cause error
+}
+
+func (err *closeBackendPanicError) Error() string {
+	return closeBackendPanicMessage
+}
+
+func (err *closeBackendPanicError) Unwrap() error {
+	return err.cause
+}
+
+func (err *closeBackendPanicError) PanicValue() any {
+	return err.value
+}
+
+func closeSandboxBackend(closeBackend func() error) (err error) {
+	normalReturn := false
+	defer func() {
+		recovered := recover()
+		if normalReturn {
+			return
+		}
+		panicErr := &closeBackendPanicError{value: recovered}
+		if cause, ok := recovered.(error); ok {
+			panicErr.cause = cause
+		}
+		err = panicErr
+	}()
+	err = closeBackend()
+	normalReturn = true
+	return err
+}
+
+func (lifecycle *sandboxLifecycle) isClosing() bool {
+	lifecycle.mu.Lock()
+	defer lifecycle.mu.Unlock()
+	return lifecycle.closing
+}
+
+func (s *capabilitySandbox) Capabilities(ctx context.Context) (CapabilitySet, error) {
+	release, err := s.lifecycle.begin()
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+	return s.capabilities(ctx)
+}
+
+func (s *capabilitySandbox) capabilities(ctx context.Context) (CapabilitySet, error) {
+	if err := validateExecContext(ctx); err != nil {
+		return 0, err
+	}
+	source, ok := s.backend.(sandboxCapabilitySource)
+	if !ok {
+		return 0, nil
+	}
+	available, err := source.sandboxCapabilities(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if err := validateCapabilitySet(available); err != nil {
+		return 0, err
+	}
+	return available, nil
+}
+
+func (s *capabilitySandbox) Exec(ctx context.Context, requested Command) (*ExecResult, error) {
+	release, lifecycleErr := s.lifecycle.begin()
+	if lifecycleErr != nil {
+		return nil, lifecycleErr
+	}
+	defer release()
+	if err := validateExecContext(ctx); err != nil {
+		return nil, err
+	}
+	command, err := snapshotSandboxCommandPaths(s.cfg, requested)
+	if err != nil {
+		return nil, err
+	}
+	if err := revalidateSandboxExecutionPaths(command); err != nil {
+		return nil, err
+	}
+	available, capabilityErr := s.capabilities(ctx)
+	if capabilityErr != nil {
+		return nil, capabilityErr
+	}
+	profileRequired, profileErr := executionProfileRequiredCapabilities(s.cfg.ExecutionProfile)
+	if profileErr != nil {
+		return nil, profileErr
+	}
+	required := s.cfg.RequiredCapabilities | profileRequired
+	if capabilityErr := requireSandboxCapabilities(required, available); capabilityErr != nil {
+		return nil, capabilityErr
+	}
+	return s.backend.Exec(ctx, command)
+}
+
+// Close 等待所有已经进入的操作完成。普通后端只关闭一次；显式实现可重试合同的
+// 后端在失败后仍拒绝新操作，但允许后续 Close 继续收敛其保留资源。
+func (s *capabilitySandbox) Close() error {
+	if _, ok := s.backend.(sandboxRetryableCloser); ok {
+		return s.lifecycle.closeRetryable(s.backend.Close)
+	}
+	return s.lifecycle.close(s.backend.Close)
 }
 
 // New 创建当前平台的沙箱实例
 func New(cfg Config) (Sandbox, error) {
-	if cfg.Workspace == "" {
-		return nil, fmt.Errorf("sandbox workspace is required")
-	}
-	if cfg.Timeout < 0 {
-		return nil, fmt.Errorf("sandbox timeout must not be negative")
-	}
-	if cfg.MaxOutputBytes < 0 || cfg.MaxStderrBytes < 0 || cfg.MaxWorkspaceBytes < 0 ||
-		cfg.MaxArtifactBytes < 0 || cfg.MaxMemoryBytes < 0 || cfg.MaxProcesses < 0 {
-		return nil, fmt.Errorf("sandbox resource limits must not be negative")
-	}
-	if cfg.MaxProcesses > maxCrossPlatformProcessLimit {
-		return nil, fmt.Errorf("sandbox max processes exceeds the cross-platform limit")
+	var err error
+	cfg, err = validateSandboxConfigSemantics(cfg)
+	if err != nil {
+		return nil, err
 	}
 
-	workspace, err := normalizeSandboxWorkspace(cfg.Workspace)
+	workspace, workspaceIdentity, err := snapshotSandboxWorkspace(cfg.Workspace)
 	if err != nil {
 		return nil, err
 	}
 	cfg.Workspace = workspace
+	cfg.workspaceIdentity = workspaceIdentity
 	if cfg.ReadablePaths, err = normalizeSandboxPaths("readable path", cfg.ReadablePaths); err != nil {
 		return nil, err
 	}
 	if cfg.DeniedPaths, err = normalizeSandboxPaths("denied path", cfg.DeniedPaths); err != nil {
 		return nil, err
 	}
-	if cfg.Timeout <= 0 {
+	backend, err := newPlatformSandbox(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &capabilitySandbox{backend: backend, cfg: cfg}, nil
+}
+
+// validateSandboxConfigSemantics 在任何文件系统副作用之前完成纯配置语义校验。
+func validateSandboxConfigSemantics(cfg Config) (Config, error) {
+	if cfg.Workspace == "" {
+		return Config{}, fmt.Errorf("sandbox workspace is required")
+	}
+	if cfg.Timeout < 0 {
+		return Config{}, fmt.Errorf("sandbox timeout must not be negative")
+	}
+	if uint64(cfg.Timeout) > uint64((1<<63-1)/int64(time.Second)) {
+		return Config{}, fmt.Errorf("sandbox timeout exceeds the duration limit")
+	}
+	if cfg.MaxOutputBytes < 0 || cfg.MaxStderrBytes < 0 || cfg.MaxWorkspaceBytes < 0 ||
+		cfg.MaxArtifactBytes < 0 || cfg.MaxMemoryBytes < 0 || cfg.MaxProcesses < 0 {
+		return Config{}, fmt.Errorf("sandbox resource limits must not be negative")
+	}
+	if cfg.MaxProcesses > maxCrossPlatformProcessLimit {
+		return Config{}, fmt.Errorf("sandbox max processes exceeds the cross-platform limit")
+	}
+	if _, err := executionProfileRequiredCapabilities(cfg.ExecutionProfile); err != nil {
+		return Config{}, err
+	}
+	if cfg.ExecutionProfile == ExecutionProfileTrustedBuild &&
+		cfg.MaxProcesses > 0 && !processCreationFitsBudget(cfg.MaxProcesses) {
+		return Config{}, fmt.Errorf("%w: trusted-build execution profile requires MaxProcesses to be at least 2", ErrInvalidCapabilityContract)
+	}
+	workspacePath, err := absoluteSandboxPath("workspace", cfg.Workspace)
+	if err != nil {
+		return Config{}, err
+	}
+	if isFilesystemRoot(workspacePath) {
+		return Config{}, fmt.Errorf("sandbox workspace must not be a filesystem root")
+	}
+	if err := validateSandboxPathInputs("readable path", cfg.ReadablePaths); err != nil {
+		return Config{}, err
+	}
+	if err := validateSandboxPathInputs("denied path", cfg.DeniedPaths); err != nil {
+		return Config{}, err
+	}
+	if cfg.Timeout == 0 {
 		cfg.Timeout = 60
 	}
-	if cfg.MaxOutputBytes <= 0 {
+	if cfg.MaxOutputBytes == 0 {
 		cfg.MaxOutputBytes = 64 * 1024
 	}
-	if cfg.MaxStderrBytes <= 0 {
+	if cfg.MaxStderrBytes == 0 {
 		cfg.MaxStderrBytes = 64 * 1024
 	}
-	if cfg.MaxWorkspaceBytes <= 0 {
-		cfg.MaxWorkspaceBytes = 1024 * 1024 * 1024
+	// 输出零值先归一为安全正值，再参与资源能力合同的双向校验。
+	if err := validateRequiredCapabilityContract(cfg); err != nil {
+		return Config{}, err
 	}
-	if cfg.MaxArtifactBytes <= 0 {
-		cfg.MaxArtifactBytes = 50 * 1024 * 1024
+	return cfg, nil
+}
+
+// AvailableCapabilities 返回当前沙箱后端在载荷启动前能够证明的能力集合。
+func AvailableCapabilities(ctx context.Context, sandboxInstance Sandbox) (CapabilitySet, error) {
+	if err := validateExecContext(ctx); err != nil {
+		return 0, err
 	}
-	if cfg.MaxMemoryBytes <= 0 {
-		cfg.MaxMemoryBytes = 256 * 1024 * 1024
+	if sandboxInstance == nil {
+		return 0, fmt.Errorf("sandbox instance is required")
 	}
-	if cfg.MaxProcesses <= 0 {
-		cfg.MaxProcesses = 64
+	if reporter, ok := sandboxInstance.(CapabilityReporter); ok {
+		return reporter.Capabilities(ctx)
 	}
-	return newPlatformSandbox(cfg)
+	if source, ok := sandboxInstance.(sandboxCapabilitySource); ok {
+		available, err := source.sandboxCapabilities(ctx)
+		if err != nil {
+			return 0, err
+		}
+		if err := validateCapabilitySet(available); err != nil {
+			return 0, err
+		}
+		return available, nil
+	}
+	return 0, nil
 }
 
 func normalizeSandboxWorkspace(rawPath string) (string, error) {
+	path, _, err := snapshotSandboxWorkspace(rawPath)
+	return path, err
+}
+
+func snapshotSandboxWorkspace(rawPath string) (string, sandboxPathIdentity, error) {
 	path, err := absoluteSandboxPath("workspace", rawPath)
 	if err != nil {
-		return "", err
+		return "", sandboxPathIdentity{}, err
 	}
 	if isFilesystemRoot(path) {
-		return "", fmt.Errorf("sandbox workspace must not be a filesystem root")
+		return "", sandboxPathIdentity{}, fmt.Errorf("sandbox workspace must not be a filesystem root")
 	}
 	if mkdirErr := os.MkdirAll(path, 0o700); mkdirErr != nil {
-		return "", fmt.Errorf("create sandbox workspace: %w", mkdirErr)
+		return "", sandboxPathIdentity{}, fmt.Errorf("create sandbox workspace: %w", mkdirErr)
 	}
-	resolved, err := filepath.EvalSymlinks(path)
+	identity, err := snapshotSandboxDirectoryIdentity("workspace", path)
 	if err != nil {
-		return "", fmt.Errorf("resolve sandbox workspace: %w", err)
+		return "", sandboxPathIdentity{}, err
 	}
-	info, err := os.Stat(resolved)
-	if err != nil {
-		return "", fmt.Errorf("inspect sandbox workspace: %w", err)
-	}
-	if !info.IsDir() {
-		return "", fmt.Errorf("sandbox workspace must be a directory")
-	}
-	return filepath.Clean(resolved), nil
+	return path, identity, nil
 }
 
 func normalizeSandboxPaths(field string, paths []string) ([]string, error) {
@@ -214,6 +715,26 @@ func normalizeSandboxPaths(field string, paths []string) ([]string, error) {
 		normalized = append(normalized, path)
 	}
 	return normalized, nil
+}
+
+func validateSandboxPathInputs(field string, paths []string) error {
+	for index, rawPath := range paths {
+		if rawPath == "" {
+			return fmt.Errorf("sandbox %s at index %d is empty", field, index)
+		}
+		expanded := expandPath(rawPath)
+		if !filepath.IsAbs(expanded) {
+			return fmt.Errorf("sandbox %s %q must be absolute", field, rawPath)
+		}
+		path, err := absoluteSandboxPath(field, expanded)
+		if err != nil {
+			return err
+		}
+		if isFilesystemRoot(path) {
+			return fmt.Errorf("sandbox %s must not be a filesystem root", field)
+		}
+	}
+	return nil
 }
 
 func absoluteSandboxPath(field, rawPath string) (string, error) {
@@ -280,10 +801,18 @@ func validateExecContext(ctx context.Context) error {
 }
 
 type boundedBuffer struct {
+	mu        sync.Mutex
 	limit     int64
 	total     int64
 	truncated bool
 	buf       []byte
+}
+
+// boundedBufferSnapshot 是一次锁内取得的不可变输出视图。
+type boundedBufferSnapshot struct {
+	Text      string
+	BytesSeen int64
+	Truncated bool
 }
 
 func newBoundedBuffer(limit int64) *boundedBuffer {
@@ -294,8 +823,16 @@ func newBoundedBuffer(limit int64) *boundedBuffer {
 }
 
 func (b *boundedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	n := len(p)
-	b.total += int64(n)
+	const maxInt64 = int64(^uint64(0) >> 1)
+	if int64(n) > maxInt64-b.total {
+		b.total = maxInt64
+		b.truncated = true
+	} else {
+		b.total += int64(n)
+	}
 	remaining := b.limit - int64(len(b.buf))
 	if remaining > 0 {
 		if int64(len(p)) > remaining {
@@ -310,43 +847,20 @@ func (b *boundedBuffer) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-func (b *boundedBuffer) String() string   { return string(b.buf) }
-func (b *boundedBuffer) BytesSeen() int64 { return b.total }
-func (b *boundedBuffer) Truncated() bool  { return b.truncated || b.total > b.limit }
-
-// newUniqueCodeFile 在 dir 下创建带唯一后缀的代码临时文件并写入 code。
-//
-// 文件名形如 "_hexclaw_exec_<随机>.<ext>", 保证并发调用之间彼此隔离,
-// 不会因固定文件名而互相覆盖或被对方的 defer 误删。返回绝对路径。
-//
-// 设计动机: 旧实现在 darwin/linux/basic 三个 ExecCode 路径均写死固定文件名
-// "_hexclaw_exec.<ext>", 同一 workspace 并发执行多份代码时会互相覆盖同一物理文件,
-// 且任一 defer os.Remove 可能误删他人正在使用的文件, 违反"并发执行隔离"安全要求。
-// 本函数用 os.CreateTemp 以 "<前缀>_*<ext>" 模式生成唯一名, 跨平台统一隔离。
-func newUniqueCodeFile(dir, ext, code string) (string, error) {
-	// CreateTemp 的 pattern 中 "*" 会被替换为唯一随机串, 其余原样保留;
-	// 将 "*" 置于扩展名之前以保留正确的文件后缀 (go run 等依赖 .go 后缀)。
-	f, err := os.CreateTemp(dir, "_hexclaw_exec_*"+ext)
-	if err != nil {
-		return "", fmt.Errorf("create temp code file: %w", err)
+// Snapshot 在同一临界区返回文本、总字节数和截断状态。
+func (b *boundedBuffer) Snapshot() boundedBufferSnapshot {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return boundedBufferSnapshot{
+		Text:      string(b.buf),
+		BytesSeen: b.total,
+		Truncated: b.truncated || b.total > b.limit,
 	}
-	name := f.Name()
-	if _, err := f.WriteString(code); err != nil {
-		return "", fmt.Errorf("write temp code: %w", errors.Join(err, f.Close(), os.Remove(name)))
-	}
-	if err := f.Close(); err != nil {
-		return "", fmt.Errorf("close temp code file: %w", errors.Join(err, os.Remove(name)))
-	}
-	return name, nil
 }
 
-func removeCodeFile(path string) error {
-	err := os.Remove(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	return err
-}
+func (b *boundedBuffer) String() string   { return b.Snapshot().Text }
+func (b *boundedBuffer) BytesSeen() int64 { return b.Snapshot().BytesSeen }
+func (b *boundedBuffer) Truncated() bool  { return b.Snapshot().Truncated }
 
 // withTimeout 依据 cfg.Timeout(秒)为执行派生一个截止时间。
 //
@@ -361,7 +875,13 @@ func withTimeout(ctx context.Context, timeoutSec int) (context.Context, context.
 	if timeoutSec <= 0 {
 		return ctx, func() {}
 	}
-	limit := time.Duration(timeoutSec) * time.Second
+	limit := time.Duration(1<<63 - 1)
+	if uint64(timeoutSec) > uint64((1<<63-1)/int64(time.Second)) {
+		// 正常入口会在任何副作用前拒绝该配置；包内直接调用仍使用不溢出的有限上界。
+		limit = time.Duration(1<<63 - 1)
+	} else {
+		limit = time.Duration(timeoutSec) * time.Second
+	}
 	// 若调用方 ctx 已有更早(或相同)的 deadline, 则尊重调用方, 不再缩短。
 	if dl, ok := ctx.Deadline(); ok && time.Until(dl) <= limit {
 		return ctx, func() {}

@@ -7,96 +7,199 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 )
 
-// windowsSandbox 通过 Win32 四层机制实现沙箱隔离：
-//  1. 受限令牌：移除权限并使用不可信完整性级别
-//  2. AppContainer ACL：工作区可读写、授权路径只读、拒绝路径不可访问
-//  3. Job Object：限制内存、进程数和界面能力
-//  4. Low Box Token：由内核执行网络隔离
+const windowsExecutionSettlementLimit = 16 * time.Second
+
+// windowsSandbox 使用稳定 AppContainer 身份、持久私有工作区 DACL、冻结句柄和 Job Object。
 type windowsSandbox struct {
-	cfg Config
+	cfg        Config
+	workspace  *windowsWorkspace
+	execMu     sync.Mutex
+	poisoned   error
+	quarantine *windowsProcessQuarantine
+	launchOps  windowsLaunchOps
+	launcher   windowsProcessLauncher
 }
+
+func (*windowsSandbox) sandboxCloseRetryable() {}
 
 func newPlatformSandbox(cfg Config) (Sandbox, error) {
-	if err := os.MkdirAll(cfg.Workspace, 0o700); err != nil {
-		return nil, fmt.Errorf("create workspace: %w", err)
+	if len(cfg.ReadablePaths) != 0 {
+		return nil, fmt.Errorf("Windows ReadablePaths are unsupported without brokered read-only mappings")
+	}
+	if cfg.Network != NetworkDisabled {
+		return nil, fmt.Errorf(
+			"%w: Windows cannot provide the complete host network view",
+			ErrUnsupportedNetworkPolicy,
+		)
 	}
 
-	return &windowsSandbox{cfg: cfg}, nil
+	workspace, err := prepareWindowsWorkspace(cfg)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Workspace = workspace.canonicalPath
+	if err := verifyWindowsDeniedPaths(cfg, workspace); err != nil {
+		return nil, errors.Join(err, workspace.close())
+	}
+	return &windowsSandbox{
+		cfg:        cfg,
+		workspace:  workspace,
+		quarantine: &windowsProcessQuarantine{},
+		launchOps:  newWindowsLaunchOps(),
+		launcher:   launchSandboxedProcess,
+	}, nil
 }
 
-func (s *windowsSandbox) Exec(ctx context.Context, command string, args []string) (*ExecResult, error) {
+func (s *windowsSandbox) sandboxCapabilities(ctx context.Context) (CapabilitySet, error) {
+	if err := validateExecContext(ctx); err != nil {
+		return 0, err
+	}
+	if s == nil || s.workspace == nil {
+		return 0, fmt.Errorf("Windows sandbox is not initialized")
+	}
+	if s.cfg.Network != NetworkDisabled {
+		return 0, fmt.Errorf("%w: Windows cannot provide the complete host network view", ErrUnsupportedNetworkPolicy)
+	}
+	available := CapabilityFilesystem |
+		CapabilityNetwork |
+		CapabilityProcessContainment |
+		CapabilityOutput
+	if s.cfg.MaxMemoryBytes > 0 {
+		available |= CapabilityMemory
+	}
+	if s.cfg.MaxProcesses > 0 {
+		available |= CapabilityProcesses
+	}
+	if processCreationFitsBudget(s.cfg.MaxProcesses) {
+		available |= CapabilityProcessCreation
+	}
+	return available, nil
+}
+
+func (s *windowsSandbox) Exec(ctx context.Context, requested Command) (*ExecResult, error) {
 	if err := validateExecContext(ctx); err != nil {
 		return nil, err
 	}
-	if err := enforceSandboxStorageLimits(s.cfg); err != nil {
-		return nil, err
+	s.execMu.Lock()
+	defer s.execMu.Unlock()
+	result, _, err := s.execLocked(ctx, requested)
+	return result, err
+}
+
+func (s *windowsSandbox) execLocked(
+	ctx context.Context,
+	requested Command,
+) (*ExecResult, bool, error) {
+	if s.poisoned != nil {
+		return nil, false, fmt.Errorf("Windows sandbox is unavailable after an unconfirmed process-containment shutdown: %w", s.poisoned)
+	}
+	command, err := s.prepareCommand(requested)
+	if err != nil {
+		return nil, true, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, true, fmt.Errorf("sandbox exec context is already done: %w", err)
+	}
+	if err := enforceWindowsWorkspaceLimits(s.workspace, s.cfg); err != nil {
+		return nil, true, err
 	}
 
-	// Validate escape vectors
-	if err := validateWindowsEscapeVectors(command, args); err != nil {
-		return nil, fmt.Errorf("security check failed: %w", err)
+	executable, err := resolveWindowsExecutable(s.workspace, command.Path)
+	if err != nil {
+		return nil, true, err
 	}
-	if err := validateWindowsPath(command); err != nil {
-		return nil, err
+	workingDirectory, err := resolveWindowsWorkingDirectory(s.workspace, command.Dir)
+	if err != nil {
+		return nil, true, errors.Join(err, executable.close())
+	}
+	env := command.Env
+	if env == nil {
+		env, err = cleanWindowsEnv(s.workspace, executable.applicationName)
+		if err != nil {
+			return nil, true, errors.Join(err, executable.close(), workingDirectory.close())
+		}
+	}
+	if err := validateSandboxEnvironment(env); err != nil {
+		return nil, true, errors.Join(err, executable.close(), workingDirectory.close())
+	}
+	env, err = validateWindowsCommandEnv(s.workspace, env)
+	if err != nil {
+		return nil, true, errors.Join(err, executable.close(), workingDirectory.close())
 	}
 
 	ctx, cancel := withTimeout(ctx, s.cfg.Timeout)
 	defer cancel()
-
-	// Try full sandbox launch
-	proc, err := launchSandboxedProcess(s.cfg, command, args)
+	if launchOpsErr := s.launchOps.validate(); launchOpsErr != nil {
+		return nil, true, errors.Join(launchOpsErr, executable.close(), workingDirectory.close())
+	}
+	if s.launcher == nil {
+		return nil, true, errors.Join(
+			fmt.Errorf("windows process launcher is required"),
+			executable.close(),
+			workingDirectory.close(),
+		)
+	}
+	proc, err := s.launcher(
+		s.cfg,
+		s.workspace,
+		executable,
+		workingDirectory,
+		command.Args,
+		env,
+		s.quarantine,
+		s.launchOps,
+	)
+	planCloseErr := errors.Join(executable.close(), workingDirectory.close())
+	if err == nil && proc == nil {
+		err = fmt.Errorf("windows process launcher returned no process")
+	}
 	if err != nil {
-		return nil, fmt.Errorf("sandbox unavailable: windows sandbox backend failed: %w", err)
+		err = errors.Join(fmt.Errorf("sandbox unavailable: Windows sandbox backend failed: %w", err), planCloseErr)
+		if errors.Is(err, errWindowsProcessContainmentUnconfirmed) ||
+			errors.Is(err, errWindowsProcessLifecycleUnconfirmed) {
+			s.poisoned = err
+			return nil, false, err
+		}
+		return nil, true, err
 	}
 
-	// Wait for process
-	type waitResult struct {
-		state *os.ProcessState
-		err   error
-	}
-	done := make(chan waitResult, 1)
-	go func() {
-		state, err := proc.Wait()
-		done <- waitResult{state: state, err: err}
-	}()
+	done := proc.startWait()
 
 	select {
-	case wait := <-done:
-		exitCode := 0
-		if wait.state != nil {
-			exitCode = wait.state.ExitCode()
-		} else if wait.err != nil {
-			exitCode = 1
+	case <-done:
+		wait, lifecycleFinished := proc.completion.wait(0)
+		treeConfirmed := proc.processContainmentConfirmed()
+		result := windowsExecResult(proc, wait.state, "", windowsLimitReport(s.cfg, treeConfirmed))
+		resultErr := planCloseErr
+		if !lifecycleFinished {
+			resultErr = errors.Join(resultErr, fmt.Errorf("sandbox exec wait lifecycle result is unavailable"))
 		}
-		res := &ExecResult{
-			Stdout:          proc.stdout.String(),
-			Stderr:          proc.stderr.String(),
-			ExitCode:        exitCode,
-			StdoutBytes:     proc.stdout.BytesSeen(),
-			StderrBytes:     proc.stderr.BytesSeen(),
-			StdoutTruncated: proc.stdout.Truncated(),
-			StderrTruncated: proc.stderr.Truncated(),
-			Limits:          windowsLimitReport(),
-		}
-		limitErr := enforceSandboxStorageLimits(s.cfg)
 		if wait.err != nil {
-			return res, errors.Join(fmt.Errorf("sandbox exec wait failed: %w", wait.err), limitErr)
+			resultErr = errors.Join(resultErr, fmt.Errorf("sandbox exec wait failed: %w", wait.err))
 		}
 		if wait.state == nil {
-			return res, errors.Join(fmt.Errorf("sandbox exec wait failed: process state is unavailable"), limitErr)
+			resultErr = errors.Join(resultErr, fmt.Errorf("sandbox exec wait failed: process state is unavailable"))
 		}
-		if limitErr != nil {
-			return res, limitErr
+		if !treeConfirmed {
+			resultErr = errors.Join(resultErr, errWindowsProcessContainmentUnconfirmed)
 		}
-		return res, nil
+		if !lifecycleFinished || !treeConfirmed || !proc.lifecycleReleased() {
+			return result, false, s.retainExecution(proc, resultErr)
+		}
+		if limitErr := enforceWindowsWorkspaceLimits(s.workspace, s.cfg); limitErr != nil {
+			resultErr = errors.Join(resultErr, limitErr)
+		}
+		return result, true, resultErr
+
 	case <-ctx.Done():
 		killErr := proc.Kill()
-		wait := <-done
+		wait, lifecycleFinished := proc.completion.wait(s.launchOps.settlementLimit)
+		treeConfirmed := lifecycleFinished && proc.processContainmentConfirmed()
 		stderr := proc.stderr.String()
 		if stderr == "" {
 			stderr = "process canceled"
@@ -104,115 +207,121 @@ func (s *windowsSandbox) Exec(ctx context.Context, command string, args []string
 				stderr = "process timed out"
 			}
 		}
-		stderrBytes := proc.stderr.BytesSeen()
-		if stderrBytes == 0 {
-			stderrBytes = int64(len(stderr))
-		}
-		res := &ExecResult{
-			Stdout:          proc.stdout.String(),
-			Stderr:          stderr,
-			ExitCode:        -1,
-			StdoutBytes:     proc.stdout.BytesSeen(),
-			StderrBytes:     stderrBytes,
-			StdoutTruncated: proc.stdout.Truncated(),
-			StderrTruncated: proc.stderr.Truncated(),
-			Limits:          windowsLimitReport(),
-		}
-		resultErr := fmt.Errorf("sandbox exec terminated by timeout/cancel: %w", ctx.Err())
+		result := windowsExecResult(proc, wait.state, stderr, windowsLimitReport(s.cfg, treeConfirmed))
+		result.ExitCode = -1
+		resultErr := errors.Join(
+			fmt.Errorf("sandbox exec terminated by timeout/cancel: %w", ctx.Err()),
+			planCloseErr,
+		)
 		if killErr != nil {
-			resultErr = errors.Join(resultErr, fmt.Errorf("kill sandbox process: %w", killErr))
+			resultErr = errors.Join(resultErr, fmt.Errorf("kill sandbox process tree: %w", killErr))
+		}
+		if !lifecycleFinished {
+			resultErr = errors.Join(resultErr, fmt.Errorf("windows process lifecycle did not finish within %s", s.launchOps.settlementLimit))
 		}
 		if wait.err != nil {
 			resultErr = errors.Join(resultErr, fmt.Errorf("sandbox exec wait failed: %w", wait.err))
 		}
-		if limitErr := enforceSandboxStorageLimits(s.cfg); limitErr != nil {
+		if !treeConfirmed {
+			resultErr = errors.Join(resultErr, errWindowsProcessContainmentUnconfirmed)
+		}
+		if !treeConfirmed || !proc.lifecycleReleased() {
+			return result, false, s.retainExecution(proc, resultErr)
+		}
+		if limitErr := enforceWindowsWorkspaceLimits(s.workspace, s.cfg); limitErr != nil {
 			resultErr = errors.Join(resultErr, fmt.Errorf("storage limit check failed: %w", limitErr))
 		}
-		return res, resultErr
+		return result, true, resultErr
 	}
 }
 
-// windowsLimitReport 报告 Windows 后端各资源限制项的实际执行状态。
-//
-// Job Object 真实执行 memory/processes 上限(创建失败时 Exec 直接报错, 不会
-// 走到结果构造), Storage walk 检查与有界输出缓冲由本包纯用户态实现,
-// 受限令牌 + ACL(workspace RW / ReadablePaths RO / DeniedPaths deny)提供
-// deny-by-default 文件系统隔离, 均恒 enforced。
-func windowsLimitReport() LimitReport {
+func (s *windowsSandbox) retainExecution(
+	proc *windowsSandboxedProcess,
+	executionErr error,
+) error {
+	result := retainWindowsExecutionLifecycle(
+		s.quarantine,
+		proc.retain,
+		proc.processContainmentConfirmed(),
+		executionErr,
+	)
+	s.poisoned = result
+	return result
+}
+
+func (s *windowsSandbox) prepareCommand(requested Command) (Command, error) {
+	if requested.Path == "" {
+		return Command{}, fmt.Errorf("sandbox command path is required")
+	}
+	if strings.IndexByte(requested.Path, 0) >= 0 {
+		return Command{}, fmt.Errorf("sandbox command path contains NUL")
+	}
+	command := Command{
+		Path: requested.Path,
+		Args: append([]string(nil), requested.Args...),
+		Dir:  requested.Dir,
+	}
+	for index, argument := range command.Args {
+		if strings.IndexByte(argument, 0) >= 0 {
+			return Command{}, fmt.Errorf("sandbox command argument at index %d contains NUL", index)
+		}
+	}
+	if requested.Env != nil {
+		command.Env = make([]string, len(requested.Env))
+		copy(command.Env, requested.Env)
+		if err := validateSandboxEnvironment(command.Env); err != nil {
+			return Command{}, err
+		}
+	}
+	return command, nil
+}
+
+func windowsExecResult(
+	proc *windowsSandboxedProcess,
+	state *os.ProcessState,
+	fallbackStderr string,
+	limits LimitReport,
+) *ExecResult {
+	exitCode := 0
+	if state != nil {
+		exitCode = state.ExitCode()
+	}
+	stderr := proc.stderr.String()
+	stderrBytes := proc.stderr.BytesSeen()
+	if stderr == "" && fallbackStderr != "" {
+		stderr = fallbackStderr
+		if stderrBytes == 0 {
+			stderrBytes = int64(len(fallbackStderr))
+		}
+	}
+	return &ExecResult{
+		Stdout:          proc.stdout.String(),
+		Stderr:          stderr,
+		ExitCode:        exitCode,
+		StdoutBytes:     proc.stdout.BytesSeen(),
+		StderrBytes:     stderrBytes,
+		StdoutTruncated: proc.stdout.Truncated(),
+		StderrTruncated: proc.stderr.Truncated(),
+		Limits:          limits,
+	}
+}
+
+// windowsLimitReport 只对本次已证明的进程生命周期收敛结果报告 Enforced。
+func windowsLimitReport(cfg Config, processContainmentConfirmed bool) LimitReport {
+	processContainment := LimitStatusUnsupported
+	if processContainmentConfirmed {
+		processContainment = LimitStatusEnforced
+	}
 	return LimitReport{
-		Memory:     LimitStatusEnforced,
-		Processes:  LimitStatusEnforced,
-		Storage:    LimitStatusEnforced,
+		Network:            LimitStatusEnforced,
+		Memory:             requestedLimitStatus(cfg.MaxMemoryBytes > 0, LimitStatusEnforced),
+		Processes:          requestedLimitStatus(cfg.MaxProcesses > 0, LimitStatusEnforced),
+		ProcessContainment: processContainment,
+		Storage: requestedLimitStatus(
+			cfg.MaxWorkspaceBytes > 0 || cfg.MaxArtifactBytes > 0,
+			LimitStatusUnsupported,
+		),
 		Output:     LimitStatusEnforced,
 		Filesystem: LimitStatusEnforced,
 	}
-}
-
-func (s *windowsSandbox) ExecCode(ctx context.Context, language, code string) (result *ExecResult, err error) {
-	if validationErr := validateExecContext(ctx); validationErr != nil {
-		return nil, validationErr
-	}
-	var ext, runner string
-	lang := strings.ToLower(language)
-	switch lang {
-	case "python", "python3":
-		ext, runner = ".py", "python"
-	case "javascript", "js", "node":
-		ext, runner = ".js", "node"
-	case "go", "golang":
-		ext, runner = ".go", "go"
-	default:
-		return nil, fmt.Errorf("unsupported language: %s", language)
-	}
-
-	tmpFile, err := newUniqueCodeFile(s.cfg.Workspace, ext, code)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { err = errors.Join(err, removeCodeFile(tmpFile)) }()
-
-	var args []string
-	if lang == "go" || lang == "golang" {
-		args = []string{"run", tmpFile}
-	} else {
-		args = []string{tmpFile}
-	}
-
-	runCfg := s.cfg
-	if resolvedRunner, runtimePath := resolveWindowsRuntimeForExecCode(runner); resolvedRunner != "" {
-		runner = resolvedRunner
-		if runtimePath != "" {
-			runCfg.ReadablePaths = appendUniqueWindowsPath(runCfg.ReadablePaths, runtimePath)
-		}
-	}
-
-	runSandbox := *s
-	runSandbox.cfg = runCfg
-	return runSandbox.Exec(ctx, runner, args)
-}
-
-func resolveWindowsRuntimeForExecCode(runner string) (resolvedRunner, readablePath string) {
-	resolvedRunner = runner
-	path, err := exec.LookPath(runner)
-	if err != nil {
-		return resolvedRunner, ""
-	}
-	if path == "" {
-		return resolvedRunner, ""
-	}
-	resolvedRunner = path
-	return resolvedRunner, filepath.Dir(path)
-}
-
-func appendUniqueWindowsPath(paths []string, path string) []string {
-	if path == "" {
-		return paths
-	}
-	clean := filepath.Clean(path)
-	for _, existing := range paths {
-		if strings.EqualFold(filepath.Clean(existing), clean) {
-			return paths
-		}
-	}
-	return append(paths, clean)
 }

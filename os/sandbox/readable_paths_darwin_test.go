@@ -37,7 +37,7 @@ func TestReadablePaths_DarwinProfileEmitsReadOnlyRule(t *testing.T) {
 }
 
 func TestReadablePaths_DarwinExecCanReadAuthorizedDir(t *testing.T) {
-	requireSandboxTools(t)
+	python := requireSandboxTools(t)
 	ws := t.TempDir()
 	ext := externalAuthorizedDir(t) // 必须落在系统放行清单之外（同真实 /Users/<u>/work 场景）
 	fp := filepath.Join(ext, "hello.txt")
@@ -45,14 +45,14 @@ func TestReadablePaths_DarwinExecCanReadAuthorizedDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sb, err := New(Config{Workspace: ws, ReadablePaths: []string{ext}, Timeout: 20})
+	sb, err := newDarwinTestSandbox(Config{Workspace: ws, ReadablePaths: []string{ext}, Timeout: 20})
 	if err != nil {
 		t.Fatal(err)
 	}
 	code := fmt.Sprintf("import os\nprint(os.path.exists(%q), os.path.isfile(%q))", ext, fp)
-	res, err := sb.ExecCode(context.Background(), "python", code)
+	res, err := sb.Exec(context.Background(), Command{Path: python, Args: []string{"-c", code}})
 	if err != nil {
-		t.Fatalf("exec: %v", err)
+		t.Fatalf("Exec() error = %v", err)
 	}
 	if got := strings.TrimSpace(res.Stdout); got != "True True" {
 		t.Fatalf("授权目录应可读, 期望 'True True' 实得 %q (stderr=%q exit=%d)", got, res.Stderr, res.ExitCode)
@@ -60,21 +60,21 @@ func TestReadablePaths_DarwinExecCanReadAuthorizedDir(t *testing.T) {
 }
 
 func TestReadablePaths_DarwinDeniedWithoutGrant(t *testing.T) {
-	requireSandboxTools(t)
+	python := requireSandboxTools(t)
 	ws := t.TempDir()
 	ext := externalAuthorizedDir(t) // 未授权，且落在系统放行清单之外
 	fp := filepath.Join(ext, "hello.txt")
 	if err := os.WriteFile(fp, []byte("hi"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	sb, err := New(Config{Workspace: ws, Timeout: 20}) // 不给 ReadablePaths
+	sb, err := newDarwinTestSandbox(Config{Workspace: ws, Timeout: 20}) // 不给 ReadablePaths
 	if err != nil {
 		t.Fatal(err)
 	}
 	code := fmt.Sprintf("import os\nprint(os.path.exists(%q))", ext)
-	res, err := sb.ExecCode(context.Background(), "python", code)
+	res, err := sb.Exec(context.Background(), Command{Path: python, Args: []string{"-c", code}})
 	if err != nil {
-		t.Fatalf("exec: %v", err)
+		t.Fatalf("Exec() error = %v", err)
 	}
 	if got := strings.TrimSpace(res.Stdout); got != "False" {
 		t.Fatalf("未授权目录应读不到(沙箱隔离), 期望 'False' 实得 %q (stderr=%q)", got, res.Stderr)
@@ -122,7 +122,7 @@ func TestReadablePaths_DarwinRejectsProfileBreakingPaths(t *testing.T) {
 		t.Fatalf("合法授权目录应仍被放行\n%s", sbpl)
 	}
 	// 不得出现注入的网络放行
-	if strings.Contains(sbpl, "(allow network*)") && !s.cfg.Network {
+	if strings.Contains(sbpl, "(allow network*)") && s.cfg.Network == NetworkDisabled {
 		t.Fatalf("非法路径注入了 (allow network*)！\n%s", sbpl)
 	}
 	// 每个 ReadablePaths 衍生的 file-read 规则其 subpath 字面量必须闭合且不含裸引号
@@ -148,7 +148,7 @@ func TestReadablePaths_DarwinRejectsProfileBreakingPaths(t *testing.T) {
 
 func TestReadablePaths_DarwinBadPathDoesNotBreakExec(t *testing.T) {
 	ws := t.TempDir()
-	if _, err := New(Config{Workspace: ws, ReadablePaths: []string{`/Users/x/a"b`}, Timeout: 15}); err == nil {
+	if _, err := newDarwinTestSandbox(Config{Workspace: ws, ReadablePaths: []string{`/Users/x/a"b`}, Timeout: 15}); err == nil {
 		t.Fatal("非法授权路径应在创建沙箱时返回错误")
 	}
 }
@@ -156,16 +156,13 @@ func TestReadablePaths_DarwinBadPathDoesNotBreakExec(t *testing.T) {
 func TestDarwinConfigSnapshotsDeniedPaths(t *testing.T) {
 	original := filepath.Join(t.TempDir(), "secret")
 	denied := []string{original}
-	sandboxInstance, err := New(Config{Workspace: t.TempDir(), DeniedPaths: denied})
+	sandboxInstance, err := newDarwinTestSandbox(Config{Workspace: t.TempDir(), DeniedPaths: denied})
 	if err != nil {
 		t.Fatal(err)
 	}
 	denied[0] = `/tmp/x") (allow network*) (`
 
-	darwin, ok := sandboxInstance.(*darwinSandbox)
-	if !ok {
-		t.Fatalf("New() returned %T, want *darwinSandbox", sandboxInstance)
-	}
+	darwin := unwrapDarwinSandbox(t, sandboxInstance)
 	normalizedOriginal := darwin.cfg.DeniedPaths[0]
 	profile := darwin.generateSBPL()
 	if !strings.Contains(profile, normalizedOriginal) {
@@ -183,32 +180,21 @@ func TestDarwinNetworkDisabledDoesNotAllowUnixSockets(t *testing.T) {
 	}
 }
 
-func TestDarwinExecCodeTreatsAlreadyRemovedTemporaryFileAsClean(t *testing.T) {
-	requireSandboxTools(t)
-	sandboxInstance, err := New(Config{Workspace: t.TempDir(), Timeout: 10})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	result, err := sandboxInstance.ExecCode(
-		context.Background(),
-		"python",
-		"import os\nos.remove(__file__)\nprint('removed')",
-	)
-	if err != nil {
-		t.Fatalf("ExecCode() error = %v", err)
-	}
-	if result == nil || strings.TrimSpace(result.Stdout) != "removed" {
-		t.Fatalf("ExecCode() result = %#v, want successful output", result)
-	}
-}
-
-func requireSandboxTools(t *testing.T) {
+func requireSandboxTools(t *testing.T) string {
 	t.Helper()
-	if _, err := exec.LookPath("python3"); err != nil {
-		t.Skip("python3 不可用，跳过真机沙箱集成")
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is unavailable")
 	}
-	if _, err := exec.LookPath("sandbox-exec"); err != nil {
-		t.Skip("sandbox-exec 不可用，跳过真机沙箱集成")
+	python, err = freezePOSIXExecutable(python)
+	if err != nil {
+		t.Skipf("trusted python3 runtime is unavailable: %v", err)
 	}
+	if !darwinSystemExecutable(python) && darwinRuntimeRoot("python3", python) == "" {
+		t.Skipf("python3 runtime is outside trusted runtime roots: %s", python)
+	}
+	if _, err := darwinSandboxExecPath(); err != nil {
+		t.Skip("sandbox-exec is unavailable")
+	}
+	return python
 }

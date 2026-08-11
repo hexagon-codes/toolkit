@@ -3,90 +3,213 @@
 package sandbox
 
 import (
+	"bytes"
+	"context"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-func TestWindowsACLRulesReadablePathsAreReadOnly(t *testing.T) {
-	workspace := t.TempDir()
-	readable := t.TempDir()
-	denied := t.TempDir()
-
-	rules, err := windowsACLRulesForConfig(Config{
-		Workspace:     workspace,
-		ReadablePaths: []string{readable},
-		DeniedPaths:   []string{denied},
-	})
-	if err != nil {
-		t.Fatalf("build ACL rules: %v", err)
-	}
-	if len(rules) != 3 {
-		t.Fatalf("rules len=%d, want 3: %#v", len(rules), rules)
-	}
-
-	wsRule := mustFindACLRule(t, rules, workspace)
-	if wsRule.mode != grantAccess {
-		t.Fatalf("workspace mode=%d, want grantAccess", wsRule.mode)
-	}
-	if wsRule.permissions&(genericRead|genericWrite|genericExecute) != genericRead|genericWrite|genericExecute {
-		t.Fatalf("workspace permissions=%#x, want RWX", wsRule.permissions)
-	}
-
-	readRule := mustFindACLRule(t, rules, readable)
-	if readRule.mode != grantAccess {
-		t.Fatalf("readable mode=%d, want grantAccess", readRule.mode)
-	}
-	if readRule.permissions&genericWrite != 0 {
-		t.Fatalf("readable permissions=%#x unexpectedly include write", readRule.permissions)
-	}
-	if readRule.permissions&(genericRead|genericExecute) != genericRead|genericExecute {
-		t.Fatalf("readable permissions=%#x, want read+execute", readRule.permissions)
-	}
-
-	denyRule := mustFindACLRule(t, rules, denied)
-	if denyRule.mode != denyAccess {
-		t.Fatalf("denied mode=%d, want denyAccess", denyRule.mode)
-	}
-	if denyRule.permissions&(genericRead|genericWrite|genericExecute) != genericRead|genericWrite|genericExecute {
-		t.Fatalf("denied permissions=%#x, want RWX deny", denyRule.permissions)
+func TestWindowsWorkspaceUsesStableAppContainerIdentity(t *testing.T) {
+	workspacePath := t.TempDir()
+	firstSandbox := newWindowsTestSandbox(t, Config{Workspace: workspacePath, RequiredCapabilities: UntrustedCodeIsolationCapabilities})
+	secondSandbox := newWindowsTestSandbox(t, Config{Workspace: workspacePath, RequiredCapabilities: UntrustedCodeIsolationCapabilities})
+	first := windowsBackendForTest(t, firstSandbox)
+	second := windowsBackendForTest(t, secondSandbox)
+	if !bytes.Equal(first.workspace.appContainerSID, second.workspace.appContainerSID) {
+		t.Fatal("the same workspace produced different AppContainer identities")
 	}
 }
 
-func TestWindowsACLRulesSkipMissingOptionalPaths(t *testing.T) {
-	workspace := t.TempDir()
-	missing := filepath.Join(workspace, "missing")
-
-	rules, err := windowsACLRulesForConfig(Config{
-		Workspace:     workspace,
-		ReadablePaths: []string{missing},
-		DeniedPaths:   []string{missing},
-	})
-	if err != nil {
-		t.Fatalf("build ACL rules: %v", err)
+func TestWindowsWorkspaceRejectsNonEmptyUninitializedDirectory(t *testing.T) {
+	workspacePath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspacePath, "host-file.txt"), []byte("host"), 0o600); err != nil {
+		t.Fatalf("create host fixture: %v", err)
 	}
-	if len(rules) != 1 {
-		t.Fatalf("rules len=%d, want only workspace rule: %#v", len(rules), rules)
+	_, err := New(Config{Workspace: workspacePath, RequiredCapabilities: UntrustedCodeIsolationCapabilities})
+	if err == nil {
+		t.Fatal("New accepted a non-empty uninitialized workspace")
+	}
+}
+
+func TestWindowsWorkspaceRejectsRootJunction(t *testing.T) {
+	junctionParent := t.TempDir()
+	targetPath := t.TempDir()
+	junctionPath := filepath.Join(junctionParent, "workspace-junction")
+	command := exec.Command(
+		canonicalWindowsSystemExecutable(t, "cmd.exe"),
+		"/d",
+		"/c",
+		"mklink",
+		"/J",
+		junctionPath,
+		targetPath,
+	) // #nosec G204 -- 仅用于创建固定的 Windows 根 junction 测试夹具。
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("create Windows root junction fixture: %v, output=%s", err, output)
+	}
+
+	_, err := New(Config{Workspace: junctionPath, RequiredCapabilities: UntrustedCodeIsolationCapabilities})
+	if err == nil || (!strings.Contains(err.Error(), "reparse point") && !strings.Contains(err.Error(), "symbolic link")) {
+		t.Fatalf("root junction error = %v, want direct link rejection", err)
+	}
+	entries, readErr := os.ReadDir(targetPath)
+	if readErr != nil {
+		t.Fatalf("inspect root junction target after rejection: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("root junction target changed before rejection: %v", entries)
+	}
+}
+
+func TestWindowsWorkspaceRootGuardRejectsJunction(t *testing.T) {
+	junctionPath := filepath.Join(t.TempDir(), "workspace-junction")
+	targetPath := t.TempDir()
+	command := exec.Command(
+		canonicalWindowsSystemExecutable(t, "cmd.exe"),
+		"/d",
+		"/c",
+		"mklink",
+		"/J",
+		junctionPath,
+		targetPath,
+	) // #nosec G204 -- 仅用于验证 Windows raw root guard 的 reparse point 拒绝。
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("create Windows root-guard junction fixture: %v, output=%s", err, output)
+	}
+
+	guard, _, _, err := openWindowsWorkspaceRootGuard(junctionPath)
+	if guard != nil {
+		_ = guard.Close()
+		t.Fatal("raw Windows workspace guard returned a handle for a junction")
+	}
+	if err == nil || !strings.Contains(err.Error(), "reparse point") {
+		t.Fatalf("raw root guard error = %v, want reparse-point rejection", err)
+	}
+}
+
+func TestWindowsWorkspaceRejectsExternalHardLink(t *testing.T) {
+	workspacePath := t.TempDir()
+	sandboxValue := newWindowsTestSandbox(t, Config{Workspace: workspacePath, RequiredCapabilities: UntrustedCodeIsolationCapabilities})
+	externalFile := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(externalFile, []byte("outside"), 0o600); err != nil {
+		t.Fatalf("create external hard-link source: %v", err)
+	}
+	if err := os.Link(externalFile, filepath.Join(workspacePath, "linked.txt")); err != nil {
+		t.Fatalf("create external hard link: %v", err)
+	}
+	_, err := sandboxValue.Exec(context.Background(), Command{
+		Path: canonicalWindowsSystemExecutable(t, "cmd.exe"),
+		Args: []string{"/d", "/c", "exit", "0"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "hard links") {
+		t.Fatalf("hard-link Exec error = %v, want rejection", err)
+	}
+}
+
+func TestWindowsWorkspaceRejectsReparsePoint(t *testing.T) {
+	workspacePath := t.TempDir()
+	sandboxValue := newWindowsTestSandbox(t, Config{Workspace: workspacePath, RequiredCapabilities: UntrustedCodeIsolationCapabilities})
+	externalDirectory := t.TempDir()
+	linkPath := filepath.Join(workspacePath, "outside-link")
+	if err := os.Symlink(externalDirectory, linkPath); err != nil {
+		t.Fatalf("create Windows reparse-point fixture: %v", err)
+	}
+	_, err := sandboxValue.Exec(context.Background(), Command{
+		Path: canonicalWindowsSystemExecutable(t, "cmd.exe"),
+		Args: []string{"/d", "/c", "exit", "0"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "reparse point") {
+		t.Fatalf("reparse-point Exec error = %v, want rejection", err)
+	}
+}
+
+func TestWindowsWorkspaceRejectsInternalReparsePoint(t *testing.T) {
+	workspacePath := t.TempDir()
+	sandboxValue := newWindowsTestSandbox(t, Config{Workspace: workspacePath, RequiredCapabilities: UntrustedCodeIsolationCapabilities})
+	targetPath := filepath.Join(workspacePath, "internal-target")
+	if err := os.Mkdir(targetPath, 0o700); err != nil {
+		t.Fatalf("create internal reparse target: %v", err)
+	}
+	linkPath := filepath.Join(workspacePath, "internal-link")
+	if err := os.Symlink(targetPath, linkPath); err != nil {
+		t.Fatalf("create internal reparse-point fixture: %v", err)
+	}
+	_, err := sandboxValue.Exec(context.Background(), Command{
+		Path: canonicalWindowsSystemExecutable(t, "cmd.exe"),
+		Args: []string{"/d", "/c", "exit", "0"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "reparse point") {
+		t.Fatalf("internal reparse-point Exec error = %v, want rejection", err)
+	}
+}
+
+func TestWindowsWorkspaceRejectsJunction(t *testing.T) {
+	workspacePath := t.TempDir()
+	sandboxValue := newWindowsTestSandbox(t, Config{Workspace: workspacePath, RequiredCapabilities: UntrustedCodeIsolationCapabilities})
+	externalDirectory := t.TempDir()
+	junctionPath := filepath.Join(workspacePath, "outside-junction")
+	command := exec.Command(
+		canonicalWindowsSystemExecutable(t, "cmd.exe"),
+		"/d",
+		"/c",
+		"mklink",
+		"/J",
+		junctionPath,
+		externalDirectory,
+	) // #nosec G204 -- 仅用于创建固定的 Windows junction 测试夹具。
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("create Windows junction fixture: %v, output=%s", err, output)
+	}
+	_, err := sandboxValue.Exec(context.Background(), Command{
+		Path: canonicalWindowsSystemExecutable(t, "cmd.exe"),
+		Args: []string{"/d", "/c", "exit", "0"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "reparse point") {
+		t.Fatalf("junction Exec error = %v, want rejection", err)
 	}
 }
 
 func TestWindowsValidatePathRejectsAbsoluteADS(t *testing.T) {
 	if err := validateWindowsPath(`C:\Users\test\file.txt:hidden`); err == nil {
-		t.Fatal("expected absolute ADS path to be rejected")
+		t.Fatal("absolute alternate data stream path was accepted")
 	}
 }
 
-func mustFindACLRule(t *testing.T, rules []windowsACLRule, path string) windowsACLRule {
-	t.Helper()
-	want, err := filepath.EvalSymlinks(path)
+func TestWindowsDeniedPathsRejectsAccessibleDescendant(t *testing.T) {
+	workspacePath := t.TempDir()
+	sandboxValue := newWindowsTestSandbox(t, Config{Workspace: workspacePath, RequiredCapabilities: UntrustedCodeIsolationCapabilities})
+	windowsValue := windowsBackendForTest(t, sandboxValue)
+
+	deniedRoot := t.TempDir()
+	childPath := filepath.Join(deniedRoot, "allowed-child.txt")
+	if err := os.WriteFile(childPath, []byte("child"), 0o600); err != nil {
+		t.Fatalf("create denied-path child fixture: %v", err)
+	}
+	child, err := os.Open(childPath)
 	if err != nil {
-		want = filepath.Clean(path)
+		t.Fatalf("open denied-path child fixture: %v", err)
 	}
-	want = filepath.Clean(want)
-	for _, rule := range rules {
-		if filepath.Clean(rule.path) == want {
-			return rule
-		}
+	if err := setPersistentWindowsWorkspaceACL(
+		child,
+		windowsValue.workspace.ownerSID,
+		windowsValue.workspace.appContainerSID,
+	); err != nil {
+		_ = child.Close()
+		t.Fatalf("grant child AppContainer fixture access: %v", err)
 	}
-	t.Fatalf("ACL rule for %q not found in %#v", want, rules)
-	return windowsACLRule{}
+	if err := child.Close(); err != nil {
+		t.Fatalf("close denied-path child fixture: %v", err)
+	}
+
+	_, err = New(Config{
+		Workspace:            workspacePath,
+		DeniedPaths:          []string{deniedRoot},
+		RequiredCapabilities: UntrustedCodeIsolationCapabilities,
+	})
+	if err == nil || !strings.Contains(err.Error(), "allowed-child.txt") {
+		t.Fatalf("DeniedPaths descendant audit error = %v, want child-specific rejection", err)
+	}
 }

@@ -4,18 +4,85 @@ package sandbox
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
-// darwinSandbox macOS Seatbelt 沙箱
-//
-// 使用 sandbox-exec + SBPL (Sandbox Profile Language) 限制进程。
-// 与 Codex 和 Claude Code 使用完全相同的技术。
+const darwinRuntimeDirectory = posixRuntimeDirectory
+
+var (
+	// 系统运行时只读路径不包含用户可写的全局临时目录和 var 数据树。
+	darwinSystemReadSubpaths = []string{
+		"/System/Library",
+		"/System/Volumes/Preboot/Cryptexes/OS",
+		"/bin",
+		"/sbin",
+		"/usr/bin",
+		"/usr/sbin",
+		"/usr/lib",
+		"/usr/libexec",
+		"/usr/share",
+		"/Library/Apple",
+		"/Library/Frameworks",
+		"/private/var/db/timezone",
+	}
+	darwinSystemExecSubpaths = []string{
+		"/System/Library",
+		"/System/Volumes/Preboot/Cryptexes/OS",
+		"/bin",
+		"/sbin",
+		"/usr/bin",
+		"/usr/sbin",
+		"/usr/libexec",
+		"/Library/Apple",
+		"/Library/Frameworks",
+	}
+	darwinSystemExecutableMapSubpaths = []string{
+		"/System/Library",
+		"/System/Volumes/Preboot/Cryptexes/OS",
+		"/bin",
+		"/sbin",
+		"/usr/bin",
+		"/usr/sbin",
+		"/usr/lib",
+		"/usr/libexec",
+		"/Library/Apple",
+		"/Library/Frameworks",
+	}
+	darwinSystemReadLiterals = []string{
+		"/dev/null",
+		"/dev/random",
+		"/dev/urandom",
+		"/dev/zero",
+		"/etc/group",
+		"/etc/hosts",
+		"/etc/passwd",
+		"/etc/protocols",
+		"/etc/resolv.conf",
+		"/etc/services",
+		"/private/etc/group",
+		"/private/etc/hosts",
+		"/private/etc/passwd",
+		"/private/etc/protocols",
+		"/private/etc/resolv.conf",
+		"/private/etc/services",
+		"/private/var/select/sh",
+		"/var/select/sh",
+	}
+	darwinSystemWriteDataLiterals = []string{
+		"/dev/null",
+	}
+)
+
+// darwinSandbox 使用 macOS Seatbelt 提供 deny-default 的 no-child 单进程沙箱。
+// Seatbelt 先于载荷环境和载荷程序生效；同一 PID 可以 exec，但不能派生后代。
 type darwinSandbox struct {
-	cfg Config
+	cfg        Config
+	executions posixExecutionRegistry
+	// afterCommandPlan 仅由同包确定性安全测试在构造后、首次使用前设置。
+	afterCommandPlan func()
 }
 
 func newPlatformSandbox(cfg Config) (Sandbox, error) {
@@ -31,24 +98,33 @@ func newPlatformSandbox(cfg Config) (Sandbox, error) {
 }
 
 func newDarwinSandbox(cfg Config) *darwinSandbox {
+	cfg.Workspace = darwinCanonicalPath(cfg.Workspace)
 	return &darwinSandbox{cfg: cfg}
 }
 
 // generateSBPL 生成 Seatbelt Profile Language 策略
 func (s *darwinSandbox) generateSBPL() string {
-	workspace := s.cfg.Workspace
+	return s.generateSBPLWithRuntimePaths(nil)
+}
+
+func (s *darwinSandbox) generateSBPLWithRuntimePaths(runtimePaths []string) string {
+	workspace := darwinCanonicalPath(s.cfg.Workspace)
+	systemReadLiterals := darwinResolvedSystemReadLiterals()
+	runtimePaths = darwinUniquePaths(runtimePaths)
 
 	var sb strings.Builder
 	sb.WriteString("(version 1)\n")
 	sb.WriteString("(deny default)\n")
 
-	// 允许进程执行基本操作
+	// 默认 no-child 策略只允许同一 PID exec；可信构建策略显式允许工具链派生子进程。
 	sb.WriteString("(allow process-exec)\n")
-	sb.WriteString("(allow process-fork)\n")
+	if s.cfg.ExecutionProfile == ExecutionProfileTrustedBuild {
+		sb.WriteString("(allow process-fork)\n")
+	} else {
+		sb.WriteString("(deny process-fork)\n")
+	}
 	sb.WriteString("(allow sysctl-read)\n")
-	sb.WriteString("(allow mach-lookup)\n")
-	sb.WriteString("(allow signal)\n")
-	sb.WriteString("(allow system-socket)\n")
+	sb.WriteString("(allow signal (target same-sandbox))\n")
 
 	// 允许 dyld 将可执行映像 mmap 进内存。
 	// macOS 26+ 在 (deny default) 下若不显式授予 file-map-executable,
@@ -62,42 +138,38 @@ func (s *darwinSandbox) generateSBPL() string {
 	sb.WriteString("(allow file-read* (literal \"/\"))\n")
 	sb.WriteString("(allow file-read* (literal \"/private\"))\n")
 
-	// 允许读取系统文件 (运行时、库等)
+	// 仅放行系统二进制、动态链接库、框架和时区数据；var/tmp 不得广域放行。
 	sb.WriteString("(allow file-read*\n")
-	sb.WriteString("  (subpath \"/usr\")\n")
-	sb.WriteString("  (subpath \"/bin\")\n")
-	sb.WriteString("  (subpath \"/sbin\")\n")
-	sb.WriteString("  (subpath \"/Library\")\n")
-	sb.WriteString("  (subpath \"/System\")\n")
-	sb.WriteString("  (subpath \"/private/var\")\n")
-	sb.WriteString("  (subpath \"/private/tmp\")\n")
-	sb.WriteString("  (subpath \"/var\")\n")
-	sb.WriteString("  (subpath \"/tmp\")\n")
-	sb.WriteString("  (subpath \"/etc\")\n")
-	sb.WriteString("  (subpath \"/dev\")\n")
-	sb.WriteString("  (subpath \"/opt\")\n")
-
-	// Homebrew paths
-	sb.WriteString("  (subpath \"/opt/homebrew\")\n")
-	sb.WriteString("  (subpath \"/usr/local\")\n")
-
-	// Python/Node 运行时
-	if home, err := os.UserHomeDir(); err == nil {
-		for _, runtimePath := range []string{home + "/.pyenv", home + "/.nvm", home + "/.local"} {
-			if isSafeSeatbeltPath(runtimePath) {
-				fmt.Fprintf(&sb, "  (subpath \"%s\")\n", runtimePath)
-			}
+	for _, path := range darwinSystemReadSubpaths {
+		fmt.Fprintf(&sb, "  (subpath \"%s\")\n", path)
+	}
+	for _, path := range runtimePaths {
+		if isSafeSeatbeltPath(path) {
+			fmt.Fprintf(&sb, "  (literal \"%s\")\n", path)
+			fmt.Fprintf(&sb, "  (subpath \"%s\")\n", path)
 		}
 	}
 	sb.WriteString(")\n")
+	for _, path := range systemReadLiterals {
+		fmt.Fprintf(&sb, "(allow file-read* (literal \"%s\"))\n", path)
+	}
+	// 部分运行时会把标准流定向到空设备，仅授予该设备数据写入。
+	for _, path := range darwinSystemWriteDataLiterals {
+		fmt.Fprintf(&sb, "(allow file-write-data (literal \"%s\"))\n", path)
+	}
+	metadataPaths := make([]string, 0, len(darwinSystemReadSubpaths)+len(systemReadLiterals)+len(runtimePaths)+1+len(s.cfg.ReadablePaths))
+	metadataPaths = append(metadataPaths, darwinSystemReadSubpaths...)
+	metadataPaths = append(metadataPaths, systemReadLiterals...)
+	metadataPaths = append(metadataPaths, runtimePaths...)
+	metadataPaths = append(metadataPaths, workspace)
+	metadataPaths = append(metadataPaths, s.cfg.ReadablePaths...)
+	for _, path := range darwinPathAncestors(metadataPaths) {
+		fmt.Fprintf(&sb, "(allow file-read-metadata (literal \"%s\"))\n", path)
+	}
 
 	// 工作区读写
 	fmt.Fprintf(&sb, "(allow file-read* (subpath \"%s\"))\n", workspace)
 	fmt.Fprintf(&sb, "(allow file-write* (subpath \"%s\"))\n", workspace)
-
-	// /tmp 读写 (临时文件)
-	sb.WriteString("(allow file-write* (subpath \"/tmp\"))\n")
-	sb.WriteString("(allow file-write* (subpath \"/private/tmp\"))\n")
 
 	// 额外授权目录：只读放行（用户经数据连接器等显式授权的本地目录，让 code_exec 能读到）。
 	// 仅 file-read*（不授写），且写在 DeniedPaths 的 deny 之前——后写的 deny 规则在 seatbelt 里优先生效。
@@ -122,15 +194,12 @@ func (s *darwinSandbox) generateSBPL() string {
 		fmt.Fprintf(&sb, "(deny file-write* (subpath \"%s\"))\n", expanded)
 	}
 
+	// 基础执行与可执行映射能力由后置补集 deny 收敛到同一组受控路径。
+	writeDarwinExecutableBoundaries(&sb, workspace, runtimePaths)
+
 	// 网络控制
 	if s.cfg.Network {
 		sb.WriteString("(allow network*)\n")
-		// DenyLoopback：允许外网但禁止本机回环——seatbelt last-match-wins，deny 规则
-		// 写在 allow 之后覆盖 loopback 目标。防沙箱内代码经 127.0.0.1/::1 打本机
-		// 管理端口（API server 自提权 / Ollama / 其它 sidecar）构成 SSRF/提权面。
-		if s.cfg.DenyLoopback {
-			sb.WriteString("(deny network-outbound (remote ip \"localhost:*\"))\n")
-		}
 	} else {
 		sb.WriteString("(deny network*)\n")
 	}
@@ -139,91 +208,446 @@ func (s *darwinSandbox) generateSBPL() string {
 }
 
 // Exec 在 Seatbelt 沙箱内执行命令
-func (s *darwinSandbox) Exec(ctx context.Context, command string, args []string) (*ExecResult, error) {
+func (s *darwinSandbox) Exec(ctx context.Context, requested Command) (*ExecResult, error) {
 	if err := validateExecContext(ctx); err != nil {
+		return nil, err
+	}
+	if err := s.executions.ensureReady(); err != nil {
 		return nil, err
 	}
 	// 应用 cfg.Timeout: 调用方 ctx 无更早 deadline 时按配置强制超时。
 	ctx, cancel := withTimeout(ctx, s.cfg.Timeout)
 	defer cancel()
-
-	sbpl := s.generateSBPL()
-
-	sandboxArgs := make([]string, 0, 3+len(args))
-	sandboxArgs = append(sandboxArgs, "-p", sbpl, command)
-	sandboxArgs = append(sandboxArgs, args...)
-
-	// 清理危险环境变量。Seatbelt (deny default SBPL) 提供强文件系统隔离 → enforced。
-	return runBoundedCommand(ctx, "sandbox-exec", sandboxArgs, s.cfg, cleanEnv(os.Environ()), LimitStatusEnforced)
-}
-
-// ExecCode 在沙箱内执行代码
-func (s *darwinSandbox) ExecCode(ctx context.Context, language, code string) (result *ExecResult, err error) {
-	if contextErr := validateExecContext(ctx); contextErr != nil {
-		return nil, contextErr
-	}
-	// 写代码到临时文件
-	var ext, cmd string
-	switch language {
-	case "python", "python3":
-		ext = ".py"
-		cmd = "python3"
-	case "javascript", "node", "js":
-		ext = ".js"
-		cmd = "node"
-	case "go":
-		ext = ".go"
-		cmd = "go"
-	default:
-		return nil, fmt.Errorf("unsupported language: %s", language)
+	if err := checkPOSIXPreparationContext(ctx, "prepare macOS execution"); err != nil {
+		return nil, err
 	}
 
-	// 使用唯一临时文件名避免并发串扰。
-	// 旧实现写死 "_hexclaw_exec.<ext>", 同一 workspace 并发执行多份代码时
-	// 会互相覆盖同一物理文件, 且 defer 删除可能误删他人正在使用的文件,
-	// 违反"并发执行隔离"安全要求。os.CreateTemp 以 "<前缀>_*<ext>" 模式生成唯一名。
-	tmpFile, err := newUniqueCodeFile(s.cfg.Workspace, ext, code)
+	command, err := prepareSandboxCommand(s.cfg, requested, func() ([]string, error) {
+		return darwinExecEnv(s.cfg.Workspace, os.Environ())
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer func() { err = errors.Join(err, removeCodeFile(tmpFile)) }()
-
-	if language == "go" {
-		return s.Exec(ctx, cmd, []string{"run", tmpFile})
+	if err := checkPOSIXPreparationContext(ctx, "prepare macOS execution"); err != nil {
+		return nil, err
 	}
-	return s.Exec(ctx, cmd, []string{tmpFile})
+	commandPlan := darwinCommandExecutionPlanContext(ctx, command, s.cfg.Workspace)
+	if commandPlan.err != nil {
+		return nil, commandPlan.err
+	}
+	if s.afterCommandPlan != nil {
+		s.afterCommandPlan()
+	}
+	if err := checkPOSIXPreparationContext(ctx, "prepare macOS execution"); err != nil {
+		return nil, err
+	}
+	guard, err := newDarwinExecutionGuardFromPlanContext(ctx, s.cfg.Workspace, commandPlan)
+	if err != nil {
+		return nil, err
+	}
+	runner, err := s.darwinSeatbeltRunnerFromPlan(commandPlan)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.executions.runBoundedPreparedCommandWithPreflight(
+		ctx,
+		runner,
+		s.cfg,
+		s.darwinExecutionCapabilities(),
+		func(ctx context.Context) error { return guard.RevalidateContext(ctx) },
+	)
 }
 
-// cleanEnv 清理危险环境变量
-//
-// 安全语义: LD_/DYLD_ 作为真正的前缀通配, 拦截所有形如 LD_<X>/DYLD_<X> 的变量
-// (如 LD_PRELOAD、LD_AUDIT、LD_LIBRARY_PATH、DYLD_INSERT_LIBRARIES 等),
-// 而非仅精确命中枚举出的具体名称。
-//
-// 历史缺陷: 旧实现对每个条目统一拼接 "="(prefix+"="), 使 "LD_" 退化为只匹配
-// "LD_=", 导致 LD_AUDIT/LD_FOO 等任意 LD_<X> 注入向量全部漏网。
-func cleanEnv(env []string) []string {
-	// dangerousPrefixes 为真正的前缀通配, 命中以其开头的所有变量名。
-	dangerousPrefixes := []string{"LD_", "DYLD_"}
-	var clean []string
-	for _, e := range env {
-		// 取出 "=" 之前的变量名再做前缀判断, 避免值中含前缀字面量造成误删。
-		name := e
-		if idx := strings.IndexByte(e, '='); idx >= 0 {
-			name = e[:idx]
-		}
-		dangerous := false
-		for _, prefix := range dangerousPrefixes {
-			if strings.HasPrefix(name, prefix) {
-				dangerous = true
-				break
-			}
-		}
-		if !dangerous {
-			clean = append(clean, e)
+func (s *darwinSandbox) darwinExecutionCapabilities() posixExecutionCapabilities {
+	if s.cfg.ExecutionProfile == ExecutionProfileTrustedBuild {
+		// Seatbelt 仍约束文件和网络，但原生 Darwin 无法原子确认任意后代集合已经清空。
+		return posixExecutionCapabilities{
+			Filesystem:          LimitStatusEnforced,
+			Network:             LimitStatusEnforced,
+			Processes:           LimitStatusUnsupported,
+			ProcessContainment:  LimitStatusUnsupported,
+			processGroupInspect: inspectDarwinProcessGroup,
 		}
 	}
-	return clean
+	return posixExecutionCapabilities{
+		Filesystem: LimitStatusEnforced,
+		Network:    LimitStatusEnforced,
+		// Seatbelt 在载荷开始前拒绝 process-fork，因此单次执行的真实进程数上限为一。
+		// Processes 表示该数量边界；ProcessContainment 表示不存在后代且根进程可被跟踪收敛。
+		// 这里不依赖 RLIMIT_NPROC，也不把进程组近似保证混入任一状态。
+		Processes:           LimitStatusEnforced,
+		ProcessContainment:  LimitStatusEnforced,
+		processGroupInspect: inspectDarwinProcessGroup,
+	}
+}
+
+func (s *darwinSandbox) sandboxCapabilities(ctx context.Context) (CapabilitySet, error) {
+	if err := validateExecContext(ctx); err != nil {
+		return 0, err
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, fmt.Errorf("inspect macOS sandbox capabilities: %w", err)
+	}
+	executionCapabilities := s.darwinExecutionCapabilities()
+	memory, processes, capabilityErr := posixResourceLimitCapabilitiesContext(ctx, executionCapabilities)
+	if capabilityErr != nil {
+		return 0, capabilityErr
+	}
+	available := CapabilityFilesystem | CapabilityNetwork | CapabilityOutput
+	if s.cfg.MaxMemoryBytes > 0 && memory == LimitStatusEnforced {
+		available |= CapabilityMemory
+	}
+	if s.cfg.MaxProcesses > 0 && processes == LimitStatusEnforced {
+		available |= CapabilityProcesses
+	}
+	if executionCapabilities.ProcessContainment == LimitStatusEnforced {
+		available |= CapabilityProcessContainment
+	}
+	if s.cfg.ExecutionProfile == ExecutionProfileTrustedBuild && processCreationFitsBudget(s.cfg.MaxProcesses) {
+		available |= CapabilityProcessCreation
+	}
+	return available, nil
+}
+
+func (s *darwinSandbox) darwinSeatbeltRunner(command Command) (Command, error) {
+	commandPlan := darwinCommandExecutionPlan(command, s.cfg.Workspace)
+	return s.darwinSeatbeltRunnerFromPlan(commandPlan)
+}
+
+func (s *darwinSandbox) darwinSeatbeltRunnerFromPlan(commandPlan darwinCommandPlan) (Command, error) {
+	if commandPlan.err != nil {
+		return Command{}, commandPlan.err
+	}
+	payloadCommand, err := darwinNoChildPayloadCommand(commandPlan.command)
+	if err != nil {
+		return Command{}, err
+	}
+	runtimePaths := append([]string(nil), commandPlan.readPaths...)
+	sbpl := s.generateSBPLWithRuntimePaths(runtimePaths)
+	sandboxExec, err := darwinSandboxExecPath()
+	if err != nil {
+		return Command{}, err
+	}
+
+	sandboxArgs := make([]string, 0, 3+len(payloadCommand.Args))
+	sandboxArgs = append(sandboxArgs, "-p", sbpl, payloadCommand.Path)
+	sandboxArgs = append(sandboxArgs, payloadCommand.Args...)
+
+	return Command{
+		Path: sandboxExec,
+		Args: sandboxArgs,
+		Dir:  payloadCommand.Dir,
+		Env:  payloadCommand.Env,
+	}, nil
+}
+
+func darwinNoChildPayloadCommand(command Command) (Command, error) {
+	environmentLauncher, err := resolveTrustedPOSIXLauncher("macOS sandbox environment launcher", []string{"/usr/bin/env"})
+	if err != nil {
+		return Command{}, err
+	}
+	args := make([]string, 0, len(command.Env)+len(command.Args)+3)
+	// sandbox-exec 只继承下方固定环境；载荷环境由受约束的 env 在 Seatbelt 内安装。
+	args = append(args, "-i", "--")
+	args = append(args, command.Env...)
+	args = append(args, command.Path)
+	args = append(args, command.Args...)
+	return Command{
+		Path: environmentLauncher,
+		Args: args,
+		Dir:  command.Dir,
+		Env: []string{
+			"HOME=/var/empty",
+			"LANG=C",
+			"LC_ALL=C",
+			"PATH=/usr/bin:/bin",
+		},
+	}, nil
+}
+
+func darwinExecEnv(workspace string, env []string) ([]string, error) {
+	return buildPOSIXSandboxEnv(workspace, env, darwinSandboxPath())
+}
+
+func darwinSandboxPath() string {
+	var paths []string
+	for _, name := range []string{
+		"python", "python3", "node", "nodejs", "go", "gofmt",
+		"npm", "npx", "corepack", "pnpm", "yarn", "pip", "pip3",
+	} {
+		for _, directory := range filepath.SplitList(os.Getenv("PATH")) {
+			if !filepath.IsAbs(directory) {
+				continue
+			}
+			resolved, err := freezePOSIXExecutable(filepath.Join(directory, name))
+			if err != nil || !darwinSystemExecutable(resolved) && darwinRuntimeRoot(name, resolved) == "" {
+				continue
+			}
+			paths = append(paths, filepath.Dir(resolved))
+			break
+		}
+	}
+	paths = append(paths, "/usr/bin", "/bin", "/usr/sbin", "/sbin")
+	return strings.Join(darwinUniquePaths(paths), string(os.PathListSeparator))
+}
+
+func darwinSandboxExecPath() (string, error) {
+	return resolveTrustedPOSIXLauncher("sandbox-exec", []string{"/usr/bin/sandbox-exec"})
+}
+
+type darwinCommandPlan struct {
+	command         Command
+	commandIdentity darwinPathIdentity
+	readPaths       []string
+	err             error
+}
+
+func darwinCommandExecutionPlan(command Command, workspace string) darwinCommandPlan {
+	return darwinCommandExecutionPlanContext(context.Background(), command, workspace)
+}
+
+func darwinCommandExecutionPlanContext(ctx context.Context, command Command, workspace string) darwinCommandPlan {
+	workspace = darwinCanonicalPath(workspace)
+	plan := darwinCommandPlan{command: command}
+	if err := checkPOSIXPreparationContext(ctx, "resolve macOS command plan"); err != nil {
+		plan.err = err
+		return plan
+	}
+	resolved, err := resolvePOSIXCommandExecutable(command.Path, command.Dir)
+	if err != nil {
+		plan.err = fmt.Errorf("resolve sandbox command %q", command.Path)
+		return plan
+	}
+	plan.command.Path = resolved
+	plan.commandIdentity, err = captureDarwinPathIdentity(resolved)
+	if err != nil {
+		plan.err = err
+		return plan
+	}
+	plan.commandIdentity.freezeData = true
+	if err := checkPOSIXPreparationContext(ctx, "resolve macOS command plan"); err != nil {
+		plan.err = err
+		return plan
+	}
+
+	trusted := darwinPathWithin(workspace, resolved) || darwinSystemExecutable(resolved)
+	if !trusted {
+		root := darwinRuntimeRoot(command.Path, resolved)
+		if root == "" || darwinTemporaryOrVariablePath(resolved) {
+			plan.err = fmt.Errorf("sandbox command %q is outside the workspace and trusted runtime roots", command.Path)
+			return plan
+		}
+		plan.readPaths = append(plan.readPaths, resolved, root)
+	}
+
+	interpreters, shebangErr := inspectPOSIXShebangCommands(resolved)
+	if shebangErr != nil {
+		plan.err = fmt.Errorf("inspect sandbox command %q shebang: %w", command.Path, shebangErr)
+		return plan
+	}
+	for _, interpreter := range interpreters {
+		if err := checkPOSIXPreparationContext(ctx, "inspect macOS command interpreters"); err != nil {
+			plan.err = err
+			return plan
+		}
+		interpreterPath, interpreterErr := resolvePOSIXShebangExecutable(interpreter, command.Dir, command.Env)
+		if interpreterErr != nil {
+			plan.err = fmt.Errorf("sandbox command %q uses an unavailable interpreter %q", command.Path, interpreter)
+			return plan
+		}
+		if darwinPathWithin(workspace, interpreterPath) || darwinSystemExecutable(interpreterPath) {
+			continue
+		}
+		root := darwinRuntimeRoot(interpreter, interpreterPath)
+		if root == "" || darwinTemporaryOrVariablePath(interpreterPath) {
+			plan.err = fmt.Errorf("sandbox command %q uses an untrusted interpreter %q", command.Path, interpreter)
+			return plan
+		}
+		plan.readPaths = append(plan.readPaths, interpreterPath, root)
+	}
+	plan.readPaths = darwinUniquePaths(plan.readPaths)
+	return plan
+}
+
+func darwinCommandReadPaths(command Command, workspace string) []string {
+	return darwinCommandExecutionPlan(command, workspace).readPaths
+}
+
+func darwinPathAncestors(paths []string) []string {
+	seen := make(map[string]struct{})
+	result := make([]string, 0, len(paths)*2)
+	for _, path := range paths {
+		if !isSafeSeatbeltPath(path) {
+			continue
+		}
+		for current := filepath.Clean(path); current != string(filepath.Separator); current = filepath.Dir(current) {
+			if _, exists := seen[current]; exists {
+				continue
+			}
+			seen[current] = struct{}{}
+			result = append(result, current)
+		}
+	}
+	return result
+}
+
+func darwinCanonicalPath(path string) string {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err == nil && isSafeSeatbeltPath(resolved) {
+		return resolved
+	}
+	return path
+}
+
+func darwinResolvedSystemReadLiterals() []string {
+	paths := append([]string(nil), darwinSystemReadLiterals...)
+	for _, path := range darwinSystemReadLiterals {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err == nil && isSafeSeatbeltPath(resolved) {
+			paths = append(paths, resolved)
+		}
+	}
+	return darwinUniquePaths(paths)
+}
+
+func darwinUniquePaths(paths []string) []string {
+	seen := make(map[string]struct{}, len(paths))
+	result := make([]string, 0, len(paths))
+	for _, path := range paths {
+		path = filepath.Clean(path)
+		if !isSafeSeatbeltPath(path) {
+			continue
+		}
+		if _, exists := seen[path]; exists {
+			continue
+		}
+		seen[path] = struct{}{}
+		result = append(result, path)
+	}
+	return result
+}
+
+func darwinSystemExecutable(executable string) bool {
+	for _, root := range darwinSystemExecSubpaths {
+		if darwinPathWithin(root, executable) {
+			return true
+		}
+	}
+	return false
+}
+
+func darwinRuntimeRoot(command, executable string) string {
+	name := filepath.Base(command)
+	root, runtimeOnly := darwinInstalledRuntimeRoot(executable)
+	if root == "" || runtimeOnly && !darwinSupportedRuntimeName(name) {
+		return ""
+	}
+	return root
+}
+
+func darwinInstalledRuntimeRoot(executable string) (root string, runtimeOnly bool) {
+	cleaned := filepath.Clean(executable)
+	for _, cellar := range []string{"/opt/homebrew/Cellar", "/usr/local/Cellar"} {
+		if root := darwinRuntimeRootBelow(cleaned, cellar, 2); root != "" {
+			return root, false
+		}
+	}
+	if darwinPathWithin("/usr/local/go", cleaned) {
+		return "/usr/local/go", false
+	}
+	if cleaned == "/usr/local/bin/node" || cleaned == "/usr/local/bin/nodejs" {
+		return cleaned, true
+	}
+	for _, modules := range []string{"/opt/homebrew/lib/node_modules", "/usr/local/lib/node_modules"} {
+		if root := darwinRuntimeRootBelow(cleaned, modules, 1); root != "" {
+			return root, true
+		}
+	}
+
+	home, err := os.UserHomeDir()
+	if err == nil {
+		home = darwinCanonicalPath(home)
+		if root := darwinRuntimeRootBelow(cleaned, filepath.Join(home, ".pyenv", "versions"), 1); root != "" {
+			return root, true
+		}
+		if root := darwinRuntimeRootBelow(cleaned, filepath.Join(home, ".nvm", "versions", "node"), 1); root != "" {
+			return root, true
+		}
+		toolchains := filepath.Join(home, "go", "pkg", "mod", "golang.org")
+		if root := darwinRuntimeRootBelow(cleaned, toolchains, 1); root != "" && strings.HasPrefix(filepath.Base(root), "toolchain@") {
+			return root, true
+		}
+	}
+	for _, hosted := range []string{"/opt/hostedtoolcache", "/Users/runner/hostedtoolcache"} {
+		if root := darwinRuntimeRootBelow(cleaned, hosted, 3); root != "" {
+			return root, true
+		}
+	}
+	return "", false
+}
+
+func darwinRuntimeRootBelow(path, prefix string, depth int) string {
+	if depth <= 0 || !darwinPathWithin(prefix, path) {
+		return ""
+	}
+	relative, err := filepath.Rel(prefix, path)
+	if err != nil {
+		return ""
+	}
+	components := strings.Split(relative, string(filepath.Separator))
+	if len(components) <= depth {
+		return ""
+	}
+	return filepath.Join(prefix, filepath.Join(components[:depth]...))
+}
+
+func darwinSupportedRuntimeName(name string) bool {
+	name = strings.ToLower(name)
+	switch name {
+	case "python", "python3", "node", "nodejs", "go", "gofmt", "npm", "npx", "corepack", "pnpm", "yarn", "pip", "pip3":
+		return true
+	default:
+		return strings.HasPrefix(name, "python3.") || strings.HasPrefix(name, "pip3.")
+	}
+}
+
+func writeDarwinExecutableBoundaries(sb *strings.Builder, workspace string, runtimePaths []string) {
+	processPaths := make([]string, 0, len(darwinSystemExecSubpaths)+len(runtimePaths)+1)
+	processPaths = append(processPaths, darwinSystemExecSubpaths...)
+	processPaths = append(processPaths, workspace)
+	processPaths = append(processPaths, runtimePaths...)
+	writeDarwinPathComplementDeny(sb, "process-exec*", processPaths)
+
+	mapPaths := make([]string, 0, len(darwinSystemExecutableMapSubpaths)+len(runtimePaths)+1)
+	mapPaths = append(mapPaths, darwinSystemExecutableMapSubpaths...)
+	mapPaths = append(mapPaths, workspace)
+	mapPaths = append(mapPaths, runtimePaths...)
+	writeDarwinPathComplementDeny(sb, "file-map-executable", mapPaths)
+}
+
+func writeDarwinPathComplementDeny(sb *strings.Builder, operation string, allowed []string) {
+	// 后置补集拒绝保留受控启动能力，同时阻止当前工作区之外的载荷执行或映射。
+	fmt.Fprintf(sb, "(deny %s (require-not (require-any\n", operation)
+	for _, path := range darwinUniquePaths(allowed) {
+		fmt.Fprintf(sb, "  (literal \"%s\")\n", path)
+		fmt.Fprintf(sb, "  (subpath \"%s\")\n", path)
+	}
+	sb.WriteString(")))\n")
+}
+
+func darwinPathWithin(parent, child string) bool {
+	relative, err := filepath.Rel(parent, child)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+func darwinTemporaryOrVariablePath(path string) bool {
+	for _, root := range []string{"/tmp", "/private/tmp", "/var", "/private/var"} {
+		if darwinPathWithin(root, path) {
+			return true
+		}
+	}
+	return false
 }
 
 // isSafeSeatbeltPath 判断一个路径能否安全写进 SBPL 的 (subpath "...") 字面量。
