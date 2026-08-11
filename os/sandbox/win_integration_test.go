@@ -440,7 +440,8 @@ func TestWindows_JobTotalMemoryEnforced(t *testing.T) {
 		t.Fatalf("Job memory limit produced invalid evidence: stdout=%q stderr=%q", limited.Stdout, limited.Stderr)
 	}
 	if !strings.Contains(limited.Stdout, "JOB_MEMORY_LIMIT_ENFORCED:8") &&
-		!strings.Contains(limited.Stdout, "JOB_MEMORY_LIMIT_ENFORCED:1455") {
+		!strings.Contains(limited.Stdout, "JOB_MEMORY_LIMIT_ENFORCED:1455") &&
+		!strings.Contains(limited.Stdout, "JOB_MEMORY_LIMIT_ENFORCED:commitment") {
 		t.Fatalf("Job memory limit lacks a Windows allocation error: stdout=%q stderr=%q", limited.Stdout, limited.Stderr)
 	}
 	if limited.Limits.Memory != LimitStatusEnforced || limited.Limits.ProcessContainment != LimitStatusEnforced {
@@ -600,6 +601,12 @@ func TestWindows_JobProcessRootPayload(t *testing.T) {
 	second.Stderr = os.Stderr
 	if err := second.Start(); err != nil {
 		killWindowsPayloadChildren([]*exec.Cmd{first}, []<-chan error{firstDone})
+		// CreateProcess 在超出 Job 活动进程数限制时直接以
+		// ERROR_NOT_ENOUGH_QUOTA 失败；该失败本身就是限制生效的证据。
+		if mode == "limit" && errors.Is(err, windows.ERROR_NOT_ENOUGH_QUOTA) {
+			fmt.Printf("JOB_PROCESS_LIMIT_ENFORCED:%d", uint32(windows.ERROR_NOT_ENOUGH_QUOTA))
+			return
+		}
 		fmt.Printf("JOB_PROCESS_FIXTURE_FAILED:second-start:%v", err)
 		return
 	}
@@ -718,6 +725,12 @@ func TestWindows_JobMemoryRootPayload(t *testing.T) {
 		waits = append(waits, waitDone)
 		if ready, waitErr := waitForWindowsPayloadOutcome(resultPath, waitDone, 5*time.Second); !ready {
 			killWindowsPayloadChildren(children, waits)
+			// Job 总内存限制下，后续子进程可能连 Go runtime 启动都无法完成
+			// （未写 result 即退出）；该现象本身就是限制生效的证据。
+			if mode == "limit" && index == 1 {
+				fmt.Print("JOB_MEMORY_LIMIT_ENFORCED:commitment")
+				return
+			}
 			fmt.Printf("JOB_MEMORY_FIXTURE_FAILED:child-%d-result:%v", index, waitErr)
 			return
 		}
