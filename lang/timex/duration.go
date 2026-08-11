@@ -33,21 +33,25 @@ func FormatDuration(d time.Duration) string {
 	original := d
 
 	var result strings.Builder
-	negative := d < 0
+	magnitude, negative := durationMagnitude(d)
 	if negative {
-		d = -d
 		result.WriteByte('-')
 	}
 
-	days := d / (24 * time.Hour)
-	d %= 24 * time.Hour
-	hours := d / time.Hour
-	d %= time.Hour
-	minutes := d / time.Minute
-	d %= time.Minute
-	seconds := d / time.Second
-	d %= time.Second
-	millis := d / time.Millisecond
+	day := uint64(24 * time.Hour)
+	hour := uint64(time.Hour)
+	minute := uint64(time.Minute)
+	second := uint64(time.Second)
+	millisecond := uint64(time.Millisecond)
+	days := magnitude / day
+	magnitude %= day
+	hours := magnitude / hour
+	magnitude %= hour
+	minutes := magnitude / minute
+	magnitude %= minute
+	seconds := magnitude / second
+	magnitude %= second
+	millis := magnitude / millisecond
 
 	if days > 0 {
 		fmt.Fprintf(&result, "%dd", days)
@@ -91,18 +95,18 @@ func FormatDurationShort(d time.Duration) string {
 		return "0s"
 	}
 
-	negative := d < 0
-	if negative {
-		d = -d
-	}
-
-	days := d / (24 * time.Hour)
-	d %= 24 * time.Hour
-	hours := d / time.Hour
-	d %= time.Hour
-	minutes := d / time.Minute
-	d %= time.Minute
-	seconds := d / time.Second
+	magnitude, negative := durationMagnitude(d)
+	day := uint64(24 * time.Hour)
+	hour := uint64(time.Hour)
+	minute := uint64(time.Minute)
+	second := uint64(time.Second)
+	days := magnitude / day
+	magnitude %= day
+	hours := magnitude / hour
+	magnitude %= hour
+	minutes := magnitude / minute
+	magnitude %= minute
+	seconds := magnitude / second
 
 	var result string
 	switch {
@@ -132,6 +136,14 @@ func FormatDurationShort(d time.Duration) string {
 		return "-" + result
 	}
 	return result
+}
+
+// durationMagnitude 返回不会在最小 Duration 上溢出的绝对值。
+func durationMagnitude(d time.Duration) (uint64, bool) {
+	if d < 0 {
+		return uint64(-(d + 1)) + 1, true
+	}
+	return uint64(d), false
 }
 
 // durationPattern 匹配 duration 字符串的正则表达式
@@ -168,33 +180,43 @@ func ParseDuration(s string) (time.Duration, error) {
 			return 0, fmt.Errorf("invalid duration format: %s", s)
 		}
 
-		var d time.Duration
 		negative := matches[1] == "-"
+		limit := uint64(^uint64(0) >> 1)
+		if negative {
+			limit++
+		}
+		var magnitude uint64
 		parts := []struct {
 			value string
-			unit  time.Duration
+			unit  uint64
 		}{
-			{matches[2], 24 * time.Hour},
-			{matches[3], time.Hour},
-			{matches[4], time.Minute},
-			{matches[5], time.Second},
-			{matches[6], time.Millisecond},
+			{matches[2], uint64(24 * time.Hour)},
+			{matches[3], uint64(time.Hour)},
+			{matches[4], uint64(time.Minute)},
+			{matches[5], uint64(time.Second)},
+			{matches[6], uint64(time.Millisecond)},
 		}
 		for _, part := range parts {
 			if part.value == "" {
 				continue
 			}
-			value, err := strconv.ParseInt(part.value, 10, 64)
+			value, err := strconv.ParseUint(part.value, 10, 64)
 			if err != nil {
 				return 0, fmt.Errorf("invalid duration component %q: %w", part.value, err)
 			}
-			d += time.Duration(value) * part.unit
+			if value > (limit-magnitude)/part.unit {
+				return 0, fmt.Errorf("duration out of range: %q", s)
+			}
+			magnitude += value * part.unit
 		}
 
 		if negative {
-			d = -d
+			if magnitude == uint64(^uint64(0)>>1)+1 {
+				return time.Duration(-1 << 63), nil
+			}
+			return -time.Duration(magnitude), nil
 		}
-		return d, nil
+		return time.Duration(magnitude), nil
 	}
 
 	// 使用标准库解析

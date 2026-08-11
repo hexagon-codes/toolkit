@@ -264,11 +264,15 @@ func Average[T Number](slice []T) float64 {
 	if len(slice) == 0 {
 		return 0
 	}
-	var sum T
+	count := float64(len(slice))
+	var sum, correction float64
 	for _, v := range slice {
-		sum += v
+		term := float64(v)/count - correction
+		next := sum + term
+		correction = (next - sum) - term
+		sum = next
 	}
-	return float64(sum) / float64(len(slice))
+	return sum
 }
 
 // AverageBy 使用提取函数计算平均值
@@ -289,11 +293,15 @@ func AverageBy[T any, R Number](slice []T, fn func(T) R) float64 {
 	if len(slice) == 0 {
 		return 0
 	}
-	var sum R
+	count := float64(len(slice))
+	var sum, correction float64
 	for _, v := range slice {
-		sum += fn(v)
+		term := float64(fn(v))/count - correction
+		next := sum + term
+		correction = (next - sum) - term
+		sum = next
 	}
-	return float64(sum) / float64(len(slice))
+	return sum
 }
 
 // Product 计算切片元素之积

@@ -76,10 +76,11 @@ func (l *Lazy[T]) Reset() {
 
 // LazyErr 带错误的延迟初始化容器
 type LazyErr[T any] struct {
-	once  sync.Once
-	init  func() (T, error)
-	value T
-	err   error
+	once        sync.Once
+	init        func() (T, error)
+	value       T
+	err         error
+	initialized atomic.Bool
 }
 
 // NewLazyErr 创建一个带错误处理的延迟初始化容器
@@ -114,6 +115,7 @@ func (l *LazyErr[T]) Get() (T, error) {
 		if l.init != nil {
 			l.value, l.err = l.init()
 		}
+		l.initialized.Store(true)
 	})
 	return l.value, l.err
 }
@@ -135,6 +137,9 @@ func (l *LazyErr[T]) MustGet() T {
 // 返回:
 //   - error: 错误
 func (l *LazyErr[T]) Err() error {
+	if !l.initialized.Load() {
+		return nil
+	}
 	return l.err
 }
 

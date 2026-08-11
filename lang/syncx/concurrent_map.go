@@ -61,6 +61,8 @@ func (m *ConcurrentMap[K, V]) Load(key K) (V, bool) {
 //
 //	m.Store("key", "value")
 func (m *ConcurrentMap[K, V]) Store(key K, value V) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.m.Store(key, value)
 }
 
@@ -73,6 +75,8 @@ func (m *ConcurrentMap[K, V]) Store(key K, value V) {
 //
 //	m.Delete("key")
 func (m *ConcurrentMap[K, V]) Delete(key K) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.m.Delete(key)
 }
 
@@ -90,6 +94,8 @@ func (m *ConcurrentMap[K, V]) Delete(key K) {
 //
 //	actual, loaded := m.LoadOrStore("key", "default")
 func (m *ConcurrentMap[K, V]) LoadOrStore(key K, value V) (V, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	actual, loaded := m.m.LoadOrStore(key, value)
 	if typed, ok := actual.(V); ok {
 		return typed, loaded
@@ -110,6 +116,8 @@ func (m *ConcurrentMap[K, V]) LoadOrStore(key K, value V) (V, bool) {
 //
 //	value, ok := m.LoadAndDelete("key")
 func (m *ConcurrentMap[K, V]) LoadAndDelete(key K) (V, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	value, loaded := m.m.LoadAndDelete(key)
 	if !loaded {
 		var zero V
@@ -132,6 +140,8 @@ func (m *ConcurrentMap[K, V]) LoadAndDelete(key K) (V, bool) {
 // 返回:
 //   - bool: 如果交换成功返回 true
 func (m *ConcurrentMap[K, V]) CompareAndSwap(key K, old, newValue V) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.m.CompareAndSwap(key, old, newValue)
 }
 
@@ -144,6 +154,8 @@ func (m *ConcurrentMap[K, V]) CompareAndSwap(key K, old, newValue V) bool {
 // 返回:
 //   - bool: 如果删除成功返回 true
 func (m *ConcurrentMap[K, V]) CompareAndDelete(key K, old V) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.m.CompareAndDelete(key, old)
 }
 
@@ -157,6 +169,8 @@ func (m *ConcurrentMap[K, V]) CompareAndDelete(key K, old V) bool {
 //   - V: 旧值
 //   - bool: 键是否存在
 func (m *ConcurrentMap[K, V]) Swap(key K, value V) (V, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	previous, loaded := m.m.Swap(key, value)
 	if !loaded {
 		var zero V
@@ -259,10 +273,9 @@ func (m *ConcurrentMap[K, V]) Values() []V {
 //
 //	m.Clear()
 func (m *ConcurrentMap[K, V]) Clear() {
-	m.m.Range(func(key, _ any) bool {
-		m.m.Delete(key)
-		return true
-	})
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.m.Clear()
 }
 
 // GetOrCompute 获取值，如果不存在则计算并存储
@@ -307,12 +320,16 @@ func (m *ConcurrentMap[K, V]) GetOrCompute(key K, compute func() V) V {
 func (m *ConcurrentMap[K, V]) Update(key K, fn func(V) V) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	value, ok := m.Load(key)
+	raw, ok := m.m.Load(key)
+	if !ok {
+		return false
+	}
+	value, ok := raw.(V)
 	if !ok {
 		return false
 	}
 	newValue := fn(value)
-	m.Store(key, newValue)
+	m.m.Store(key, newValue)
 	return true
 }
 

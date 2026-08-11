@@ -18,12 +18,10 @@ package slicex
 //	}
 func ToChannel[T any](slice []T) <-chan T {
 	ch := make(chan T, len(slice))
-	go func() {
-		defer close(ch)
-		for _, v := range slice {
-			ch <- v
-		}
-	}()
+	for _, v := range slice {
+		ch <- v
+	}
+	close(ch)
 	return ch
 }
 
@@ -43,13 +41,14 @@ func ToChannelBuffered[T any](slice []T, bufferSize int) <-chan T {
 	if bufferSize <= 0 {
 		bufferSize = 1
 	}
+	if bufferSize < len(slice) {
+		bufferSize = len(slice)
+	}
 	ch := make(chan T, bufferSize)
-	go func() {
-		defer close(ch)
-		for _, v := range slice {
-			ch <- v
-		}
-	}()
+	for _, v := range slice {
+		ch <- v
+	}
+	close(ch)
 	return ch
 }
 
@@ -70,6 +69,9 @@ func ToChannelBuffered[T any](slice []T, bufferSize int) <-chan T {
 //	close(ch)
 //	slice := slicex.FromChannel(ch)  // [1, 2, 3]
 func FromChannel[T any](ch <-chan T) []T {
+	if ch == nil {
+		return nil
+	}
 	var result []T
 	for v := range ch {
 		result = append(result, v)
@@ -90,7 +92,7 @@ func FromChannel[T any](ch <-chan T) []T {
 //
 //	slice := slicex.FromChannelN(ch, 10)  // 最多收集 10 个
 func FromChannelN[T any](ch <-chan T, n int) []T {
-	if n <= 0 {
+	if ch == nil || n <= 0 {
 		return nil
 	}
 	result := make([]T, 0, n)
@@ -113,6 +115,9 @@ func FromChannelN[T any](ch <-chan T, n int) []T {
 //
 //	slicex.Drain(ch)  // 丢弃所有元素
 func Drain[T any](ch <-chan T) {
+	if ch == nil {
+		return
+	}
 	for item := range ch {
 		_ = item
 	}

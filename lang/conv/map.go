@@ -2,6 +2,9 @@ package conv
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
+	"strings"
 )
 
 // JSONToMap 将 JSON 字符串转换为 map[string]any
@@ -18,8 +21,16 @@ import (
 //	// m = map[string]any{"name": "Alice", "age": 30}
 func JSONToMap(jsonStr string) (map[string]any, error) {
 	m := make(map[string]any)
-	err := json.Unmarshal([]byte(jsonStr), &m)
-	if err != nil {
+	decoder := json.NewDecoder(strings.NewReader(jsonStr))
+	decoder.UseNumber()
+	if err := decoder.Decode(&m); err != nil {
+		return nil, err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("invalid JSON: multiple values")
+		}
 		return nil, err
 	}
 	return m, nil

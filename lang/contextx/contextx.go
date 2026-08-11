@@ -220,7 +220,16 @@ var (
 // Go 在 goroutine 中运行函数
 // 注意：函数内部应该自行检查 ctx.Done() 来响应取消
 // 此函数只在启动时检查 context 是否已取消，不会中断正在执行的函数
-func Go(ctx context.Context, fn func(ctx context.Context)) {
+func Go(ctx context.Context, fn func(ctx context.Context)) error {
+	if ctx == nil {
+		return ErrNilContext
+	}
+	if fn == nil {
+		return ErrNilTask
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	go func() {
 		// 在启动 goroutine 后检查 context 状态
 		if ctx.Err() != nil {
@@ -228,6 +237,7 @@ func Go(ctx context.Context, fn func(ctx context.Context)) {
 		}
 		fn(ctx)
 	}()
+	return nil
 }
 
 // Run 使用调用方 context 同步运行函数。
@@ -242,10 +252,15 @@ func Run(ctx context.Context, fn func(context.Context) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := fn(ctx); err != nil {
-		return err
+	taskErr := fn(ctx)
+	contextErr := ctx.Err()
+	if taskErr == nil {
+		return contextErr
 	}
-	return ctx.Err()
+	if contextErr == nil || errors.Is(taskErr, contextErr) {
+		return taskErr
+	}
+	return errors.Join(taskErr, contextErr)
 }
 
 // RunTimeout 从父 context 派生超时并同步运行函数。
@@ -294,39 +309,74 @@ func (d *detachedContext) Value(key any) any {
 // Merge 合并多个 context，任意一个取消则合并后的 context 也取消
 // 使用 context.AfterFunc 避免 goroutine 泄漏
 func Merge(contexts ...context.Context) (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(context.Background())
-
-	if len(contexts) == 0 {
-		return ctx, cancel
-	}
-
-	// 使用 context.AfterFunc 监听所有 context
-	// 当任意一个 context 取消时，取消合并后的 context
-	// AfterFunc 在 context 取消时会自动清理，不会泄漏
-	stopFuncs := make([]func() bool, 0, len(contexts))
-	for _, c := range contexts {
-		stop := context.AfterFunc(c, cancel)
-		stopFuncs = append(stopFuncs, stop)
-	}
-
-	// 包装 cancel 函数，确保清理所有 AfterFunc
-	wrappedCancel := func() {
-		cancel()
-		for _, stop := range stopFuncs {
-			stop()
+	sources := make([]context.Context, 0, len(contexts))
+	for _, source := range contexts {
+		if source != nil {
+			sources = append(sources, source)
 		}
 	}
 
-	// 返回合并的 context，值查找使用第一个 context
-	return &mergedContext{
-		Context:  ctx,
-		contexts: contexts,
-	}, wrappedCancel
+	ctx, cancelCause := context.WithCancelCause(context.Background())
+	var cancelOnce sync.Once
+	var stopMu sync.Mutex
+	stopFuncs := make([]func() bool, 0, len(sources))
+	stopped := false
+	cancelMerged := func(cause error) {
+		cancelOnce.Do(func() {
+			if cause == nil {
+				cause = context.Canceled
+			}
+			cancelCause(cause)
+			stopMu.Lock()
+			stopped = true
+			stops := append([]func() bool(nil), stopFuncs...)
+			stopMu.Unlock()
+			for _, stop := range stops {
+				stop()
+			}
+		})
+	}
+
+	for _, source := range sources {
+		source := source
+		stop := context.AfterFunc(source, func() {
+			cause := context.Cause(source)
+			if cause == nil {
+				cause = source.Err()
+			}
+			cancelMerged(cause)
+		})
+		stopMu.Lock()
+		if stopped {
+			stopMu.Unlock()
+			stop()
+			continue
+		}
+		stopFuncs = append(stopFuncs, stop)
+		stopMu.Unlock()
+	}
+
+	return &mergedContext{Context: ctx, contexts: sources}, func() {
+		cancelMerged(context.Canceled)
+	}
 }
 
 type mergedContext struct {
 	context.Context
 	contexts []context.Context
+}
+
+func (m *mergedContext) Deadline() (time.Time, bool) {
+	var earliest time.Time
+	found := false
+	for _, source := range m.contexts {
+		deadline, ok := source.Deadline()
+		if ok && (!found || deadline.Before(earliest)) {
+			earliest = deadline
+			found = true
+		}
+	}
+	return earliest, found
 }
 
 func (m *mergedContext) Value(key any) any {
@@ -364,7 +414,13 @@ func NewWaitGroupContext(ctx context.Context) *WaitGroupContext {
 }
 
 // Go 启动一个 goroutine
-func (w *WaitGroupContext) Go(fn func(ctx context.Context) error) {
+func (w *WaitGroupContext) Go(fn func(ctx context.Context) error) error {
+	if w.ctx == nil {
+		return ErrNilContext
+	}
+	if fn == nil {
+		return ErrNilTask
+	}
 	w.mu.Lock()
 	if w.pending == 0 {
 		w.done = make(chan struct{})
@@ -378,6 +434,7 @@ func (w *WaitGroupContext) Go(fn func(ctx context.Context) error) {
 		defer func() { w.finishTask(taskErr) }()
 		taskErr = fn(w.ctx)
 	}()
+	return nil
 }
 
 // Wait 等待所有 goroutine 完成或 context 取消。
@@ -462,16 +519,19 @@ var (
 	ErrNilPoolContext = errors.New("contextx: pool context must not be nil")
 	// ErrInvalidPoolSize 表示协程池大小不是正数。
 	ErrInvalidPoolSize = errors.New("contextx: pool size must be greater than zero")
+	// ErrPoolClosed 表示协程池已停止接收任务。
+	ErrPoolClosed = errors.New("contextx: pool is closed")
 )
 
 // Pool 带 context 的协程池
 type Pool struct {
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
-	sem    chan struct{}
-	mu     sync.Mutex
-	errs   []error
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	sem       chan struct{}
+	mu        sync.Mutex
+	accepting bool
+	errs      []error
 }
 
 // NewPool 创建协程池
@@ -484,21 +544,36 @@ func NewPool(ctx context.Context, size int) (*Pool, error) {
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	return &Pool{
-		ctx:    ctx,
-		cancel: cancel,
-		sem:    make(chan struct{}, size),
+		ctx:       ctx,
+		cancel:    cancel,
+		sem:       make(chan struct{}, size),
+		accepting: true,
 	}, nil
 }
 
 // Go 在池中启动任务
-func (p *Pool) Go(fn func(ctx context.Context) error) {
+func (p *Pool) Go(fn func(ctx context.Context) error) error {
+	if fn == nil {
+		return ErrNilTask
+	}
+	p.mu.Lock()
+	if !p.accepting {
+		p.mu.Unlock()
+		return ErrPoolClosed
+	}
 	p.wg.Add(1)
+	p.mu.Unlock()
 
 	select {
 	case <-p.ctx.Done():
 		p.wg.Done()
-		return
+		return p.ctx.Err()
 	case p.sem <- struct{}{}:
+	}
+	if err := p.ctx.Err(); err != nil {
+		<-p.sem
+		p.wg.Done()
+		return err
 	}
 
 	go func() {
@@ -512,27 +587,48 @@ func (p *Pool) Go(fn func(ctx context.Context) error) {
 			p.mu.Unlock()
 		}
 	}()
+	return nil
 }
 
 // Wait 等待所有任务完成。
 // 返回首个任务错误（多个错误时合并）；若无任务错误但 context 已取消，返回 ctx.Err()。
 func (p *Pool) Wait() error {
+	p.mu.Lock()
+	p.accepting = false
+	p.mu.Unlock()
 	p.wg.Wait()
 
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	switch len(p.errs) {
+	errs := append([]error(nil), p.errs...)
+	p.mu.Unlock()
+	contextErr := p.ctx.Err()
+	if contextErr != nil {
+		found := false
+		for _, err := range errs {
+			if errors.Is(err, contextErr) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			errs = append(errs, contextErr)
+		}
+	}
+	switch len(errs) {
 	case 0:
-		return p.ctx.Err()
+		return nil
 	case 1:
-		return p.errs[0]
+		return errs[0]
 	default:
-		return multiWaitError(p.errs)
+		return multiWaitError(errs)
 	}
 }
 
 // Close 关闭池
 func (p *Pool) Close() {
+	p.mu.Lock()
+	p.accepting = false
+	p.mu.Unlock()
 	p.cancel()
 	p.wg.Wait()
 }

@@ -548,4 +548,4 @@ for i := 0; i < 1000000; i++ {
 
 ## 许可证
 
-MIT License
+本项目采用 Apache License 2.0（SPDX 标识符：Apache-2.0）。

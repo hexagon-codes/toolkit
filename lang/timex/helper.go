@@ -110,9 +110,9 @@ func Between(t, start, end time.Time) bool {
 
 // DaysBetween 计算两个时间之间的天数差（绝对值）
 func DaysBetween(t1, t2 time.Time) int {
-	// 归一化到当天 00:00:00
-	t1 = StartOfDay(t1)
-	t2 = StartOfDay(t2)
+	// 使用 UTC 承载各自的公历日期，避免夏令时造成一天只有 23 或 25 小时。
+	t1 = time.Date(t1.Year(), t1.Month(), t1.Day(), 0, 0, 0, 0, time.UTC)
+	t2 = time.Date(t2.Year(), t2.Month(), t2.Day(), 0, 0, 0, 0, time.UTC)
 
 	duration := t2.Sub(t1)
 	days := int(duration.Hours() / 24)

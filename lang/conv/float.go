@@ -21,7 +21,7 @@ import (
 //	conv.Float32("3.14")    // 3.14
 //	conv.Float32([]byte{...}) // 从二进制解码
 func Float32(input any) float32 {
-	if input == nil {
+	if isNilValue(input) {
 		return 0
 	}
 	switch value := input.(type) {
@@ -55,7 +55,7 @@ func Float32(input any) float32 {
 		if f, ok := value.(iFloat32); ok {
 			return f.Float32()
 		}
-		v, err := strconv.ParseFloat(String(input), 64)
+		v, err := strconv.ParseFloat(String(input), 32)
 		if err != nil {
 			return 0
 		}
@@ -78,7 +78,7 @@ func Float32(input any) float32 {
 //	conv.Float64("3.14159")  // 3.14159
 //	conv.Float64(3.14)       // 3.14
 func Float64(input any) float64 {
-	if input == nil {
+	if isNilValue(input) {
 		return 0
 	}
 	switch value := input.(type) {

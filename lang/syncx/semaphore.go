@@ -2,13 +2,28 @@ package syncx
 
 import (
 	"context"
+	"errors"
+	"sync"
 )
+
+var ErrNilSemaphoreContext = errors.New("syncx: semaphore context must not be nil")
 
 // Semaphore 信号量，用于限制并发访问数量
 //
 // 基于 channel 实现，提供简单的并发控制
 type Semaphore struct {
-	sem chan struct{}
+	once sync.Once
+	sem  chan struct{}
+}
+
+// channel 延迟建立零值信号量的单个许可。
+func (s *Semaphore) channel() chan struct{} {
+	s.once.Do(func() {
+		if s.sem == nil {
+			s.sem = make(chan struct{}, 1)
+		}
+	})
+	return s.sem
 }
 
 // NewSemaphore 创建一个新的信号量
@@ -45,7 +60,7 @@ func NewSemaphore(n int) *Semaphore {
 //	sem.Acquire()
 //	defer sem.Release()
 func (s *Semaphore) Acquire() {
-	s.sem <- struct{}{}
+	s.channel() <- struct{}{}
 }
 
 // TryAcquire 尝试获取信号量（非阻塞）
@@ -62,8 +77,9 @@ func (s *Semaphore) Acquire() {
 //	    // 信号量已满
 //	}
 func (s *Semaphore) TryAcquire() bool {
+	sem := s.channel()
 	select {
-	case s.sem <- struct{}{}:
+	case sem <- struct{}{}:
 		return true
 	default:
 		return false
@@ -87,8 +103,12 @@ func (s *Semaphore) TryAcquire() bool {
 //	}
 //	defer sem.Release()
 func (s *Semaphore) AcquireContext(ctx context.Context) error {
+	if ctx == nil {
+		return ErrNilSemaphoreContext
+	}
+	sem := s.channel()
 	select {
-	case s.sem <- struct{}{}:
+	case sem <- struct{}{}:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -105,8 +125,9 @@ func (s *Semaphore) AcquireContext(ctx context.Context) error {
 //	sem.Acquire()
 //	defer sem.Release()
 func (s *Semaphore) Release() {
+	sem := s.channel()
 	select {
-	case <-s.sem:
+	case <-sem:
 	default:
 		panic("syncx: semaphore release without acquire")
 	}
@@ -123,8 +144,9 @@ func (s *Semaphore) Release() {
 //	    // 没有信号量可释放
 //	}
 func (s *Semaphore) TryRelease() bool {
+	sem := s.channel()
 	select {
-	case <-s.sem:
+	case <-sem:
 		return true
 	default:
 		return false
@@ -138,7 +160,8 @@ func (s *Semaphore) TryRelease() bool {
 //
 // 注意: 返回值可能在获取后立即过期（竞态条件）
 func (s *Semaphore) Available() int {
-	return cap(s.sem) - len(s.sem)
+	sem := s.channel()
+	return cap(sem) - len(sem)
 }
 
 // Capacity 返回信号量容量
@@ -146,7 +169,7 @@ func (s *Semaphore) Available() int {
 // 返回:
 //   - int: 信号量总容量
 func (s *Semaphore) Capacity() int {
-	return cap(s.sem)
+	return cap(s.channel())
 }
 
 // Held 返回当前持有的信号量数量
@@ -154,5 +177,5 @@ func (s *Semaphore) Capacity() int {
 // 返回:
 //   - int: 已被获取的信号量数量
 func (s *Semaphore) Held() int {
-	return len(s.sem)
+	return len(s.channel())
 }

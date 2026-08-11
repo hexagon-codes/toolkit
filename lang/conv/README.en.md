@@ -548,4 +548,4 @@ Issues and Pull Requests are welcome!
 
 ## License
 
-MIT License
+This project is licensed under the Apache License 2.0 (SPDX identifier: Apache-2.0).

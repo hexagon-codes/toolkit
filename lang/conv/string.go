@@ -26,7 +26,7 @@ import (
 //	conv.String(true)         // "true"
 //	conv.String([]byte("a"))  // "a"
 func String(value any) string {
-	if value == nil {
+	if isNilValue(value) {
 		return ""
 	}
 	switch value := value.(type) {

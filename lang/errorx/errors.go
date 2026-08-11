@@ -25,13 +25,16 @@ type PanicError struct {
 
 // Error 返回 panic 的可诊断文本。
 func (e *PanicError) Error() string {
+	if err, ok := e.Value.(error); ok && !isNilError(err) {
+		return err.Error()
+	}
 	return fmt.Sprintf("panic: %v", e.Value)
 }
 
 // Unwrap 在 panic 值本身是 error 时保留 errors.Is/As 语义。
 func (e *PanicError) Unwrap() error {
 	err, ok := e.Value.(error)
-	if !ok {
+	if !ok || isNilError(err) {
 		return nil
 	}
 	return err
@@ -64,8 +67,5 @@ func newPanicError(value any) *PanicError {
 }
 
 func recoveredError(value any) error {
-	if err, ok := value.(error); ok {
-		return err
-	}
 	return newPanicError(value)
 }

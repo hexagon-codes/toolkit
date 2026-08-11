@@ -465,6 +465,6 @@ conv.Int("456")
 - [ ] 添加字符串模板功能
 - [ ] 考虑添加更多并发原语（如果有需求）
 
-## License
+## 许可证
 
-MIT
+本项目采用 Apache License 2.0（SPDX 标识符：Apache-2.0）。

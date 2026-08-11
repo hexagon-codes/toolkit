@@ -21,27 +21,34 @@ import "github.com/hexagon-codes/toolkit/lang/mathx"
 //	slicex.Range(0, 10, 2)  // [0, 2, 4, 6, 8]
 //	slicex.Range(5, 0, -1)  // [5, 4, 3, 2, 1]（仅适用于有符号类型）
 func Range[T mathx.Signed | ~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64 | ~uintptr](start, end, step T) []T {
-	if step == 0 {
-		return nil
-	}
-
-	// 计算长度
-	var length int
-	if step > 0 {
+	result := make([]T, 0)
+	switch {
+	case step > 0:
 		if end <= start {
 			return nil
 		}
-		length = int((end - start + step - 1) / step)
-	} else {
+		for value := start; value < end; {
+			result = append(result, value)
+			next := value + step
+			if next <= value {
+				break
+			}
+			value = next
+		}
+	case step < 0:
 		if end >= start {
 			return nil
 		}
-		length = int((start - end - step - 1) / (-step))
-	}
-
-	result := make([]T, length)
-	for i := range result {
-		result[i] = start + T(i)*step
+		for value := start; value > end; {
+			result = append(result, value)
+			next := value + step
+			if next >= value {
+				break
+			}
+			value = next
+		}
+	default:
+		return nil
 	}
 	return result
 }

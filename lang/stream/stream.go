@@ -10,6 +10,24 @@ type Stream[T any] struct {
 	source func() []T
 }
 
+// cloneSlice 复制切片并保留 nil 语义。
+func cloneSlice[T any](values []T) []T {
+	if values == nil {
+		return nil
+	}
+	result := make([]T, len(values))
+	copy(result, values)
+	return result
+}
+
+// values 计算当前流；零值流按空流处理。
+func (s Stream[T]) values() []T {
+	if s.source == nil {
+		return nil
+	}
+	return s.source()
+}
+
 // Of 从多个值创建 Stream
 //
 // 参数:
@@ -22,9 +40,10 @@ type Stream[T any] struct {
 //
 //	s := stream.Of(1, 2, 3, 4, 5)
 func Of[T any](values ...T) Stream[T] {
+	snapshot := cloneSlice(values)
 	return Stream[T]{
 		source: func() []T {
-			return values
+			return cloneSlice(snapshot)
 		},
 	}
 }
@@ -42,9 +61,10 @@ func Of[T any](values ...T) Stream[T] {
 //	nums := []int{1, 2, 3, 4, 5}
 //	s := stream.FromSlice(nums)
 func FromSlice[T any](slice []T) Stream[T] {
+	snapshot := cloneSlice(slice)
 	return Stream[T]{
 		source: func() []T {
-			return slice
+			return cloneSlice(snapshot)
 		},
 	}
 }
@@ -146,7 +166,7 @@ func Repeat[T any](value T, n int) Stream[T] {
 func (s Stream[T]) Filter(predicate func(T) bool) Stream[T] {
 	return Stream[T]{
 		source: func() []T {
-			src := s.source()
+			src := s.values()
 			result := make([]T, 0)
 			for _, v := range src {
 				if predicate(v) {
@@ -175,7 +195,7 @@ func (s Stream[T]) Filter(predicate func(T) bool) Stream[T] {
 func (s Stream[T]) Map(mapper func(T) T) Stream[T] {
 	return Stream[T]{
 		source: func() []T {
-			src := s.source()
+			src := s.values()
 			result := make([]T, len(src))
 			for i, v := range src {
 				result[i] = mapper(v)
@@ -200,7 +220,7 @@ func (s Stream[T]) Map(mapper func(T) T) Stream[T] {
 func (s Stream[T]) Distinct() Stream[T] {
 	return Stream[T]{
 		source: func() []T {
-			src := s.source()
+			src := s.values()
 			if len(src) == 0 {
 				return nil
 			}
@@ -245,7 +265,7 @@ func isComparable(v any) bool {
 func (s Stream[T]) Sorted(less func(a, b T) bool) Stream[T] {
 	return Stream[T]{
 		source: func() []T {
-			src := s.source()
+			src := s.values()
 			result := make([]T, len(src))
 			copy(result, src)
 			sort.Slice(result, func(i, j int) bool {
@@ -271,7 +291,7 @@ func (s Stream[T]) Sorted(less func(a, b T) bool) Stream[T] {
 func (s Stream[T]) Limit(n int) Stream[T] {
 	return Stream[T]{
 		source: func() []T {
-			src := s.source()
+			src := s.values()
 			if n <= 0 {
 				return nil
 			}
@@ -301,7 +321,7 @@ func (s Stream[T]) Limit(n int) Stream[T] {
 func (s Stream[T]) Skip(n int) Stream[T] {
 	return Stream[T]{
 		source: func() []T {
-			src := s.source()
+			src := s.values()
 			if n <= 0 {
 				return src
 			}
@@ -330,7 +350,7 @@ func (s Stream[T]) Skip(n int) Stream[T] {
 func (s Stream[T]) Peek(action func(T)) Stream[T] {
 	return Stream[T]{
 		source: func() []T {
-			src := s.source()
+			src := s.values()
 			for _, v := range src {
 				action(v)
 			}
@@ -351,7 +371,7 @@ func (s Stream[T]) Peek(action func(T)) Stream[T] {
 func (s Stream[T]) Reverse() Stream[T] {
 	return Stream[T]{
 		source: func() []T {
-			src := s.source()
+			src := s.values()
 			result := make([]T, len(src))
 			for i := range src {
 				result[len(src)-1-i] = src[i]
@@ -376,7 +396,7 @@ func (s Stream[T]) Reverse() Stream[T] {
 func (s Stream[T]) TakeWhile(predicate func(T) bool) Stream[T] {
 	return Stream[T]{
 		source: func() []T {
-			src := s.source()
+			src := s.values()
 			result := make([]T, 0)
 			for _, v := range src {
 				if !predicate(v) {
@@ -404,7 +424,7 @@ func (s Stream[T]) TakeWhile(predicate func(T) bool) Stream[T] {
 func (s Stream[T]) DropWhile(predicate func(T) bool) Stream[T] {
 	return Stream[T]{
 		source: func() []T {
-			src := s.source()
+			src := s.values()
 			i := 0
 			for i < len(src) && predicate(src[i]) {
 				i++
@@ -429,7 +449,7 @@ func (s Stream[T]) DropWhile(predicate func(T) bool) Stream[T] {
 //
 //	result := stream.Of(1, 2, 3).Collect()
 func (s Stream[T]) Collect() []T {
-	return s.source()
+	return s.values()
 }
 
 // ForEach 遍历每个元素
@@ -441,7 +461,7 @@ func (s Stream[T]) Collect() []T {
 //
 //	stream.Of(1, 2, 3).ForEach(func(n int) { fmt.Println(n) })
 func (s Stream[T]) ForEach(action func(T)) {
-	for _, v := range s.source() {
+	for _, v := range s.values() {
 		action(v)
 	}
 }
@@ -461,7 +481,7 @@ func (s Stream[T]) ForEach(action func(T)) {
 //	// 15
 func (s Stream[T]) Reduce(initial T, accumulator func(T, T) T) T {
 	result := initial
-	for _, v := range s.source() {
+	for _, v := range s.values() {
 		result = accumulator(result, v)
 	}
 	return result
@@ -477,7 +497,7 @@ func (s Stream[T]) Reduce(initial T, accumulator func(T, T) T) T {
 //	count := stream.Of(1, 2, 3, 4, 5).Count()
 //	// 5
 func (s Stream[T]) Count() int {
-	return len(s.source())
+	return len(s.values())
 }
 
 // First 返回第一个元素
@@ -491,7 +511,7 @@ func (s Stream[T]) Count() int {
 //	first, ok := stream.Of(1, 2, 3).First()
 //	// 1, true
 func (s Stream[T]) First() (T, bool) {
-	src := s.source()
+	src := s.values()
 	if len(src) == 0 {
 		var zero T
 		return zero, false
@@ -510,7 +530,7 @@ func (s Stream[T]) First() (T, bool) {
 //	last, ok := stream.Of(1, 2, 3).Last()
 //	// 3, true
 func (s Stream[T]) Last() (T, bool) {
-	src := s.source()
+	src := s.values()
 	if len(src) == 0 {
 		var zero T
 		return zero, false
@@ -531,7 +551,7 @@ func (s Stream[T]) Last() (T, bool) {
 //	hasEven := stream.Of(1, 2, 3).Any(func(n int) bool { return n%2 == 0 })
 //	// true
 func (s Stream[T]) Any(predicate func(T) bool) bool {
-	for _, v := range s.source() {
+	for _, v := range s.values() {
 		if predicate(v) {
 			return true
 		}
@@ -552,7 +572,7 @@ func (s Stream[T]) Any(predicate func(T) bool) bool {
 //	allPositive := stream.Of(1, 2, 3).All(func(n int) bool { return n > 0 })
 //	// true
 func (s Stream[T]) All(predicate func(T) bool) bool {
-	for _, v := range s.source() {
+	for _, v := range s.values() {
 		if !predicate(v) {
 			return false
 		}
@@ -590,7 +610,7 @@ func (s Stream[T]) None(predicate func(T) bool) bool {
 //	even, ok := stream.Of(1, 2, 3).FindFirst(func(n int) bool { return n%2 == 0 })
 //	// 2, true
 func (s Stream[T]) FindFirst(predicate func(T) bool) (T, bool) {
-	for _, v := range s.source() {
+	for _, v := range s.values() {
 		if predicate(v) {
 			return v, true
 		}
@@ -612,7 +632,7 @@ func (s Stream[T]) FindFirst(predicate func(T) bool) (T, bool) {
 //	m := stream.Of(User{ID: 1}, User{ID: 2}).ToMap(func(u User) int { return u.ID })
 func ToMap[T any, K comparable](s Stream[T], keyFn func(T) K) map[K]T {
 	result := make(map[K]T)
-	for _, v := range s.source() {
+	for _, v := range s.values() {
 		result[keyFn(v)] = v
 	}
 	return result
@@ -634,7 +654,7 @@ func ToMap[T any, K comparable](s Stream[T], keyFn func(T) K) map[K]T {
 //	})
 func GroupBy[T any, K comparable](s Stream[T], keyFn func(T) K) map[K][]T {
 	result := make(map[K][]T)
-	for _, v := range s.source() {
+	for _, v := range s.values() {
 		key := keyFn(v)
 		result[key] = append(result[key], v)
 	}
@@ -658,7 +678,7 @@ func GroupBy[T any, K comparable](s Stream[T], keyFn func(T) K) map[K][]T {
 func MapTo[T, R any](s Stream[T], mapper func(T) R) Stream[R] {
 	return Stream[R]{
 		source: func() []R {
-			src := s.source()
+			src := s.values()
 			result := make([]R, len(src))
 			for i, v := range src {
 				result[i] = mapper(v)
@@ -685,7 +705,7 @@ func MapTo[T, R any](s Stream[T], mapper func(T) R) Stream[R] {
 func FlatMapTo[T, R any](s Stream[T], mapper func(T) []R) Stream[R] {
 	return Stream[R]{
 		source: func() []R {
-			src := s.source()
+			src := s.values()
 			result := make([]R, 0, len(src))
 			for _, v := range src {
 				result = append(result, mapper(v)...)
@@ -713,7 +733,7 @@ func FlatMapTo[T, R any](s Stream[T], mapper func(T) []R) Stream[R] {
 //	// 6
 func ReduceTo[T, R any](s Stream[T], initial R, accumulator func(R, T) R) R {
 	result := initial
-	for _, v := range s.source() {
+	for _, v := range s.values() {
 		result = accumulator(result, v)
 	}
 	return result
@@ -724,7 +744,7 @@ func ReduceTo[T, R any](s Stream[T], initial R, accumulator func(R, T) R) R {
 // 返回:
 //   - bool: 如果为空返回 true
 func (s Stream[T]) IsEmpty() bool {
-	return len(s.source()) == 0
+	return len(s.values()) == 0
 }
 
 // Concat 连接多个 Stream
@@ -746,7 +766,7 @@ func Concat[T any](streams ...Stream[T]) Stream[T] {
 		source: func() []T {
 			var result []T
 			for _, s := range streams {
-				result = append(result, s.source()...)
+				result = append(result, s.values()...)
 			}
 			return result
 		},

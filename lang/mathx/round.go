@@ -42,7 +42,11 @@ func RoundTo(value float64, decimals int) float64 {
 		decimals = 15
 	}
 	shift := math.Pow(10, float64(decimals))
-	return math.Round(value*shift) / shift
+	scaled := value * shift
+	if math.IsInf(scaled, 0) && !math.IsInf(value, 0) {
+		return value
+	}
+	return math.Round(scaled) / shift
 }
 
 // Ceil 向上取整

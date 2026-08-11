@@ -95,7 +95,7 @@ func Must3[T1, T2, T3 any](v1 T1, v2 T2, v3 T3, err error) (first T1, second T2,
 
 // Wrap 包装 error，添加上下文信息
 func Wrap(err error, message string) error {
-	if err == nil {
+	if isNilError(err) {
 		return nil
 	}
 	return fmt.Errorf("%s: %w", message, err)
@@ -103,7 +103,7 @@ func Wrap(err error, message string) error {
 
 // Wrapf 包装 error，添加格式化的上下文信息
 func Wrapf(err error, format string, args ...any) error {
-	if err == nil {
+	if isNilError(err) {
 		return nil
 	}
 	return fmt.Errorf("%s: %w", fmt.Sprintf(format, args...), err)
@@ -169,7 +169,7 @@ func IgnoreClose(c interface{ Close() error }) {
 // Coalesce 返回第一个非 nil 的 error
 func Coalesce(errs ...error) error {
 	for _, err := range errs {
-		if err != nil {
+		if !isNilError(err) {
 			return err
 		}
 	}
@@ -184,7 +184,7 @@ type StackError struct {
 
 // WithStack 添加堆栈信息到 error
 func WithStack(err error) error {
-	if err == nil {
+	if isNilError(err) {
 		return nil
 	}
 	const depth = 32
@@ -232,10 +232,7 @@ func StackTrace(err error) string {
 // Recover 从 panic 中恢复，返回 error
 func Recover() error {
 	if r := recover(); r != nil {
-		if err, ok := r.(error); ok {
-			return err
-		}
-		return fmt.Errorf("panic: %v", r)
+		return recoveredError(r)
 	}
 	return nil
 }

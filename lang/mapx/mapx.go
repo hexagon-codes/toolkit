@@ -60,9 +60,9 @@ func Filter[K comparable, V any](m map[K]V, predicate func(K, V) bool) map[K]V {
 		return nil
 	}
 	result := make(map[K]V)
-	for k, v := range m {
-		if predicate(k, v) {
-			result[k] = v
+	for _, entry := range Entries(m) {
+		if predicate(entry.Key, entry.Value) {
+			result[entry.Key] = entry.Value
 		}
 	}
 	return result
@@ -74,9 +74,9 @@ func FilterKeys[K comparable, V any](m map[K]V, predicate func(K) bool) map[K]V 
 		return nil
 	}
 	result := make(map[K]V)
-	for k, v := range m {
-		if predicate(k) {
-			result[k] = v
+	for _, entry := range Entries(m) {
+		if predicate(entry.Key) {
+			result[entry.Key] = entry.Value
 		}
 	}
 	return result
@@ -88,9 +88,9 @@ func FilterValues[K comparable, V any](m map[K]V, predicate func(V) bool) map[K]
 		return nil
 	}
 	result := make(map[K]V)
-	for k, v := range m {
-		if predicate(v) {
-			result[k] = v
+	for _, entry := range Entries(m) {
+		if predicate(entry.Value) {
+			result[entry.Key] = entry.Value
 		}
 	}
 	return result
@@ -102,8 +102,8 @@ func MapValues[K comparable, V any, R any](m map[K]V, transform func(V) R) map[K
 		return nil
 	}
 	result := make(map[K]R, len(m))
-	for k, v := range m {
-		result[k] = transform(v)
+	for _, entry := range Entries(m) {
+		result[entry.Key] = transform(entry.Value)
 	}
 	return result
 }
@@ -114,8 +114,8 @@ func MapKeys[K comparable, V any, R comparable](m map[K]V, transform func(K) R) 
 		return nil
 	}
 	result := make(map[R]V, len(m))
-	for k, v := range m {
-		result[transform(k)] = v
+	for _, entry := range Entries(m) {
+		result[transform(entry.Key)] = entry.Value
 	}
 	return result
 }
@@ -135,11 +135,11 @@ func Merge[K comparable, V any](maps ...map[K]V) map[K]V {
 func MergeWith[K comparable, V any](merge func(V, V) V, maps ...map[K]V) map[K]V {
 	result := make(map[K]V)
 	for _, m := range maps {
-		for k, v := range m {
-			if existing, ok := result[k]; ok {
-				result[k] = merge(existing, v)
+		for _, entry := range Entries(m) {
+			if existing, ok := result[entry.Key]; ok {
+				result[entry.Key] = merge(existing, entry.Value)
 			} else {
-				result[k] = v
+				result[entry.Key] = entry.Value
 			}
 		}
 	}
@@ -268,15 +268,15 @@ func IsEmpty[K comparable, V any](m map[K]V) bool {
 
 // ForEach 遍历 map
 func ForEach[K comparable, V any](m map[K]V, fn func(K, V)) {
-	for k, v := range m {
-		fn(k, v)
+	for _, entry := range Entries(m) {
+		fn(entry.Key, entry.Value)
 	}
 }
 
 // Any 判断是否有任意元素满足条件
 func Any[K comparable, V any](m map[K]V, predicate func(K, V) bool) bool {
-	for k, v := range m {
-		if predicate(k, v) {
+	for _, entry := range Entries(m) {
+		if predicate(entry.Key, entry.Value) {
 			return true
 		}
 	}
@@ -285,8 +285,8 @@ func Any[K comparable, V any](m map[K]V, predicate func(K, V) bool) bool {
 
 // All 判断是否所有元素都满足条件
 func All[K comparable, V any](m map[K]V, predicate func(K, V) bool) bool {
-	for k, v := range m {
-		if !predicate(k, v) {
+	for _, entry := range Entries(m) {
+		if !predicate(entry.Key, entry.Value) {
 			return false
 		}
 	}
@@ -295,8 +295,8 @@ func All[K comparable, V any](m map[K]V, predicate func(K, V) bool) bool {
 
 // None 判断是否没有元素满足条件
 func None[K comparable, V any](m map[K]V, predicate func(K, V) bool) bool {
-	for k, v := range m {
-		if predicate(k, v) {
+	for _, entry := range Entries(m) {
+		if predicate(entry.Key, entry.Value) {
 			return false
 		}
 	}
@@ -306,8 +306,8 @@ func None[K comparable, V any](m map[K]V, predicate func(K, V) bool) bool {
 // Count 统计满足条件的元素数量
 func Count[K comparable, V any](m map[K]V, predicate func(K, V) bool) int {
 	count := 0
-	for k, v := range m {
-		if predicate(k, v) {
+	for _, entry := range Entries(m) {
+		if predicate(entry.Key, entry.Value) {
 			count++
 		}
 	}
@@ -443,8 +443,8 @@ func Transform[K comparable, V any, R comparable, S any](m map[K]V, fn func(K, V
 		return nil
 	}
 	result := make(map[R]S, len(m))
-	for k, v := range m {
-		newK, newV := fn(k, v)
+	for _, entry := range Entries(m) {
+		newK, newV := fn(entry.Key, entry.Value)
 		result[newK] = newV
 	}
 	return result
@@ -593,7 +593,7 @@ func Collect[T any, K comparable, V any](slice []T, fn func(T) (K, V)) map[K]V {
 		return nil
 	}
 	result := make(map[K]V, len(slice))
-	for _, item := range slice {
+	for _, item := range append([]T(nil), slice...) {
 		k, v := fn(item)
 		result[k] = v
 	}
@@ -618,7 +618,7 @@ func CollectByKey[T any, K comparable](slice []T, keyFn func(T) K) map[K]T {
 		return nil
 	}
 	result := make(map[K]T, len(slice))
-	for _, item := range slice {
+	for _, item := range append([]T(nil), slice...) {
 		result[keyFn(item)] = item
 	}
 	return result

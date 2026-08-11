@@ -1,6 +1,7 @@
 package conv
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 )
@@ -15,7 +16,7 @@ func TestJSONToMap(t *testing.T) {
 		{
 			name:     "simple object",
 			input:    `{"name":"Alice","age":30}`,
-			expected: map[string]any{"name": "Alice", "age": float64(30)},
+			expected: map[string]any{"name": "Alice", "age": json.Number("30")},
 			wantErr:  false,
 		},
 		{

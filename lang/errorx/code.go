@@ -131,7 +131,11 @@ func (e *CodedError) WithDetails(key string, val any) *CodedError {
 
 // WithCause 包装底层错误
 func (e *CodedError) WithCause(err error) *CodedError {
-	e.cause = err
+	if isNilError(err) {
+		e.cause = nil
+	} else {
+		e.cause = err
+	}
 	return e
 }
 
