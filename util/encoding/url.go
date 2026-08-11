@@ -111,5 +111,8 @@ func JoinURL(base string, paths ...string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("join URL: %w", err)
 	}
+	if _, err := url.Parse(joined); err != nil {
+		return "", fmt.Errorf("join URL: %w", err)
+	}
 	return joined, nil
 }

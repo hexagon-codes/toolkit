@@ -43,3 +43,10 @@ func TestJoinURLDoesNotTreatPathQueryAsBaseQuery(t *testing.T) {
 		t.Fatalf("JoinURL() = %q, want %q", got, want)
 	}
 }
+
+func TestJoinURLRejectsMalformedJoinedAuthority(t *testing.T) {
+	joined, err := JoinURL("//0000@", " ")
+	if err == nil {
+		t.Fatalf("JoinURL() = %q, want an error", joined)
+	}
+}
