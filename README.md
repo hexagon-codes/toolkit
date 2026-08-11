@@ -482,10 +482,19 @@ plaintext, _ := kp.Decrypt(ciphertext)
 // 签名验签
 signature, _ := kp.Sign(message)
 err := kp.Verify(message, signature)
+if err != nil {
+    log.Fatal(err)
+}
 
 // PEM 导出
-privatePEM := kp.PrivateKeyToPEM()
-publicPEM := kp.PublicKeyToPEM()
+privatePEM, err := kp.PrivateKeyToPEM()
+if err != nil {
+    log.Fatal(err)
+}
+publicPEM, err := kp.PublicKeyToPEM()
+if err != nil {
+    log.Fatal(err)
+}
 ```
 
 ### HMAC 签名
@@ -507,8 +516,14 @@ sig := signer.Sign(params, timestamp, nonce)
 import "github.com/hexagon-codes/toolkit/net/httpx"
 
 // 简单请求
-resp, _ := httpx.Get("https://api.example.com/users")
-resp, _ = httpx.Post("https://api.example.com/users", body)
+resp, err := httpx.Get(ctx, "https://api.example.com/users")
+if err != nil {
+    log.Fatal(err)
+}
+resp, err = httpx.Post(ctx, "https://api.example.com/users", body)
+if err != nil {
+    log.Fatal(err)
+}
 
 // 链式调用
 client, err := httpx.NewClient(
@@ -518,14 +533,19 @@ client, err := httpx.NewClient(
 if err != nil {
     log.Fatal(err)
 }
-resp, _ = client.R().
+resp, err = client.R(ctx).
     SetHeader("Authorization", "Bearer token").
     SetQuery("page", "1").
     Get("/api/users")
+if err != nil {
+    log.Fatal(err)
+}
 
 // 解析响应
 var users []User
-resp.JSON(&users)
+if err := resp.JSON(&users); err != nil {
+    log.Fatal(err)
+}
 
 // SSRF 防护（阻止访问内网地址，支持 IPv6 白名单）
 secureClient, err := httpx.NewClient(
@@ -534,9 +554,11 @@ secureClient, err := httpx.NewClient(
 if err != nil {
     log.Fatal(err)
 }
-resp, err = secureClient.R().Get(userProvidedURL)
+resp, err = secureClient.R(ctx).Get(userProvidedURL)
 if errors.Is(err, httpx.ErrSSRFBlocked) {
     // 请求被拦截
+} else if err != nil {
+    log.Fatal(err)
 }
 ```
 
@@ -603,6 +625,9 @@ if err != nil {
 
 // 带限流的连接池
 rateLimitedPool, err := httpx.NewRateLimitedPool(pool, 100)  // 100 QPS
+if err != nil {
+    log.Fatal(err)
+}
 defer rateLimitedPool.Close()
 
 // 带熔断器的连接池，复用 util/circuit 状态机
@@ -612,6 +637,9 @@ cbPool, err := httpx.NewCircuitBreakerPool(
     circuit.WithSuccessThreshold(2),
     circuit.WithTimeout(30*time.Second),
 )
+if err != nil {
+    log.Fatal(err)
+}
 ```
 
 ### AI 客户端预设
@@ -620,22 +648,52 @@ cbPool, err := httpx.NewCircuitBreakerPool(
 import "github.com/hexagon-codes/toolkit/net/httpx"
 
 // 各大 AI 平台预设客户端（自动配置 BaseURL、认证头、超时等）
-openai := httpx.OpenAIClient("sk-xxx")
-claude := httpx.ClaudeClient("sk-ant-xxx")
-gemini := httpx.GeminiClient("AIza-xxx")
-deepseek := httpx.DeepSeekClient("sk-xxx")
-qwen := httpx.QwenClient("sk-xxx")           // 通义千问
-zhipu := httpx.ZhipuClient("xxx.xxx")        // 智谱清言
-moonshot := httpx.MoonshotClient("sk-xxx")    // 月之暗面
-doubao := httpx.DoubaoClient("xxx")           // 字节豆包
+openai, err := httpx.OpenAIClient("sk-xxx")
+if err != nil {
+    log.Fatal(err)
+}
+claude, err := httpx.ClaudeClient("sk-ant-xxx")
+if err != nil {
+    log.Fatal(err)
+}
+gemini, err := httpx.GeminiClient("AIza-xxx")
+if err != nil {
+    log.Fatal(err)
+}
+deepseek, err := httpx.DeepSeekClient("sk-xxx")
+if err != nil {
+    log.Fatal(err)
+}
+qwen, err := httpx.QwenClient("sk-xxx") // 通义千问
+if err != nil {
+    log.Fatal(err)
+}
+zhipu, err := httpx.ZhipuClient("xxx.xxx") // 智谱清言
+if err != nil {
+    log.Fatal(err)
+}
+moonshot, err := httpx.MoonshotClient("sk-xxx") // 月之暗面
+if err != nil {
+    log.Fatal(err)
+}
+doubao, err := httpx.DoubaoClient("xxx") // 字节豆包
+if err != nil {
+    log.Fatal(err)
+}
 
 // 自定义 AI 客户端
-custom := httpx.CustomAIClient("https://my-api.com", "my-token")
+custom, err := httpx.CustomAIClient("https://my-api.com", "my-token")
+if err != nil {
+    log.Fatal(err)
+}
 
 // 流式请求
-stream, _ := claude.R().
+stream, err := claude.R(ctx).
     SetJSONBody(requestBody).
     PostStream("/v1/messages")
+if err != nil {
+    log.Fatal(err)
+}
 defer stream.Close()
 
 // 读取 SSE 事件
@@ -755,9 +813,11 @@ manager.Execute("claude", func() (any, error) {
 states := manager.States()  // map[string]State
 
 // 状态监听
-breaker.OnStateChange(func(from, to circuit.State) {
+if err := breaker.OnStateChange(func(from, to circuit.State) {
     log.Printf("熔断器状态: %s -> %s", from, to)
-})
+}); err != nil {
+    log.Fatal(err)
+}
 ```
 
 ### 事件总线
@@ -871,15 +931,17 @@ logger.Info("user login", "userId", 123, "ip", "192.168.1.1")
 logger.Error("request failed", "error", err)
 
 // 配置
-logger.Init(&logger.Config{
+if err := logger.Init(&logger.Config{
     Level:  "info",
     Format: "json",
     Output: "stdout",
-})
+}); err != nil {
+    log.Fatal(err)
+}
 
 // 带字段
-log := logger.With("service", "user-api")
-log.Info("started", "port", 8080)
+serviceLog := logger.With("service", "user-api")
+serviceLog.Info("started", "port", 8080)
 ```
 
 ### OpenTelemetry
@@ -1015,9 +1077,11 @@ import "github.com/hexagon-codes/toolkit/util/poolx"
 p := poolx.New("my-pool", poolx.WithMaxWorkers(10))
 defer p.Release()
 
-p.Submit(func() {
+if err := p.Submit(func() {
     // task
-})
+}); err != nil {
+    log.Fatal(err)
+}
 
 // Future 模式
 future := poolx.SubmitFunc(p, func() (int, error) {
@@ -1052,7 +1116,9 @@ timeout := cfg.GetDuration("app.timeout")
 hosts := cfg.GetStringSlice("app.hosts")
 
 // 从环境变量加载
-cfg.LoadEnv("APP")  // APP_NAME -> name, APP_PORT -> port
+if err := cfg.LoadEnv("APP"); err != nil { // APP_NAME 映射到 name，APP_PORT 映射到 port
+    log.Fatal(err)
+}
 
 // 绑定到结构体
 var appCfg struct {
@@ -1290,7 +1356,7 @@ filesystem、network、process-containment 和 output 隔离，不声称提供 M
 ## 近期更新
 
 - **infra/redisconn**: 新增 Single / Cluster / Sentinel 统一 Redis 连接工厂，支持 ACL 账号密码、Sentinel 双凭据、TLS、动态凭据与启动探活；项目级策略主动拒绝 password-only
-- **net/httpx**: `RateLimitedPool` 实现 `io.Closer` 接口，`Close() error` 方法通过 `sync.Once` 保证幂等，多次调用安全
+- **net/httpx**: `RateLimitedPool.Close()` 无返回值，并复用底层连接池的原子关闭保证幂等，多次调用安全
 - **util/poolx**: `AwaitFirst` 使用可取消 context，首个结果返回后自动取消剩余等待，防止 goroutine 泄漏
 - **util/poolx**: 修复 `workerStack.retrieveExpiry` 环形缓冲区压缩逻辑，过期回收后正确重建存活 worker 队列
 
@@ -1493,7 +1559,6 @@ github.com/elastic/go-elasticsearch/v8    # Elasticsearch 客户端（infra/db/e
 github.com/prometheus/client_golang       # 监控指标（infra/prometheus）
 golang.org/x/sync                         # singleflight
 golang.org/x/crypto                       # 加密扩展
-github.com/bytedance/gopkg                # goroutine 池（util/poolx）
 github.com/google/uuid                    # UUID 生成
 ```
 

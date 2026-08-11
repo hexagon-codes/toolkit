@@ -482,10 +482,19 @@ plaintext, _ := kp.Decrypt(ciphertext)
 // Sign/Verify
 signature, _ := kp.Sign(message)
 err := kp.Verify(message, signature)
+if err != nil {
+    log.Fatal(err)
+}
 
 // PEM export
-privatePEM := kp.PrivateKeyToPEM()
-publicPEM := kp.PublicKeyToPEM()
+privatePEM, err := kp.PrivateKeyToPEM()
+if err != nil {
+    log.Fatal(err)
+}
+publicPEM, err := kp.PublicKeyToPEM()
+if err != nil {
+    log.Fatal(err)
+}
 ```
 
 ### HMAC Signing
@@ -507,8 +516,14 @@ sig := signer.Sign(params, timestamp, nonce)
 import "github.com/hexagon-codes/toolkit/net/httpx"
 
 // Simple requests
-resp, _ := httpx.Get("https://api.example.com/users")
-resp, _ = httpx.Post("https://api.example.com/users", body)
+resp, err := httpx.Get(ctx, "https://api.example.com/users")
+if err != nil {
+    log.Fatal(err)
+}
+resp, err = httpx.Post(ctx, "https://api.example.com/users", body)
+if err != nil {
+    log.Fatal(err)
+}
 
 // Fluent API
 client, err := httpx.NewClient(
@@ -518,14 +533,19 @@ client, err := httpx.NewClient(
 if err != nil {
     log.Fatal(err)
 }
-resp, _ = client.R().
+resp, err = client.R(ctx).
     SetHeader("Authorization", "Bearer token").
     SetQuery("page", "1").
     Get("/api/users")
+if err != nil {
+    log.Fatal(err)
+}
 
 // Parse response
 var users []User
-resp.JSON(&users)
+if err := resp.JSON(&users); err != nil {
+    log.Fatal(err)
+}
 
 // SSRF protection (blocks internal network access, supports IPv6 whitelist)
 secureClient, err := httpx.NewClient(
@@ -534,9 +554,11 @@ secureClient, err := httpx.NewClient(
 if err != nil {
     log.Fatal(err)
 }
-resp, err = secureClient.R().Get(userProvidedURL)
+resp, err = secureClient.R(ctx).Get(userProvidedURL)
 if errors.Is(err, httpx.ErrSSRFBlocked) {
     // request was blocked
+} else if err != nil {
+    log.Fatal(err)
 }
 ```
 
@@ -603,6 +625,9 @@ if err != nil {
 
 // Rate-limited connection pool
 rateLimitedPool, err := httpx.NewRateLimitedPool(pool, 100)  // 100 QPS
+if err != nil {
+    log.Fatal(err)
+}
 defer rateLimitedPool.Close()
 
 // Circuit breaker connection pool using the shared util/circuit state machine
@@ -612,6 +637,9 @@ cbPool, err := httpx.NewCircuitBreakerPool(
     circuit.WithSuccessThreshold(2),
     circuit.WithTimeout(30*time.Second),
 )
+if err != nil {
+    log.Fatal(err)
+}
 ```
 
 ### AI Client Presets
@@ -620,22 +648,52 @@ cbPool, err := httpx.NewCircuitBreakerPool(
 import "github.com/hexagon-codes/toolkit/net/httpx"
 
 // Preset clients for major AI platforms (auto-configures BaseURL, auth headers, timeouts, etc.)
-openai := httpx.OpenAIClient("sk-xxx")
-claude := httpx.ClaudeClient("sk-ant-xxx")
-gemini := httpx.GeminiClient("AIza-xxx")
-deepseek := httpx.DeepSeekClient("sk-xxx")
-qwen := httpx.QwenClient("sk-xxx")           // Alibaba Qwen
-zhipu := httpx.ZhipuClient("xxx.xxx")        // Zhipu ChatGLM
-moonshot := httpx.MoonshotClient("sk-xxx")    // Moonshot AI
-doubao := httpx.DoubaoClient("xxx")           // ByteDance Doubao
+openai, err := httpx.OpenAIClient("sk-xxx")
+if err != nil {
+    log.Fatal(err)
+}
+claude, err := httpx.ClaudeClient("sk-ant-xxx")
+if err != nil {
+    log.Fatal(err)
+}
+gemini, err := httpx.GeminiClient("AIza-xxx")
+if err != nil {
+    log.Fatal(err)
+}
+deepseek, err := httpx.DeepSeekClient("sk-xxx")
+if err != nil {
+    log.Fatal(err)
+}
+qwen, err := httpx.QwenClient("sk-xxx") // 通义千问
+if err != nil {
+    log.Fatal(err)
+}
+zhipu, err := httpx.ZhipuClient("xxx.xxx") // 智谱清言
+if err != nil {
+    log.Fatal(err)
+}
+moonshot, err := httpx.MoonshotClient("sk-xxx") // 月之暗面
+if err != nil {
+    log.Fatal(err)
+}
+doubao, err := httpx.DoubaoClient("xxx") // 字节豆包
+if err != nil {
+    log.Fatal(err)
+}
 
 // Custom AI client
-custom := httpx.CustomAIClient("https://my-api.com", "my-token")
+custom, err := httpx.CustomAIClient("https://my-api.com", "my-token")
+if err != nil {
+    log.Fatal(err)
+}
 
 // Streaming request
-stream, _ := claude.R().
+stream, err := claude.R(ctx).
     SetJSONBody(requestBody).
     PostStream("/v1/messages")
+if err != nil {
+    log.Fatal(err)
+}
 defer stream.Close()
 
 // Read SSE events
@@ -755,9 +813,11 @@ manager.Execute("claude", func() (any, error) {
 states := manager.States()  // map[string]State
 
 // State change listener
-breaker.OnStateChange(func(from, to circuit.State) {
+if err := breaker.OnStateChange(func(from, to circuit.State) {
     log.Printf("circuit breaker state: %s -> %s", from, to)
-})
+}); err != nil {
+    log.Fatal(err)
+}
 ```
 
 ### Event Bus
@@ -871,15 +931,17 @@ logger.Info("user login", "userId", 123, "ip", "192.168.1.1")
 logger.Error("request failed", "error", err)
 
 // Configuration
-logger.Init(&logger.Config{
+if err := logger.Init(&logger.Config{
     Level:  "info",
     Format: "json",
     Output: "stdout",
-})
+}); err != nil {
+    log.Fatal(err)
+}
 
 // With fields
-log := logger.With("service", "user-api")
-log.Info("started", "port", 8080)
+serviceLog := logger.With("service", "user-api")
+serviceLog.Info("started", "port", 8080)
 ```
 
 ### OpenTelemetry
@@ -1015,9 +1077,11 @@ import "github.com/hexagon-codes/toolkit/util/poolx"
 p := poolx.New("my-pool", poolx.WithMaxWorkers(10))
 defer p.Release()
 
-p.Submit(func() {
+if err := p.Submit(func() {
     // task
-})
+}); err != nil {
+    log.Fatal(err)
+}
 
 // Future pattern
 future := poolx.SubmitFunc(p, func() (int, error) {
@@ -1052,7 +1116,9 @@ timeout := cfg.GetDuration("app.timeout")
 hosts := cfg.GetStringSlice("app.hosts")
 
 // Load from environment variables
-cfg.LoadEnv("APP")  // APP_NAME -> name, APP_PORT -> port
+if err := cfg.LoadEnv("APP"); err != nil { // APP_NAME 映射到 name，APP_PORT 映射到 port
+    log.Fatal(err)
+}
 
 // Bind to struct
 var appCfg struct {
@@ -1306,7 +1372,7 @@ proof is unavailable, the backend must reject before any payload side effect.
 ## Recent Changes
 
 - **infra/redisconn**: Added one Redis connection factory for Single, Cluster, and Sentinel with ACL username/password, separate Sentinel credentials, TLS, dynamic credentials, and startup probing; project policy intentionally rejects password-only configuration
-- **net/httpx**: `RateLimitedPool` now implements `io.Closer` with `Close() error`, idempotent via `sync.Once` (safe to call multiple times)
+- **net/httpx**: `RateLimitedPool.Close()` now has no return value and safely closes the underlying pool on repeated calls
 - **util/poolx**: `AwaitFirst` now uses a cancellable context to release waiting goroutines once the first result arrives, preventing goroutine leaks
 - **util/poolx**: Fixed `workerStack.retrieveExpiry` ring buffer compaction logic to correctly rebuild the surviving worker queue after expiry cleanup
 
@@ -1509,7 +1575,6 @@ github.com/elastic/go-elasticsearch/v8    # Elasticsearch client (infra/db/elast
 github.com/prometheus/client_golang       # metrics (infra/prometheus)
 golang.org/x/sync                         # singleflight
 golang.org/x/crypto                       # crypto extensions
-github.com/bytedance/gopkg                # goroutine pool (util/poolx)
 github.com/google/uuid                    # UUID generation
 ```
 
