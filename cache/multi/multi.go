@@ -62,6 +62,10 @@ type Layer interface {
 	Del(ctx context.Context, keys ...string) error
 }
 
+type notFoundMarker interface {
+	NotFound() bool
+}
+
 // LayerConfig 缓存层配置
 type LayerConfig struct {
 	Layer Layer         // 缓存层实例
@@ -356,10 +360,7 @@ func (c *Cache) GetOrLoad(
 	if isNilLayerValue(val) {
 		return ErrInvalidValue
 	}
-	if err := copyValue(val, dest); err != nil {
-		return err
-	}
-	return nil
+	return copyValue(val, dest)
 }
 
 // backfillTimeout 回填操作的超时时间
@@ -563,6 +564,10 @@ func (c *Cache) isNotFound(err error) bool {
 		return false
 	}
 	if c.opts.IsNotFound != nil && c.opts.IsNotFound(err) {
+		return true
+	}
+	var marker notFoundMarker
+	if errors.As(err, &marker) && marker.NotFound() {
 		return true
 	}
 	return errors.Is(err, ErrNotFound)

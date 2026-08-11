@@ -13,9 +13,14 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
+type layerNotFoundError struct{}
+
+func (*layerNotFoundError) Error() string  { return "cache: not found" }
+func (*layerNotFoundError) NotFound() bool { return true }
+
 var (
 	// ErrNotFound 表示负缓存命中（数据确实不存在），用于防穿透。
-	ErrNotFound = errors.New("cache: not found")
+	ErrNotFound error = &layerNotFoundError{}
 
 	// ErrInvalidDest 表示调用方传入的 dest 不是非 nil 指针。
 	ErrInvalidDest = errors.New("cache: dest must be a non-nil pointer")
@@ -777,11 +782,11 @@ func (c *Cache) loadPacked(
 	loader func(context.Context) (any, error),
 ) (loadResult, error) {
 	if packed, ok, err := c.getItem(fullKey); err == nil && ok {
-		if validationErr := c.validatePackedDestination(packed, destination); validationErr == nil {
+		validationErr := c.validatePackedDestination(packed, destination)
+		if validationErr == nil {
 			return loadResult{packed: packed, fromCache: true}, nil
-		} else {
-			c.onError(ctx, "local_decode", fullKey, validationErr)
 		}
+		c.onError(ctx, "local_decode", fullKey, validationErr)
 	} else if err != nil {
 		c.onError(ctx, "local_get", fullKey, err)
 	}
@@ -789,11 +794,11 @@ func (c *Cache) loadPacked(
 	generation := c.getGeneration()
 	resultChannel := c.sf.DoChan(fullKey, func() (any, error) {
 		if packed, ok, err := c.getItem(fullKey); err == nil && ok {
-			if validationErr := c.validatePackedDestination(packed, destination); validationErr == nil {
+			validationErr := c.validatePackedDestination(packed, destination)
+			if validationErr == nil {
 				return loadResult{packed: packed, fromCache: true}, nil
-			} else {
-				c.onError(ctx, "local_double_check_decode", fullKey, validationErr)
 			}
+			c.onError(ctx, "local_double_check_decode", fullKey, validationErr)
 		} else if err != nil {
 			c.onError(ctx, "local_double_check", fullKey, err)
 		}

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	localcache "github.com/hexagon-codes/toolkit/cache/local"
+	rediscache "github.com/hexagon-codes/toolkit/cache/redis"
 )
 
 type auditMissLayer struct {
@@ -22,6 +23,16 @@ func (l *auditMissLayer) GetOrLoad(ctx context.Context, _ string, _ time.Duratio
 }
 
 func (*auditMissLayer) Del(context.Context, ...string) error { return nil }
+
+type auditErrorLayer struct {
+	err error
+}
+
+func (l *auditErrorLayer) GetOrLoad(context.Context, string, time.Duration, any, func(context.Context) (any, error)) error {
+	return l.err
+}
+
+func (*auditErrorLayer) Del(context.Context, ...string) error { return nil }
 
 type blockingBackfillAuditLayer struct {
 	mu      sync.Mutex
@@ -291,5 +302,25 @@ func TestCacheRecognizesLocalNegativeCacheByDefault(t *testing.T) {
 	}
 	if loaderCalled {
 		t.Fatal("the source loader ran despite a lower-layer negative cache hit")
+	}
+}
+
+func TestCacheRecognizesRedisNegativeCacheByDefault(t *testing.T) {
+	cache := mustNewCache(t, []LayerConfig{{
+		Layer: &auditErrorLayer{err: rediscache.ErrNotFound},
+		TTL:   time.Minute,
+		Name:  "redis",
+	}}, WithSkipBackfill(true))
+	loaderCalled := false
+	var destination string
+	err := cache.GetOrLoad(context.Background(), "missing", &destination, func(context.Context) (any, error) {
+		loaderCalled = true
+		return "unexpected", nil
+	})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetOrLoad() error = %v, want ErrNotFound", err)
+	}
+	if loaderCalled {
+		t.Fatal("the source loader ran despite a Redis negative cache hit")
 	}
 }
