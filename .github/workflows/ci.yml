@@ -179,13 +179,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # 镜像自带 pip3 缺失 pip 模块，且 homebrew 为 externally-managed 环境，
-          # ensurepip 会触发 PEP 668 拒绝；统一用官方 get-pip.py --break-system-packages
-          # 修复（仅下载到 $RUNNER_TEMP，不落入工作目录）。
-          curl -fsSL -o "$RUNNER_TEMP/get-pip.py" https://bootstrap.pypa.io/get-pip.py
-          # --ignore-installed：镜像上 pip 残留记录缺失，卸载旧 pip 会报
-          # uninstall-no-record-file，跳过卸载直接覆盖安装。
-          python3 "$RUNNER_TEMP/get-pip.py" --break-system-packages --ignore-installed
+          # 镜像自带 pip3 缺失 pip 模块，且 homebrew 为 externally-managed 环境；
+          # PYTHONBREAKSYSTEMPACKAGES=1 绕过 PEP 668，用 ensurepip 重建完整 pip 包
+          # 与脚本（--ignore-installed 只会装脚本不装包，导致 ModuleNotFoundError）。
+          if PYTHONBREAKSYSTEMPACKAGES=1 python3 -m ensurepip --upgrade >/dev/null 2>&1; then
+            :
+          else
+            curl -fsSL -o "$RUNNER_TEMP/get-pip.py" https://bootstrap.pypa.io/get-pip.py
+            PYTHONBREAKSYSTEMPACKAGES=1 python3 "$RUNNER_TEMP/get-pip.py" --break-system-packages
+          fi
           node --version
           pip3 --version
       - name: Verify root module metadata

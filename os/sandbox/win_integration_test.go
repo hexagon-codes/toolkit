@@ -555,7 +555,8 @@ func TestWindows_JobProcessRootPayload(t *testing.T) {
 	}
 	firstReady := "process-child-first.ready"
 	secondReady := "process-child-second.ready"
-	first := exec.Command(
+	first := exec.CommandContext(
+		context.Background(),
 		os.Args[0],
 		"-test.run=^TestWindows_JobProcessChildPayload$",
 		"-test.count=1",
@@ -577,7 +578,8 @@ func TestWindows_JobProcessRootPayload(t *testing.T) {
 		return
 	}
 
-	second := exec.Command(
+	second := exec.CommandContext(
+		context.Background(),
 		os.Args[0],
 		"-test.run=^TestWindows_JobProcessChildPayload$",
 		"-test.count=1",
@@ -678,7 +680,8 @@ func TestWindows_JobMemoryRootPayload(t *testing.T) {
 	outcomes := make([]string, 0, 2)
 	for index := 0; index < 2; index++ {
 		resultPath := filepath.Join(".", fmt.Sprintf("memory-child-%d.result", index))
-		child := exec.Command(
+		child := exec.CommandContext(
+			context.Background(),
 			os.Args[0],
 			"-test.run=^TestWindows_JobMemoryChildPayload$",
 			"-test.count=1",

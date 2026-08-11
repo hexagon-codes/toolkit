@@ -88,7 +88,7 @@ func TestWindows_NetworkDisabledPayload(t *testing.T) {
 		return
 	}
 	networkName, address := arguments[0], arguments[1]
-	connection, err := net.DialTimeout(networkName, address, 2*time.Second)
+	connection, err := (&net.Dialer{Timeout: 2 * time.Second}).DialContext(context.Background(), networkName, address)
 	if err != nil {
 		printWindowsNetworkResult(networkName, err)
 		return

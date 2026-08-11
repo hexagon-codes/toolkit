@@ -645,13 +645,24 @@ func setPersistentWindowsWorkspaceIntegrity(file *os.File) (resultErr error) {
 	if labelACL == nil {
 		return fmt.Errorf("low-integrity label ACL is unavailable")
 	}
-	writableHandle, err := reopenWindowsHandle(
-		windows.Handle(file.Fd()),
+	// ReOpenFile 不能提升访问权限，integrity 更新同样按路径重新打开。
+	objectPath, pathErr := canonicalWindowsPathFromHandle(file)
+	if pathErr != nil {
+		return fmt.Errorf("resolve workspace object path for integrity update: %w", pathErr)
+	}
+	pathPointer, pathErr := windows.UTF16PtrFromString(objectPath)
+	if pathErr != nil {
+		return fmt.Errorf("encode workspace object path for integrity update: %w", pathErr)
+	}
+	writableHandle, err := windows.CreateFile(
+		pathPointer,
 		windows.READ_CONTROL|windows.WRITE_OWNER,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
 		windowsReparseFlag,
+		0,
 	)
-	runtime.KeepAlive(file)
 	if err != nil {
 		return fmt.Errorf("open workspace object for integrity update: %w", err)
 	}
