@@ -529,7 +529,12 @@ func auditWindowsHandleOwner(file *os.File, ownerSID *windows.SID) error {
 		return fmt.Errorf("read handle owner: %w", err)
 	}
 	if defaulted || actualOwner == nil || !actualOwner.Equals(ownerSID) {
-		return fmt.Errorf("workspace objects must be owned by the current Windows user")
+		actualDescription := "<nil>"
+		if actualOwner != nil {
+			actualDescription = actualOwner.String()
+		}
+		return fmt.Errorf("workspace objects must be owned by the current Windows user (got %s, want %s, defaulted=%v)",
+			actualDescription, ownerSID.String(), defaulted)
 	}
 	return nil
 }

@@ -435,7 +435,7 @@ func darwinCommandExecutionPlanContext(ctx context.Context, command Command, wor
 	if !trusted {
 		root := darwinRuntimeRoot(command.Path, resolved)
 		if root == "" || darwinTemporaryOrVariablePath(resolved) {
-			plan.err = fmt.Errorf("sandbox command %q is outside the workspace and trusted runtime roots", command.Path)
+			plan.err = fmt.Errorf("sandbox command %q resolved to %q is outside the workspace and trusted runtime roots", command.Path, resolved)
 			return plan
 		}
 		plan.readPaths = append(plan.readPaths, resolved, root)
