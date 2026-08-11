@@ -81,10 +81,15 @@ func main() {
     var wg sync.WaitGroup
     for i := 0; i < 100; i++ {
         wg.Add(1)
-        p.Submit(func() {
+        if err := p.Submit(func() {
             defer wg.Done()
             // 你的任务逻辑
-        })
+        }); err != nil {
+            wg.Done()
+            fmt.Printf("Submit failed: %v\n", err)
+            wg.Wait()
+            return
+        }
     }
     wg.Wait()
 
@@ -96,13 +101,13 @@ func main() {
 
 ## 性能优化建议
 
-1. **非阻塞操作使用 TrySubmit** - ~34ns vs Submit 的 ~1100ns
+1. **可处理拒绝时使用 TrySubmit** - 避免调用方等待可用 worker
 2. **批量提交使用 SubmitBatch** - 减少锁竞争开销
 3. **不需要时禁用 hooks** - Hooks 每个任务增加 ~400ns 开销
 4. **重复操作使用 PoolWithFunc** - 更高的内存效率
 5. **根据工作负载调整 worker 数量** - 建议从 NumCPU * 2 开始
 6. **变化负载启用自动扩缩容** - 自动调整 worker 数量
-7. **高并发计数器使用 ShardedCounter** - 比 atomic.Int64 快 14 倍
+7. **高竞争计数器评估 ShardedCounter** - 用真实负载 benchmark 决定是否采用
 
 ## 性能基准
 
@@ -112,37 +117,13 @@ func main() {
 go test ./util/poolx/... -bench=. -benchmem
 ```
 
-典型结果：
+基准结果取决于 CPU、Go 版本、并发度和任务负载。请以当前机器上的完整输出为准，
+不要把某次运行的纳秒数或倍率当作 API 性能承诺。
 
-| 操作 | 耗时 | 内存分配 |
-|------|------|----------|
-| Submit | ~1100 ns | 0 B |
-| TrySubmit | ~34 ns | 0 B |
-| SubmitBatch(10) | ~99 ns/任务 | 0 B |
-| PoolWithFunc.Invoke | ~1300 ns | 0 B |
-| PoolWithFunc.TryInvoke | ~38 ns | 0 B |
-| Future.SubmitFunc | ~2100 ns | 224 B |
-| Spinlock vs Mutex | 30 ns vs 74 ns | 2.5x 快 |
-| ShardedCounter vs atomic | 3.5 ns vs 49 ns | 14x 快 |
+## 选型说明
 
-## 与其他库对比
-
-| 特性 | poolx | ants | ByteDance gopool |
-|------|---------|------|------------------|
-| 基本提交 | ✅ | ✅ | ✅ |
-| 非阻塞提交 | ✅ (~34ns) | ✅ (~100ns) | ❌ |
-| **批量提交** | ✅ | ❌ | ❌ |
-| Context 协作式取消与超时 | ✅ | ❌ | ✅ |
-| 单函数池 | ✅ | ✅ | ❌ |
-| Future 模式 | ✅ | ❌ | ❌ |
-| 优先级队列 | ✅ | ❌ | ❌ |
-| 自动扩缩容 | ✅ | ❌ | ✅ |
-| Hook 系统 | ✅ (10+) | ❌ | ❌ |
-| Context 协作式任务超时 | ✅ | ❌ | ❌ |
-| 多池调度 | ✅ | ✅ | ❌ |
-| **Work Stealing** | ✅ | ❌ | ❌ |
-| **分片计数器** | ✅ | ❌ | ❌ |
-| **汇编优化** | ✅ | ❌ | ❌ |
+跨库功能和性能会随版本变化。选型时应固定依赖版本，在同一工具链、硬件和真实任务负载下
+复现实测，并单独验证取消、关闭、过载与 panic 等生命周期合同。
 
 ## 完整 API 列表
 
@@ -154,12 +135,17 @@ mp, err := poolx.NewMultiPool(size, poolSize, strategy, opts...)
 
 // 任务提交
 p.Submit(fn)                    // 阻塞提交
-p.TrySubmit(fn)                 // 非阻塞提交 (~34ns)
+p.TrySubmit(fn)                 // 非阻塞提交，调用方必须处理拒绝
 p.SubmitBatch(fns)              // 批量提交
 p.TrySubmitBatch(fns)           // 非阻塞批量提交
 p.SubmitWait(fn)                // 提交并等待完成
 p.SubmitWithContext(ctx, contextTask) // contextTask: func(context.Context)
 p.SubmitWithOptions(fn, opts)   // 带选项提交
+
+// 独立优先级队列
+queue := poolx.NewPriorityQueue(capacity)
+queue.Push(fn, priority)        // 队列满时返回 false
+queue.Pop()                     // 取出最高优先级任务
 
 // Future 模式
 poolx.SubmitFunc(p, fn)       // 返回 Future[T]
@@ -191,7 +177,6 @@ poolx.WithMaxWorkers(100)        // 最大 worker 数
 poolx.WithMinWorkers(10)         // 最小 worker 数
 poolx.WithAutoScale(true)        // 启用自动扩缩容
 poolx.WithWorkStealing(true)     // 启用 Work Stealing
-poolx.WithPriorityQueue(true)    // 启用优先级队列
 poolx.WithNonBlocking(true)      // 非阻塞模式
 poolx.WithHooks(hooks)           // Hook 回调
 poolx.WithPanicHandler(fn)       // Panic 处理

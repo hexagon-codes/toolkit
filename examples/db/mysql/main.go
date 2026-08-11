@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/hexagon-codes/toolkit/infra/db/mysql"
@@ -19,34 +22,64 @@ type User struct {
 }
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() (resultErr error) {
+	dsn, mysqlConfigured := configuredMySQLDSN()
+	if !mysqlConfigured {
+		fmt.Println("Set MYSQL_DSN to run this example.")
+		return nil
+	}
+
 	fmt.Println("=== MySQL 使用示例 ===")
 
 	// 1. 连接初始化
 	fmt.Println("1. 初始化 MySQL 连接")
-	db := initMySQL()
-	defer db.Close()
+	db, err := initMySQL(dsn)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, db.Close())
+	}()
 
 	// 2. 基本 CRUD 操作
 	fmt.Println("\n2. 基本 CRUD 操作")
-	demonstrateCRUD(db)
+	if err := demonstrateCRUD(db); err != nil {
+		return err
+	}
 
 	// 3. 事务使用
 	fmt.Println("\n3. 事务使用")
-	demonstrateTransaction(db)
+	if err := demonstrateTransaction(db); err != nil {
+		return err
+	}
 
 	// 4. 连接池配置和监控
 	fmt.Println("\n4. 连接池监控")
-	monitorConnectionPool(db)
+	if err := monitorConnectionPool(db); err != nil {
+		return err
+	}
 
 	// 5. 高级查询
 	fmt.Println("\n5. 高级查询")
-	demonstrateAdvancedQuery(db)
+	if err := demonstrateAdvancedQuery(db); err != nil {
+		return err
+	}
+	return nil
+}
+
+func configuredMySQLDSN() (string, bool) {
+	dsn := strings.TrimSpace(os.Getenv("MYSQL_DSN"))
+	return dsn, dsn != ""
 }
 
 // initMySQL 初始化 MySQL 连接
-func initMySQL() *mysql.DB {
+func initMySQL(dsn string) (*mysql.DB, error) {
 	// 方式1: 使用默认配置
-	dsn := "user:password@tcp(127.0.0.1:3306)/testdb?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci"
 	config := mysql.DefaultConfig(dsn)
 
 	// 方式2: 自定义配置
@@ -70,7 +103,7 @@ func initMySQL() *mysql.DB {
 	// 创建连接
 	db, err := mysql.New(config)
 	if err != nil {
-		log.Fatalf("Failed to connect to MySQL: %v", err)
+		return nil, fmt.Errorf("connect to MySQL: %w", err)
 	}
 
 	fmt.Printf("✓ MySQL 连接成功\n")
@@ -80,29 +113,35 @@ func initMySQL() *mysql.DB {
 	defer cancel()
 
 	if err := db.Health(ctx); err != nil {
-		log.Fatalf("Health check failed: %v", err)
+		return nil, errors.Join(fmt.Errorf("check MySQL health: %w", err), db.Close())
 	}
 
 	fmt.Printf("✓ 健康检查通过\n")
 
-	return db
+	return db, nil
 }
 
 // demonstrateCRUD 演示基本 CRUD 操作
-func demonstrateCRUD(db *mysql.DB) {
-	ctx := context.Background()
+func demonstrateCRUD(db *mysql.DB) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	// CREATE - 插入数据
 	fmt.Println("\n  [CREATE] 插入用户")
 	insertSQL := `INSERT INTO users (username, email, created_at) VALUES (?, ?, ?)`
 	result, err := db.ExecContext(ctx, insertSQL, "john_doe", "john@example.com", time.Now())
 	if err != nil {
-		log.Printf("插入失败: %v", err)
-	} else {
-		lastID, _ := result.LastInsertId()
-		rowsAffected, _ := result.RowsAffected()
-		fmt.Printf("  ✓ 插入成功 - ID: %d, 影响行数: %d\n", lastID, rowsAffected)
+		return fmt.Errorf("insert user: %w", err)
 	}
+	lastID, err := result.LastInsertId()
+	if err != nil {
+		return fmt.Errorf("read inserted user ID: %w", err)
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read inserted user row count: %w", err)
+	}
+	fmt.Printf("  ✓ User inserted - ID: %d, rows affected: %d\n", lastID, rowsAffected)
 
 	// READ - 查询单条数据
 	fmt.Println("\n  [READ] 查询单个用户")
@@ -111,41 +150,44 @@ func demonstrateCRUD(db *mysql.DB) {
 	err = db.QueryRowContext(ctx, querySQL, "john_doe").Scan(
 		&user.ID, &user.Username, &user.Email, &user.CreatedAt,
 	)
-	if err != nil && err != sql.ErrNoRows {
-		log.Printf("查询失败: %v", err)
-	} else if err == sql.ErrNoRows {
-		fmt.Printf("  未找到用户\n")
-	} else {
-		fmt.Printf("  ✓ 用户信息: ID=%d, Username=%s, Email=%s\n",
-			user.ID, user.Username, user.Email)
+	if err != nil {
+		return fmt.Errorf("query user: %w", err)
 	}
+	fmt.Printf("  ✓ User: ID=%d, Username=%s, Email=%s\n",
+		user.ID, user.Username, user.Email)
 
 	// UPDATE - 更新数据
 	fmt.Println("\n  [UPDATE] 更新用户邮箱")
 	updateSQL := `UPDATE users SET email = ? WHERE username = ?`
 	result, err = db.ExecContext(ctx, updateSQL, "newemail@example.com", "john_doe")
 	if err != nil {
-		log.Printf("更新失败: %v", err)
-	} else {
-		rowsAffected, _ := result.RowsAffected()
-		fmt.Printf("  ✓ 更新成功 - 影响行数: %d\n", rowsAffected)
+		return fmt.Errorf("update user email: %w", err)
 	}
+	rowsAffected, err = result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read updated user row count: %w", err)
+	}
+	fmt.Printf("  ✓ User updated - rows affected: %d\n", rowsAffected)
 
 	// DELETE - 删除数据（示例，实际可能不执行）
 	fmt.Println("\n  [DELETE] 删除用户")
 	deleteSQL := `DELETE FROM users WHERE username = ?`
 	result, err = db.ExecContext(ctx, deleteSQL, "john_doe")
 	if err != nil {
-		log.Printf("删除失败: %v", err)
-	} else {
-		rowsAffected, _ := result.RowsAffected()
-		fmt.Printf("  ✓ 删除成功 - 影响行数: %d\n", rowsAffected)
+		return fmt.Errorf("delete user: %w", err)
 	}
+	rowsAffected, err = result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read deleted user row count: %w", err)
+	}
+	fmt.Printf("  ✓ User deleted - rows affected: %d\n", rowsAffected)
+	return nil
 }
 
 // demonstrateTransaction 演示事务使用
-func demonstrateTransaction(db *mysql.DB) {
-	ctx := context.Background()
+func demonstrateTransaction(db *mysql.DB) (resultErr error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	fmt.Println("\n  场景：转账事务（扣款 + 加款必须同时成功）")
 
@@ -156,7 +198,7 @@ func demonstrateTransaction(db *mysql.DB) {
 			`UPDATE accounts SET balance = balance - ? WHERE user_id = ?`,
 			100.0, 1)
 		if err != nil {
-			return fmt.Errorf("扣款失败: %w", err)
+			return fmt.Errorf("debit account 1: %w", err)
 		}
 		fmt.Printf("  ✓ 账户 1 扣款 100 元\n")
 
@@ -165,7 +207,7 @@ func demonstrateTransaction(db *mysql.DB) {
 			`UPDATE accounts SET balance = balance + ? WHERE user_id = ?`,
 			100.0, 2)
 		if err != nil {
-			return fmt.Errorf("加款失败: %w", err)
+			return fmt.Errorf("credit account 2: %w", err)
 		}
 		fmt.Printf("  ✓ 账户 2 加款 100 元\n")
 
@@ -176,40 +218,41 @@ func demonstrateTransaction(db *mysql.DB) {
 	})
 
 	if err != nil {
-		fmt.Printf("  ✗ 事务失败（已回滚）: %v\n", err)
-	} else {
-		fmt.Printf("  ✓ 事务提交成功\n")
+		return fmt.Errorf("execute transfer transaction: %w", err)
 	}
+	fmt.Printf("  ✓ Transaction committed\n")
 
 	// 手动事务控制示例
 	fmt.Println("\n  手动事务控制示例")
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		log.Printf("开始事务失败: %v", err)
-		return
+		return fmt.Errorf("begin manual transaction: %w", err)
 	}
 
-	// 记得 defer rollback（如果 commit 成功则 rollback 无效）
-	defer tx.Rollback()
+	// Commit 成功后 Rollback 返回 sql.ErrTxDone，不属于关闭失败。
+	defer func() {
+		if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+			resultErr = errors.Join(resultErr, fmt.Errorf("roll back manual transaction: %w", err))
+		}
+	}()
 
 	// 执行操作
 	_, err = tx.ExecContext(ctx, `INSERT INTO logs (message) VALUES (?)`, "事务日志")
 	if err != nil {
-		fmt.Printf("  ✗ 插入失败，自动回滚\n")
-		return
+		return fmt.Errorf("insert manual transaction log: %w", err)
 	}
 
 	// 提交事务
 	if err := tx.Commit(); err != nil {
-		fmt.Printf("  ✗ 提交失败: %v\n", err)
-		return
+		return fmt.Errorf("commit manual transaction: %w", err)
 	}
 
 	fmt.Printf("  ✓ 手动事务提交成功\n")
+	return nil
 }
 
 // monitorConnectionPool 连接池监控
-func monitorConnectionPool(db *mysql.DB) {
+func monitorConnectionPool(db *mysql.DB) error {
 	// 获取连接池统计信息
 	stats := db.Stats()
 
@@ -227,38 +270,39 @@ func monitorConnectionPool(db *mysql.DB) {
 	defer cancel()
 
 	if err := db.Health(ctx); err != nil {
-		fmt.Printf("  ✗ 健康检查失败: %v\n", err)
-	} else {
-		fmt.Printf("  ✓ 健康检查通过\n")
+		return fmt.Errorf("check MySQL pool health: %w", err)
 	}
+	fmt.Printf("  ✓ Health check passed\n")
+	return nil
 }
 
 // demonstrateAdvancedQuery 高级查询示例
-func demonstrateAdvancedQuery(db *mysql.DB) {
-	ctx := context.Background()
+func demonstrateAdvancedQuery(db *mysql.DB) error {
+	ctx, cancelContext := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelContext()
 
 	// 1. 批量查询
 	fmt.Println("\n  [批量查询] 查询多个用户")
 	rows, err := db.QueryContext(ctx, `SELECT id, username, email FROM users LIMIT 10`)
 	if err != nil {
-		log.Printf("查询失败: %v", err)
-		return
+		return fmt.Errorf("query users: %w", err)
 	}
-	defer rows.Close()
 
 	count := 0
 	for rows.Next() {
 		var user User
 		if err := rows.Scan(&user.ID, &user.Username, &user.Email); err != nil {
-			log.Printf("扫描失败: %v", err)
-			continue
+			return errors.Join(fmt.Errorf("scan user row: %w", err), rows.Close())
 		}
 		count++
 		fmt.Printf("  - User: ID=%d, Username=%s\n", user.ID, user.Username)
 	}
 
 	if err := rows.Err(); err != nil {
-		log.Printf("遍历失败: %v", err)
+		return errors.Join(fmt.Errorf("iterate user rows: %w", err), rows.Close())
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close user rows: %w", err)
 	}
 	fmt.Printf("  ✓ 查询到 %d 个用户\n", count)
 
@@ -270,19 +314,16 @@ func demonstrateAdvancedQuery(db *mysql.DB) {
 
 	var totalUsers int
 	if err := row.Scan(&totalUsers); err != nil {
-		log.Printf("查询失败: %v", err)
-	} else {
-		fmt.Printf("  ✓ 总用户数: %d\n", totalUsers)
+		return fmt.Errorf("count users: %w", err)
 	}
+	fmt.Printf("  ✓ Total users: %d\n", totalUsers)
 
 	// 3. 预处理语句（性能优化）
 	fmt.Println("\n  [预处理语句] 批量插入")
 	stmt, err := db.PrepareContext(ctx, `INSERT INTO users (username, email, created_at) VALUES (?, ?, ?)`)
 	if err != nil {
-		log.Printf("预处理失败: %v", err)
-		return
+		return fmt.Errorf("prepare user insert: %w", err)
 	}
-	defer stmt.Close()
 
 	users := []struct {
 		username string
@@ -296,8 +337,12 @@ func demonstrateAdvancedQuery(db *mysql.DB) {
 	for _, u := range users {
 		_, err := stmt.ExecContext(ctx, u.username, u.email, time.Now())
 		if err != nil {
-			log.Printf("插入 %s 失败: %v", u.username, err)
+			return errors.Join(fmt.Errorf("insert user %s: %w", u.username, err), stmt.Close())
 		}
 	}
+	if err := stmt.Close(); err != nil {
+		return fmt.Errorf("close user insert statement: %w", err)
+	}
 	fmt.Printf("  ✓ 批量插入完成\n")
+	return nil
 }

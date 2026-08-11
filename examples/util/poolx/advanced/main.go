@@ -11,7 +11,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,36 +22,50 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
 	fmt.Println("=== 协程池高级示例 ===")
 	fmt.Println()
 
-	// 示例 1: 自动扩缩容
-	autoScalingExample()
+	if err := autoScalingExample(); err != nil {
+		return err
+	}
 
 	// 示例 2: 优先级队列
-	priorityQueueExample()
+	if err := priorityQueueExample(); err != nil {
+		return err
+	}
 
-	// 示例 3: Async/Await 模式
-	asyncAwaitExample()
+	if err := asyncAwaitExample(); err != nil {
+		return err
+	}
 
-	// 示例 4: Context 取消
-	contextCancellationExample()
+	if err := contextCancellationExample(); err != nil {
+		return err
+	}
 
-	// 示例 5: 指标监控
-	metricsMonitoringExample()
+	if err := metricsMonitoringExample(); err != nil {
+		return err
+	}
 
 	// 示例 6: 命名池
 	namedPoolsExample()
 
-	// 示例 7: 全局池 (Go/GoCtx)
-	globalPoolExample()
+	if err := globalPoolExample(); err != nil {
+		return err
+	}
 
 	fmt.Println()
 	fmt.Println("=== 所有高级示例完成 ===")
+	return nil
 }
 
 // autoScalingExample 演示自动扩缩容配置
-func autoScalingExample() {
+func autoScalingExample() error {
 	fmt.Println("--- 示例 1: 自动扩缩容 ---")
 
 	p := poolx.New("autoscale-pool",
@@ -66,10 +82,13 @@ func autoScalingExample() {
 	var wg sync.WaitGroup
 	for i := 0; i < 50; i++ {
 		wg.Add(1)
-		_ = p.Submit(func() {
+		if err := p.Submit(func() {
+			defer wg.Done()
 			time.Sleep(50 * time.Millisecond)
+		}); err != nil {
 			wg.Done()
-		})
+			return fmt.Errorf("submit auto-scaling task %d: %w", i, err)
+		}
 	}
 
 	// 检查负载期间的 worker 数量
@@ -82,29 +101,24 @@ func autoScalingExample() {
 	time.Sleep(1 * time.Second)
 	fmt.Printf("缩容后 worker 数: %d\n", p.Running())
 	fmt.Println()
+	return nil
 }
 
 // priorityQueueExample 演示优先级调度
-func priorityQueueExample() {
+func priorityQueueExample() error {
 	fmt.Println("--- 示例 2: 优先级队列 ---")
+	order, err := priorityExecutionOrder()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Execution order (highest priority first): %v\n", order)
+	fmt.Println()
+	return nil
+}
 
-	p := poolx.New("priority-pool",
-		poolx.WithMaxWorkers(1), // 单 worker 以显示顺序
-		poolx.WithPriorityQueue(true),
-		poolx.WithAutoScale(false),
-	)
-	defer p.Release()
-
-	// 阻塞 worker
-	blocker := make(chan struct{})
-	_ = p.Submit(func() {
-		<-blocker
-	})
-
-	time.Sleep(10 * time.Millisecond)
-
+func priorityExecutionOrder() ([]int, error) {
+	queue := poolx.NewPriorityQueue(4)
 	var order []int
-	var mu sync.Mutex
 
 	// 提交不同优先级的任务
 	priorities := []struct {
@@ -118,61 +132,63 @@ func priorityQueueExample() {
 	}
 
 	for _, pr := range priorities {
-		priority := pr.priority
 		label := pr.label
-		_ = poolx.DefaultPool().SubmitWithOptions(func() {
-			mu.Lock()
+		if ok := queue.Push(func() {
 			order = append(order, label)
-			mu.Unlock()
-		}, poolx.WithTaskPriority(priority))
+		}, pr.priority); !ok {
+			return nil, fmt.Errorf("enqueue priority task %d: queue is full", label)
+		}
 	}
 
-	close(blocker)
-	time.Sleep(100 * time.Millisecond)
-	fmt.Printf("执行顺序 (高优先级先执行): %v\n", order)
-	fmt.Println()
+	for !queue.IsEmpty() {
+		task := queue.Pop()
+		if task == nil {
+			return nil, fmt.Errorf("pop priority task: queue returned nil before becoming empty")
+		}
+		task()
+	}
+	return order, nil
 }
 
 // asyncAwaitExample 演示 Async/Await 模式
-func asyncAwaitExample() {
+func asyncAwaitExample() error {
 	fmt.Println("--- 示例 3: Async/Await 模式 ---")
 
 	// Async: 异步启动任务
 	f1 := poolx.Async(func() (string, error) {
 		time.Sleep(10 * time.Millisecond)
-		return "结果 1", nil
+		return "result 1", nil
 	})
 
 	f2 := poolx.Async(func() (string, error) {
 		time.Sleep(20 * time.Millisecond)
-		return "结果 2", nil
+		return "result 2", nil
 	})
 
 	f3 := poolx.Async(func() (string, error) {
 		time.Sleep(5 * time.Millisecond)
-		return "结果 3", nil
+		return "result 3", nil
 	})
 
 	// Await 第一个完成的
 	result, idx, err := poolx.AwaitFirst(f1, f2, f3)
 	if err != nil {
-		fmt.Printf("错误: %v\n", err)
-	} else {
-		fmt.Printf("第一个结果: %q (索引: %d)\n", result, idx)
+		return fmt.Errorf("await first future: %w", err)
 	}
+	fmt.Printf("First result: %q (index: %d)\n", result, idx)
 
 	// Await 所有完成
 	results, err := poolx.AwaitAll(f1, f2, f3)
 	if err != nil {
-		fmt.Printf("错误: %v\n", err)
-	} else {
-		fmt.Printf("所有结果: %v\n", results)
+		return fmt.Errorf("await all futures: %w", err)
 	}
+	fmt.Printf("All results: %v\n", results)
 	fmt.Println()
+	return nil
 }
 
 // contextCancellationExample 演示 Context 取消
-func contextCancellationExample() {
+func contextCancellationExample() error {
 	fmt.Println("--- 示例 4: Context 取消 ---")
 
 	p := poolx.New("ctx-pool",
@@ -205,45 +221,69 @@ func contextCancellationExample() {
 	// 尝试获取结果
 	result, err := future.GetWithTimeout(100 * time.Millisecond)
 	fmt.Printf("已启动: %d, 已完成: %d\n", started.Load(), completed.Load())
-	if err != nil {
+	if errors.Is(err, context.Canceled) {
 		fmt.Printf("任务已取消: %v\n", err)
+	} else if err != nil {
+		return fmt.Errorf("wait for canceled future: %w", err)
 	} else {
-		fmt.Printf("结果: %s\n", result)
+		return fmt.Errorf("wait for canceled future: unexpected result %q", result)
 	}
 	fmt.Println()
+	return nil
 }
 
 // metricsMonitoringExample 演示指标采集
-func metricsMonitoringExample() {
+func metricsMonitoringExample() error {
 	fmt.Println("--- 示例 5: 指标监控 ---")
 
 	p := poolx.New("metrics-pool",
-		poolx.WithMaxWorkers(4),
+		poolx.WithMaxWorkers(1),
 		poolx.WithAutoScale(false),
 		poolx.WithNonBlocking(true),
 	)
 	defer p.Release()
 
-	// 提交各种任务
-	for i := 0; i < 100; i++ {
-		_ = p.Submit(func() {
-			time.Sleep(time.Millisecond)
-		})
+	// 先占满所有 worker，确定性触发非阻塞拒绝。
+	blocker := make(chan struct{})
+	var blockingTasks sync.WaitGroup
+	for i := 0; i < 1; i++ {
+		started := make(chan struct{})
+		blockingTasks.Add(1)
+		if err := p.Submit(func() {
+			defer blockingTasks.Done()
+			close(started)
+			<-blocker
+		}); err != nil {
+			blockingTasks.Done()
+			close(blocker)
+			return fmt.Errorf("submit metrics blocker %d: %w", i, err)
+		}
+		<-started
 	}
 
-	// 提交一个会 panic 的任务
-	_ = p.Submit(func() {
-		panic("测试 panic")
-	})
-
-	// 池满时尝试提交（可能被拒绝）
+	// 池满时提交必须被拒绝。
 	for i := 0; i < 10; i++ {
-		_ = p.Submit(func() {
-			time.Sleep(10 * time.Millisecond)
-		})
+		err := p.Submit(func() {})
+		if !errors.Is(err, poolx.ErrPoolOverload) {
+			close(blocker)
+			blockingTasks.Wait()
+			return fmt.Errorf("submit overloaded metrics task %d: got %v, want pool overload", i, err)
+		}
 	}
+	close(blocker)
+	blockingTasks.Wait()
 
-	time.Sleep(200 * time.Millisecond)
+	panicDone := make(chan struct{})
+	if err := p.Submit(func() {
+		defer close(panicDone)
+		panic("example panic")
+	}); err != nil {
+		return fmt.Errorf("submit metrics panic task: %w", err)
+	}
+	<-panicDone
+	if err := p.SubmitWait(func() {}); err != nil {
+		return fmt.Errorf("wait for metrics panic accounting: %w", err)
+	}
 
 	// 获取指标快照
 	snapshot := p.Metrics()
@@ -255,6 +295,7 @@ func metricsMonitoringExample() {
 	fmt.Printf("  运行 Worker:  %d\n", snapshot.RunningWorkers)
 	fmt.Printf("  成功率:       %.2f%%\n", snapshot.SuccessRate()*100)
 	fmt.Println()
+	return nil
 }
 
 // namedPoolsExample 演示命名池管理
@@ -287,32 +328,40 @@ func namedPoolsExample() {
 }
 
 // globalPoolExample 演示全局默认池
-func globalPoolExample() {
+func globalPoolExample() error {
 	fmt.Println("--- 示例 7: 全局池 ---")
 
 	var counter atomic.Int32
 
+	var wg sync.WaitGroup
+	wg.Add(2)
+
 	// 使用 Go() 简单异步执行
 	if err := poolx.Go(func() {
+		defer wg.Done()
 		counter.Add(1)
 	}); err != nil {
-		fmt.Printf("Go submission failed: %v\n", err)
+		wg.Done()
+		return fmt.Errorf("submit global task: %w", err)
 	}
 
 	// 使用 GoCtx() 带 context 执行
 	ctx := context.Background()
 	err := poolx.GoCtx(ctx, func(context.Context) {
+		defer wg.Done()
 		counter.Add(1)
 	})
 	if err != nil {
-		fmt.Printf("GoCtx 错误: %v\n", err)
+		wg.Done()
+		return fmt.Errorf("submit global context task: %w", err)
 	}
 
-	time.Sleep(50 * time.Millisecond)
+	wg.Wait()
 	fmt.Printf("全局池执行了 %d 个任务\n", counter.Load())
 
 	// 调整全局池容量
 	poolx.SetCap(100)
 	fmt.Printf("默认池容量: %d\n", poolx.DefaultPool().Cap())
 	fmt.Println()
+	return nil
 }

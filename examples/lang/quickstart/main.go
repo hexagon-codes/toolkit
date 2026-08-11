@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 
 	"github.com/hexagon-codes/toolkit/lang/conv"
 	"github.com/hexagon-codes/toolkit/lang/stringx"
@@ -9,6 +10,12 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
 	fmt.Println("=== gopkg 快速示例 ===")
 
 	// 1. 类型转换示例
@@ -25,7 +32,10 @@ func main() {
 
 	// JSON-Map 互转
 	jsonStr := `{"name":"张三","age":30,"active":true}`
-	m, _ := conv.JSONToMap(jsonStr)
+	m, err := conv.JSONToMap(jsonStr)
+	if err != nil {
+		return fmt.Errorf("convert JSON to map: %w", err)
+	}
 	fmt.Printf("  JSON to Map: %+v\n", m)
 
 	// Map 合并
@@ -58,4 +68,5 @@ func main() {
 	fmt.Printf("  Formatted: %s\n", formatted)
 
 	fmt.Println("\n✅ 示例完成!")
+	return nil
 }

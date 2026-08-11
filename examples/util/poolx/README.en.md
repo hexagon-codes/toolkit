@@ -81,10 +81,15 @@ func main() {
     var wg sync.WaitGroup
     for i := 0; i < 100; i++ {
         wg.Add(1)
-        p.Submit(func() {
+        if err := p.Submit(func() {
             defer wg.Done()
             // your task logic
-        })
+        }); err != nil {
+            wg.Done()
+            fmt.Printf("Submit failed: %v\n", err)
+            wg.Wait()
+            return
+        }
     }
     wg.Wait()
 
@@ -96,13 +101,13 @@ func main() {
 
 ## Performance Optimization Tips
 
-1. **Use TrySubmit for non-blocking operations** - ~34ns vs Submit's ~1100ns
+1. **Use TrySubmit when rejection is acceptable** - avoid waiting for an available worker
 2. **Use SubmitBatch for bulk tasks** - reduces lock contention overhead
 3. **Disable hooks when not needed** - Hooks add ~400ns overhead per task
 4. **Use PoolWithFunc for repeated operations** - higher memory efficiency
 5. **Tune worker count to workload** - start with NumCPU * 2 as baseline
 6. **Enable auto scaling for variable load** - automatically adjusts worker count
-7. **Use ShardedCounter for high-concurrency counting** - 14x faster than atomic.Int64
+7. **Evaluate ShardedCounter under contention** - benchmark with the real workload before adopting it
 
 ## Performance Benchmarks
 
@@ -112,37 +117,16 @@ Run benchmarks to see performance characteristics:
 go test ./util/poolx/... -bench=. -benchmem
 ```
 
-Typical results:
+Results depend on the CPU, Go version, concurrency, and task workload. Use the
+complete output from the current machine; do not treat one run's latency or
+ratio as an API performance guarantee.
 
-| Operation | Latency | Memory Allocation |
-|-----------|---------|-------------------|
-| Submit | ~1100 ns | 0 B |
-| TrySubmit | ~34 ns | 0 B |
-| SubmitBatch(10) | ~99 ns/task | 0 B |
-| PoolWithFunc.Invoke | ~1300 ns | 0 B |
-| PoolWithFunc.TryInvoke | ~38 ns | 0 B |
-| Future.SubmitFunc | ~2100 ns | 224 B |
-| Spinlock vs Mutex | 30 ns vs 74 ns | 2.5x faster |
-| ShardedCounter vs atomic | 3.5 ns vs 49 ns | 14x faster |
+## Selection Notes
 
-## Comparison with Other Libraries
-
-| Feature | poolx | ants | ByteDance gopool |
-|---------|---------|------|------------------|
-| Basic submit | ✅ | ✅ | ✅ |
-| Non-blocking submit | ✅ (~34ns) | ✅ (~100ns) | ❌ |
-| **Batch submit** | ✅ | ❌ | ❌ |
-| Cooperative context cancellation and timeout | ✅ | ❌ | ✅ |
-| Single-func pool | ✅ | ✅ | ❌ |
-| Future pattern | ✅ | ❌ | ❌ |
-| Priority queue | ✅ | ❌ | ❌ |
-| Auto scaling | ✅ | ❌ | ✅ |
-| Hook system | ✅ (10+) | ❌ | ❌ |
-| Cooperative task timeout with context | ✅ | ❌ | ❌ |
-| Multi-pool scheduling | ✅ | ✅ | ❌ |
-| **Work Stealing** | ✅ | ❌ | ❌ |
-| **Sharded counter** | ✅ | ❌ | ❌ |
-| **Assembly optimization** | ✅ | ❌ | ❌ |
+Features and performance across libraries change by version. Pin dependency
+versions and reproduce measurements with the same toolchain, hardware, and real
+workload. Validate cancellation, shutdown, overload, and panic lifecycle
+contracts separately.
 
 ## Full API Reference
 
@@ -154,12 +138,17 @@ mp, err := poolx.NewMultiPool(size, poolSize, strategy, opts...)
 
 // Task submit
 p.Submit(fn)                    // blocking submit
-p.TrySubmit(fn)                 // non-blocking submit (~34ns)
+p.TrySubmit(fn)                 // non-blocking; caller must handle rejection
 p.SubmitBatch(fns)              // batch submit
 p.TrySubmitBatch(fns)           // non-blocking batch submit
 p.SubmitWait(fn)                // submit and wait for completion
 p.SubmitWithContext(ctx, contextTask) // contextTask: func(context.Context)
 p.SubmitWithOptions(fn, opts)   // submit with options
+
+// Standalone priority queue
+queue := poolx.NewPriorityQueue(capacity)
+queue.Push(fn, priority)        // false when the bounded queue is full
+queue.Pop()                     // pop the highest-priority task
 
 // Future pattern
 poolx.SubmitFunc(p, fn)       // returns Future[T]
@@ -191,7 +180,6 @@ poolx.WithMaxWorkers(100)        // max worker count
 poolx.WithMinWorkers(10)         // min worker count
 poolx.WithAutoScale(true)        // enable auto scaling
 poolx.WithWorkStealing(true)     // enable Work Stealing
-poolx.WithPriorityQueue(true)    // enable priority queue
 poolx.WithNonBlocking(true)      // non-blocking mode
 poolx.WithHooks(hooks)           // hook callbacks
 poolx.WithPanicHandler(fn)       // panic handler

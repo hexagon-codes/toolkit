@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/hexagon-codes/toolkit/infra/db/mysql"
@@ -13,33 +15,58 @@ import (
 )
 
 func main() {
-	fmt.Println("=== GoPkg DB 示例 ===")
-
-	// MySQL 示例
-	mysqlExample()
-
-	// Redis 示例
-	redisExample()
-
-	// 分布式锁示例
-	lockExample()
-
-	fmt.Println("\n✅ 示例完成!")
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
 }
 
-func mysqlExample() {
-	fmt.Println("📦 MySQL 示例:")
+func run() error {
+	fmt.Println("=== GoPkg Database Example ===")
 
-	// 初始化 MySQL（实际使用时需要有效的 DSN）
-	config := mysql.DefaultConfig("root:password@tcp(localhost:3306)/test?parseTime=true")
-
-	// 注意：这里会连接失败，因为没有真实的 MySQL 服务
-	// 实际使用时请提供有效的 DSN
-	_, err := mysql.New(config)
-	if err != nil {
-		fmt.Printf("  ⚠️  MySQL 连接失败（预期行为）: %v\n", err)
-		return
+	mysqlDSN, mysqlConfigured := configuredMySQLDSN()
+	if !mysqlConfigured {
+		fmt.Println("Set MYSQL_DSN to run the MySQL example.")
+	} else if err := mysqlExample(mysqlDSN); err != nil {
+		return err
 	}
+
+	redisAddress, redisConfigured := configuredRedisAddress()
+	if !redisConfigured {
+		fmt.Println("Set REDIS_ADDR to run the Redis examples.")
+	} else {
+		if err := redisExample(redisAddress); err != nil {
+			return err
+		}
+		if err := lockExample(redisAddress); err != nil {
+			return err
+		}
+	}
+
+	fmt.Println("\n✅ 示例完成!")
+	return nil
+}
+
+func configuredMySQLDSN() (string, bool) {
+	dsn := strings.TrimSpace(os.Getenv("MYSQL_DSN"))
+	return dsn, dsn != ""
+}
+
+func configuredRedisAddress() (string, bool) {
+	addr := strings.TrimSpace(os.Getenv("REDIS_ADDR"))
+	return addr, addr != ""
+}
+
+func mysqlExample(dsn string) (resultErr error) {
+	fmt.Println("📦 MySQL Example:")
+
+	config := mysql.DefaultConfig(dsn)
+	db, err := mysql.New(config)
+	if err != nil {
+		return fmt.Errorf("open MySQL client: %w", err)
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, db.Close())
+	}()
 
 	// 示例代码（连接成功后执行）
 	fmt.Println("  - 创建用户表")
@@ -47,57 +74,73 @@ func mysqlExample() {
 	fmt.Println("  - 查询用户列表")
 	fmt.Println("  - 事务操作")
 	fmt.Println()
+	return nil
 }
 
-func redisExample() {
+func redisExample(addr string) (resultErr error) {
 	fmt.Println("📦 Redis 示例:")
 
-	// 默认连接 localhost:6379；可通过环境变量提供实际地址和 ACL/TLS 配置。
 	connectCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	client, err := newRedisClient(connectCtx)
+	client, err := newRedisClient(connectCtx, addr)
 	cancel()
 	if err != nil {
-		fmt.Printf("  ⚠️  Redis 连接失败: %v\n", err)
-		return
+		return fmt.Errorf("open Redis client: %w", err)
 	}
-	defer client.Close()
-	ctx := context.Background()
+	defer func() {
+		resultErr = errors.Join(resultErr, client.Close())
+	}()
+	ctx, cancelOperations := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelOperations()
 
 	// Set
 	fmt.Println("  - Set key: name = Alice")
-	client.Set(ctx, "name", "Alice", time.Minute)
+	if err := client.Set(ctx, "name", "Alice", time.Minute).Err(); err != nil {
+		return fmt.Errorf("set name: %w", err)
+	}
 
 	// Get
-	val, _ := client.Get(ctx, "name").Result()
+	val, err := client.Get(ctx, "name").Result()
+	if err != nil {
+		return fmt.Errorf("get name: %w", err)
+	}
 	fmt.Printf("  - Get key: name = %s\n", val)
 
 	// Incr
-	client.Incr(ctx, "counter")
+	if err := client.Incr(ctx, "counter").Err(); err != nil {
+		return fmt.Errorf("increment counter: %w", err)
+	}
 	fmt.Println("  - Incr counter")
 
 	// Hash
-	client.HSet(ctx, "user:1", "name", "Bob", "age", 25)
+	if err := client.HSet(ctx, "user:1", "name", "Bob", "age", 25).Err(); err != nil {
+		return fmt.Errorf("set user hash: %w", err)
+	}
 	fmt.Println("  - HSet user:1")
 
 	// List
-	client.LPush(ctx, "queue", "task1", "task2")
+	if err := client.LPush(ctx, "queue", "task1", "task2").Err(); err != nil {
+		return fmt.Errorf("push queue items: %w", err)
+	}
 	fmt.Println("  - LPush queue")
 
 	fmt.Println()
+	return nil
 }
 
-func lockExample() {
+func lockExample(addr string) (resultErr error) {
 	fmt.Println("🔒 分布式锁示例:")
 
 	connectCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	client, err := newRedisClient(connectCtx)
+	client, err := newRedisClient(connectCtx, addr)
 	cancel()
 	if err != nil {
-		fmt.Printf("  ⚠️  Redis 连接失败: %v\n", err)
-		return
+		return fmt.Errorf("open Redis lock client: %w", err)
 	}
-	defer client.Close()
-	ctx := context.Background()
+	defer func() {
+		resultErr = errors.Join(resultErr, client.Close())
+	}()
+	ctx, cancelOperations := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelOperations()
 
 	// 使用 WithLock 自动管理锁（使用 UniversalClient）
 	err = redis.WithLock(ctx, client.UniversalClient, "lock:resource", 30*time.Second, func() error {
@@ -109,19 +152,15 @@ func lockExample() {
 	})
 
 	if err != nil {
-		log.Printf("  ❌ 锁操作失败: %v", err)
-		return
+		return fmt.Errorf("execute Redis lock example: %w", err)
 	}
 
 	fmt.Println("  - 锁已自动释放")
 	fmt.Println()
+	return nil
 }
 
-func newRedisClient(ctx context.Context) (*redis.Client, error) {
-	addr := os.Getenv("REDIS_ADDR")
-	if addr == "" {
-		addr = "localhost:6379"
-	}
+func newRedisClient(ctx context.Context, addr string) (*redis.Client, error) {
 	config := redis.DefaultConfig(redis.ModeSingle, addr)
 	config.DataCredentials = redis.Credentials{
 		Username: os.Getenv("REDIS_USERNAME"),

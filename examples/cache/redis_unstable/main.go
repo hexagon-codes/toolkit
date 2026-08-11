@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/hexagon-codes/toolkit/cache/redis"
@@ -18,10 +20,18 @@ type Model struct {
 }
 
 func main() {
-	ctx := context.Background()
-	addr := os.Getenv("REDIS_ADDR")
-	if addr == "" {
-		addr = "localhost:6379"
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() (resultErr error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	addr, redisConfigured := configuredRedisAddress()
+	if !redisConfigured {
+		fmt.Println("Set REDIS_ADDR to run this example.")
+		return nil
 	}
 	connection := redisconn.DefaultConfig(redisconn.ModeSingle, addr)
 	connection.DataCredentials = redisconn.Credentials{
@@ -33,15 +43,17 @@ func main() {
 	}
 	factory, err := redisconn.NewFactory(connection)
 	if err != nil {
-		log.Fatalf("Redis 配置无效: %v", err)
+		return fmt.Errorf("create Redis factory: %w", err)
 	}
 	startupCtx, cancelStartup := context.WithTimeout(ctx, 5*time.Second)
 	rdb, err := factory.Open(startupCtx)
 	cancelStartup()
 	if err != nil {
-		log.Fatalf("Redis 连接失败: %v", err)
+		return fmt.Errorf("open Redis client: %w", err)
 	}
-	defer rdb.Close()
+	defer func() {
+		resultErr = errors.Join(resultErr, rdb.Close())
+	}()
 
 	// 创建不稳定 key 缓存（带版本号）
 	cache := redis.NewUnstableCache(rdb, "myapp:models:version",
@@ -80,13 +92,12 @@ func main() {
 		},
 	)
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("load chat model list: %w", err)
 	}
 	fmt.Printf("Chat 模型: %+v\n", chatModels)
 	fmt.Printf("当前版本: v%d\n\n", cache.GetVersion())
 
-	// 第二次获取（缓存命中）
-	time.Sleep(100 * time.Millisecond) // 确保异步写入完成
+	// 第二次获取（前一次调用已同步完成缓存写入）
 	var chatModels2 []Model
 	err = cache.GetOrLoad(
 		ctx,
@@ -99,7 +110,7 @@ func main() {
 		},
 	)
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("load cached chat model list: %w", err)
 	}
 	fmt.Printf("Chat 模型 (缓存命中): %+v\n\n", chatModels2)
 
@@ -110,7 +121,7 @@ func main() {
 	// 递增版本号
 	err = cache.InvalidateVersion(ctx)
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("invalidate model cache version: %w", err)
 	}
 	fmt.Printf("版本号已递增: v%d\n\n", cache.GetVersion())
 
@@ -130,7 +141,7 @@ func main() {
 		},
 	)
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("reload chat model list: %w", err)
 	}
 	fmt.Printf("Chat 模型 (更新后): %+v\n\n", chatModels3)
 
@@ -151,16 +162,21 @@ func main() {
 		},
 	)
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("load image model list: %w", err)
 	}
 	fmt.Printf("Image 模型: %+v\n", imageModels)
 
 	// 批量删除所有 models:group:* key
-	time.Sleep(100 * time.Millisecond)
 	fmt.Println("\n批量删除 models:group:* ...")
 	err = cache.InvalidatePattern(ctx, "models:group:*")
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("invalidate model cache pattern: %w", err)
 	}
 	fmt.Println("批量删除完成")
+	return nil
+}
+
+func configuredRedisAddress() (string, bool) {
+	addr := strings.TrimSpace(os.Getenv("REDIS_ADDR"))
+	return addr, addr != ""
 }

@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/hexagon-codes/toolkit/cache/redis"
@@ -19,10 +21,18 @@ type Product struct {
 }
 
 func main() {
-	ctx := context.Background()
-	addr := os.Getenv("REDIS_ADDR")
-	if addr == "" {
-		addr = "localhost:6379"
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() (resultErr error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	addr, redisConfigured := configuredRedisAddress()
+	if !redisConfigured {
+		fmt.Println("Set REDIS_ADDR to run this example.")
+		return nil
 	}
 	connection := redisconn.DefaultConfig(redisconn.ModeSingle, addr)
 	connection.DataCredentials = redisconn.Credentials{
@@ -34,15 +44,17 @@ func main() {
 	}
 	factory, err := redisconn.NewFactory(connection)
 	if err != nil {
-		log.Fatalf("Redis 配置无效: %v", err)
+		return fmt.Errorf("create Redis factory: %w", err)
 	}
 	startupCtx, cancelStartup := context.WithTimeout(ctx, 5*time.Second)
 	rdb, err := factory.Open(startupCtx)
 	cancelStartup()
 	if err != nil {
-		log.Fatalf("Redis 连接失败: %v", err)
+		return fmt.Errorf("open Redis client: %w", err)
 	}
-	defer rdb.Close()
+	defer func() {
+		resultErr = errors.Join(resultErr, rdb.Close())
+	}()
 
 	// 创建稳定 key 缓存
 	cache := redis.NewStableCache(rdb,
@@ -75,12 +87,11 @@ func main() {
 		},
 	)
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("load product 100: %w", err)
 	}
 	fmt.Printf("产品 1: %+v\n", product)
 
-	// 第二次获取（缓存命中）
-	time.Sleep(100 * time.Millisecond) // 确保异步写入完成
+	// 第二次获取（前一次调用已同步完成缓存写入）
 	var product2 Product
 	err = cache.GetOrLoad(
 		ctx,
@@ -93,7 +104,7 @@ func main() {
 		},
 	)
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("load cached product 100: %w", err)
 	}
 	fmt.Printf("产品 2 (缓存命中): %+v\n", product2)
 
@@ -101,14 +112,16 @@ func main() {
 	newProduct := Product{ID: 300, Name: "iPad", Price: 599.99}
 	err = cache.Set(ctx, "product:300", newProduct, 5*time.Minute)
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("cache product 300: %w", err)
 	}
 	fmt.Println("已写入产品 300 到缓存")
 
 	// 示例 3: 删除缓存（模拟更新场景）
 	fmt.Println("\n模拟更新产品 100...")
 	db[100] = Product{ID: 100, Name: "iPhone Pro", Price: 1099.99}
-	cache.Del(ctx, "product:100")
+	if err := cache.Del(ctx, "product:100"); err != nil {
+		return fmt.Errorf("delete product 100 cache: %w", err)
+	}
 	fmt.Println("已删除产品 100 的缓存")
 
 	// 再次获取（从数据库获取新数据）
@@ -127,7 +140,13 @@ func main() {
 		},
 	)
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("reload product 100: %w", err)
 	}
 	fmt.Printf("产品 3 (更新后): %+v\n", product3)
+	return nil
+}
+
+func configuredRedisAddress() (string, bool) {
+	addr := strings.TrimSpace(os.Getenv("REDIS_ADDR"))
+	return addr, addr != ""
 }

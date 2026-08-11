@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -15,6 +16,12 @@ type User struct {
 }
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() (resultErr error) {
 	// 创建本地缓存（最多 1000 条）
 	cache := local.NewCache(1000,
 		local.WithPrefix("myapp"),
@@ -23,7 +30,10 @@ func main() {
 			log.Printf("缓存错误: op=%s key=%s err=%v", op, key, err)
 		}),
 	)
-	defer cache.Stop()
+	defer func() {
+		resultErr = errors.Join(resultErr, cache.Close())
+	}()
+	ctx := context.Background()
 
 	// 模拟数据库查询
 	db := map[int]User{
@@ -34,7 +44,7 @@ func main() {
 	// 示例 1: 获取存在的用户
 	var user User
 	err := cache.GetOrLoad(
-		context.Background(),
+		ctx,
 		"user:123",
 		10*time.Minute,
 		&user,
@@ -47,14 +57,14 @@ func main() {
 		},
 	)
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("load user 123: %w", err)
 	}
 	fmt.Printf("用户 1: %+v\n", user)
 
 	// 第二次获取（从缓存）
 	var user2 User
 	err = cache.GetOrLoad(
-		context.Background(),
+		ctx,
 		"user:123",
 		10*time.Minute,
 		&user2,
@@ -64,14 +74,14 @@ func main() {
 		},
 	)
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("load cached user 123: %w", err)
 	}
 	fmt.Printf("用户 2 (缓存命中): %+v\n", user2)
 
 	// 示例 2: 获取不存在的用户（负缓存）
 	var user3 User
 	err = cache.GetOrLoad(
-		context.Background(),
+		ctx,
 		"user:999",
 		10*time.Minute,
 		&user3,
@@ -83,14 +93,19 @@ func main() {
 			return nil, local.ErrNotFound
 		},
 	)
-	if err == local.ErrNotFound {
+	if errors.Is(err, local.ErrNotFound) {
 		fmt.Println("用户 999 不存在（负缓存）")
+	} else if err != nil {
+		return fmt.Errorf("load missing user 999: %w", err)
 	}
 
 	// 删除缓存
-	cache.Del(context.Background(), "user:123")
+	if err := cache.Del(ctx, "user:123"); err != nil {
+		return fmt.Errorf("delete user 123 cache: %w", err)
+	}
 	fmt.Println("已删除用户 123 的缓存")
 
 	// 查看缓存条目数
 	fmt.Printf("当前缓存条目数: %d\n", cache.Len())
+	return nil
 }

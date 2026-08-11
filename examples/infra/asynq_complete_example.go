@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	asq "github.com/hibiken/asynq"
@@ -21,6 +23,18 @@ import (
 // =========================================
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() (resultErr error) {
+	redisAddr, redisConfigured := configuredRedisAddress()
+	if !redisConfigured {
+		fmt.Println("Set REDIS_ADDR to run this example.")
+		return nil
+	}
+
 	fmt.Println("╔═══════════════════════════════════════════════╗")
 	fmt.Println("║   Asynq 完整示例 - 生产级实践                  ║")
 	fmt.Println("╚═══════════════════════════════════════════════╝")
@@ -33,36 +47,47 @@ func main() {
 
 	// 2. 初始化管理器
 	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 5*time.Second)
-	manager, err := initManager(startupCtx)
+	manager, err := initManager(startupCtx, redisAddr)
 	cancelStartup()
 	if err != nil {
-		log.Fatalf("❌ 初始化失败: %v", err)
+		return fmt.Errorf("initialize Asynq manager: %w", err)
 	}
+	defer func() {
+		resultErr = errors.Join(resultErr, manager.Stop())
+	}()
 
 	// 3. 注册 Workers
 	registerWorkers(manager)
 
 	// 4. 启动 Worker
 	if err := manager.Start(runCtx); err != nil {
-		log.Fatalf("❌ 启动失败: %v", err)
+		return fmt.Errorf("start Asynq manager: %w", err)
 	}
 
 	fmt.Println("✅ Worker 已启动")
 
 	// 5. 模拟业务场景：入队各种任务
-	demonstrateTaskQueuing(runCtx, manager)
+	if err := demonstrateTaskQueuing(runCtx, manager); err != nil {
+		return err
+	}
 
 	// 6. 等待任务处理
 	fmt.Println("\n⏳ 等待任务处理（15秒）...")
-	time.Sleep(15 * time.Second)
-
-	// 7. 优雅关闭
-	fmt.Println("\n🛑 优雅关闭...")
-	if err := manager.Stop(); err != nil {
-		log.Printf("关闭 Manager 失败: %v", err)
+	waitTimer := time.NewTimer(15 * time.Second)
+	defer waitTimer.Stop()
+	select {
+	case <-runCtx.Done():
+		return fmt.Errorf("wait for task processing: %w", runCtx.Err())
+	case <-waitTimer.C:
 	}
 
 	fmt.Println("\n✅ 示例完成!")
+	return nil
+}
+
+func configuredRedisAddress() (string, bool) {
+	addr := strings.TrimSpace(os.Getenv("REDIS_ADDR"))
+	return addr, addr != ""
 }
 
 // =========================================
@@ -84,13 +109,9 @@ func setupDependencies() {
 // 步骤 2：初始化管理器
 // =========================================
 
-func initManager(ctx context.Context) (*asynq.Manager, error) {
+func initManager(ctx context.Context, redisAddr string) (*asynq.Manager, error) {
 	fmt.Println("🚀 初始化 Asynq Manager...")
 
-	redisAddr := os.Getenv("REDIS_ADDR")
-	if redisAddr == "" {
-		redisAddr = "localhost:6379"
-	}
 	username := os.Getenv("REDIS_USERNAME")
 	password := os.Getenv("REDIS_PASSWORD")
 	if (username == "") != (password == "") {
@@ -144,7 +165,7 @@ func registerWorkers(manager *asynq.Manager) {
 // 步骤 5：演示任务入队
 // =========================================
 
-func demonstrateTaskQueuing(ctx context.Context, manager *asynq.Manager) {
+func demonstrateTaskQueuing(ctx context.Context, manager *asynq.Manager) error {
 	fmt.Println("📤 入队任务...")
 
 	// 场景 1：立即执行的高优先级任务
@@ -153,7 +174,9 @@ func demonstrateTaskQueuing(ctx context.Context, manager *asynq.Manager) {
 		Subject: "Welcome!",
 		Body:    "Thanks for signing up",
 	}
-	enqueueTask(ctx, manager, "email:send", emailPayload, asynq.QueueHigh, 0, 3)
+	if err := enqueueTask(ctx, manager, "email:send", emailPayload, asynq.QueueHigh, 0, 3); err != nil {
+		return err
+	}
 
 	// 场景 2：延迟执行的任务
 	reportPayload := ReportPayload{
@@ -161,7 +184,9 @@ func demonstrateTaskQueuing(ctx context.Context, manager *asynq.Manager) {
 		Month:  "2024-01",
 		UserID: 123,
 	}
-	enqueueTask(ctx, manager, "report:generate", reportPayload, asynq.QueueDefault, 5*time.Second, 2)
+	if err := enqueueTask(ctx, manager, "report:generate", reportPayload, asynq.QueueDefault, 5*time.Second, 2); err != nil {
+		return err
+	}
 
 	// 场景 3：计划任务（更长延迟）
 	syncPayload := DataSyncPayload{
@@ -169,14 +194,16 @@ func demonstrateTaskQueuing(ctx context.Context, manager *asynq.Manager) {
 		Target: "cache",
 		Tables: []string{"users", "orders"},
 	}
-	enqueueTask(ctx, manager, "data:sync", syncPayload, asynq.QueueLow, 10*time.Second, 1)
+	if err := enqueueTask(ctx, manager, "data:sync", syncPayload, asynq.QueueLow, 10*time.Second, 1); err != nil {
+		return err
+	}
+	return nil
 }
 
-func enqueueTask(ctx context.Context, manager *asynq.Manager, taskType string, payload interface{}, queue string, delay time.Duration, maxRetry int) {
+func enqueueTask(ctx context.Context, manager *asynq.Manager, taskType string, payload any, queue string, delay time.Duration, maxRetry int) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
-		fmt.Printf("   ❌ 序列化失败: %v\n", err)
-		return
+		return fmt.Errorf("marshal %s payload: %w", taskType, err)
 	}
 
 	opts := []asq.Option{
@@ -191,17 +218,21 @@ func enqueueTask(ctx context.Context, manager *asynq.Manager, taskType string, p
 	task := asq.NewTask(taskType, data)
 	info, err := manager.Enqueue(ctx, task, opts...)
 	if err != nil {
-		fmt.Printf("   ❌ 入队失败: %v\n", err)
-		return
+		return fmt.Errorf("enqueue %s task: %w", taskType, err)
 	}
 
 	delayMsg := ""
 	if delay > 0 {
 		delayMsg = fmt.Sprintf(", %s后处理", delay)
 	}
+	taskID := info.ID
+	if len(taskID) > 8 {
+		taskID = taskID[:8]
+	}
 
 	fmt.Printf("   ✅ [%s] %s | ID=%s, Retry=%d%s\n",
-		info.Queue, taskType, info.ID[:8], maxRetry, delayMsg)
+		info.Queue, taskType, taskID, maxRetry, delayMsg)
+	return nil
 }
 
 // =========================================
@@ -242,7 +273,7 @@ func (w *EmailWorker) ProcessTask(ctx context.Context, t *asq.Task) (err error) 
 	log.Printf("📧 [EmailWorker] 开始处理: to=%s, subject=%s", payload.To, payload.Subject)
 
 	// 业务逻辑：发送邮件
-	if err := w.sendEmail(&payload); err != nil {
+	if err := w.sendEmail(ctx, &payload); err != nil {
 		log.Printf("[EmailWorker] 发送失败: %v", err)
 		return err // 返回错误会触发重试
 	}
@@ -252,9 +283,15 @@ func (w *EmailWorker) ProcessTask(ctx context.Context, t *asq.Task) (err error) 
 	return nil
 }
 
-func (w *EmailWorker) sendEmail(payload *EmailPayload) error {
+func (w *EmailWorker) sendEmail(ctx context.Context, payload *EmailPayload) error {
 	// 模拟邮件发送
-	time.Sleep(1 * time.Second)
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("send email: %w", ctx.Err())
+	case <-timer.C:
+	}
 
 	// 模拟失败（10% 概率）
 	// if rand.Intn(10) == 0 {
@@ -290,7 +327,7 @@ func (w *ReportWorker) ProcessTask(ctx context.Context, t *asq.Task) error {
 		payload.Type, payload.Month, payload.UserID)
 
 	// 业务逻辑：生成报告
-	if err := w.generateReport(&payload); err != nil {
+	if err := w.generateReport(ctx, &payload); err != nil {
 		return err
 	}
 
@@ -298,10 +335,16 @@ func (w *ReportWorker) ProcessTask(ctx context.Context, t *asq.Task) error {
 	return nil
 }
 
-func (w *ReportWorker) generateReport(payload *ReportPayload) error {
+func (w *ReportWorker) generateReport(ctx context.Context, payload *ReportPayload) error {
 	// 模拟报告生成
-	time.Sleep(2 * time.Second)
-	return nil
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("generate report: %w", ctx.Err())
+	case <-timer.C:
+		return nil
+	}
 }
 
 // =========================================
@@ -331,7 +374,7 @@ func (w *DataSyncWorker) ProcessTask(ctx context.Context, t *asq.Task) error {
 
 	// 业务逻辑：数据同步
 	for _, table := range payload.Tables {
-		if err := w.syncTable(table, payload.Source, payload.Target); err != nil {
+		if err := w.syncTable(ctx, table, payload.Source, payload.Target); err != nil {
 			log.Printf("[DataSyncWorker] 同步失败: table=%s, err=%v", table, err)
 			return err
 		}
@@ -342,10 +385,16 @@ func (w *DataSyncWorker) ProcessTask(ctx context.Context, t *asq.Task) error {
 	return nil
 }
 
-func (w *DataSyncWorker) syncTable(table, source, target string) error {
+func (w *DataSyncWorker) syncTable(ctx context.Context, table, source, target string) error {
 	// 模拟数据同步
-	time.Sleep(500 * time.Millisecond)
-	return nil
+	timer := time.NewTimer(500 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("sync table %s: %w", table, ctx.Err())
+	case <-timer.C:
+		return nil
+	}
 }
 
 // =========================================
