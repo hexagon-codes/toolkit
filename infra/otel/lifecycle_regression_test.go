@@ -70,6 +70,16 @@ type finalizingLifecycleExporter struct {
 	shutdownErr   error
 }
 
+type shutdownCancelableLifecycleExporter struct {
+	exportStarted chan struct{}
+	exportDone    chan struct{}
+	stopExport    chan struct{}
+	startOnce     sync.Once
+	doneOnce      sync.Once
+	stopOnce      sync.Once
+	shutdownCalls atomic.Int32
+}
+
 type observedDoneContext struct {
 	context.Context
 	observed chan struct{}
@@ -134,6 +144,29 @@ func (e *finalizingLifecycleExporter) ExportSpans(_ context.Context, spans []*Sp
 func (e *finalizingLifecycleExporter) Shutdown(context.Context) error {
 	e.shutdownCalls.Add(1)
 	return e.shutdownErr
+}
+
+func (e *shutdownCancelableLifecycleExporter) ExportSpans(context.Context, []*SpanData) error {
+	e.startOnce.Do(func() {
+		close(e.exportStarted)
+		go func() {
+			<-e.stopExport
+			e.doneOnce.Do(func() { close(e.exportDone) })
+		}()
+	})
+	return nil
+}
+
+func (e *shutdownCancelableLifecycleExporter) Shutdown(ctx context.Context) error {
+	e.shutdownCalls.Add(1)
+	select {
+	case <-e.exportDone:
+		return nil
+	case <-ctx.Done():
+		e.stopOnce.Do(func() { close(e.stopExport) })
+		<-e.exportDone
+		return ctx.Err()
+	}
 }
 
 func (e *lifecycleProbeExporter) ExportSpans(context.Context, []*SpanData) error {
@@ -624,6 +657,150 @@ func TestTracerShutdownDeadlineWhileExportBlockedPreservesKnownErrors(t *testing
 	close(exporter.releaseBlocked)
 	waitForSignal(t, endDone, "blocked Span.End() did not return after release")
 	_ = tracer.Shutdown(context.Background())
+}
+
+// TestTracerShutdownDeadlineCancelsExporterOwnedWorkAfterGenerationDrain 锁定排空代际后由截止时间取消导出器自有任务。
+func TestTracerShutdownDeadlineCancelsExporterOwnedWorkAfterGenerationDrain(t *testing.T) {
+	exporter := &shutdownCancelableLifecycleExporter{
+		exportStarted: make(chan struct{}),
+		exportDone:    make(chan struct{}),
+		stopExport:    make(chan struct{}),
+	}
+	t.Cleanup(func() {
+		exporter.stopOnce.Do(func() { close(exporter.stopExport) })
+	})
+
+	tracer := NewTracer()
+	mustSetExporter(t, tracer, exporter)
+	_, span := tracer.StartSpan(context.Background(), "cancelable-in-flight")
+	endDone := make(chan struct{})
+	go func() {
+		span.End()
+		close(endDone)
+	}()
+	waitForSignal(t, exporter.exportStarted, "span export did not start")
+
+	shutdownContext, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if err := tracer.Shutdown(shutdownContext); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Shutdown() error = %v, want context.DeadlineExceeded", err)
+	}
+	waitForSignal(t, exporter.exportDone, "shutdown deadline did not cancel exporter-owned work")
+	waitForSignal(t, endDone, "Span.End() did not return after exporter cancellation")
+
+	finalDone := make(chan error, 1)
+	go func() {
+		finalDone <- tracer.Shutdown(context.Background())
+	}()
+	select {
+	case err := <-finalDone:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("final Shutdown() error = %v, want remembered deadline", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("final Shutdown() did not converge after exporter cancellation")
+	}
+	if got := exporter.shutdownCalls.Load(); got != 1 {
+		t.Fatalf("exporter Shutdown() calls = %d, want 1", got)
+	}
+}
+
+// TestTracerShutdownDeadlineDoesNotBypassGenerationDrain 锁定关闭截止时间不能绕过同步导出的代际排空。
+func TestTracerShutdownDeadlineDoesNotBypassGenerationDrain(t *testing.T) {
+	exporter := &blockingLifecycleExporter{
+		exportStarted:    make(chan struct{}),
+		releaseExport:    make(chan struct{}),
+		shutdownFinished: make(chan struct{}),
+	}
+	tracer := NewTracer()
+	mustSetExporter(t, tracer, exporter)
+
+	_, span := tracer.StartSpan(context.Background(), "drain-before-shutdown")
+	endDone := make(chan struct{})
+	go func() {
+		span.End()
+		close(endDone)
+	}()
+	waitForSignal(t, exporter.exportStarted, "span export did not start")
+
+	shutdownContext, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if err := tracer.Shutdown(shutdownContext); !errors.Is(err, context.DeadlineExceeded) {
+		close(exporter.releaseExport)
+		t.Fatalf("Shutdown() error = %v, want context.DeadlineExceeded", err)
+	}
+	if got := exporter.shutdownCalls.Load(); got != 0 {
+		close(exporter.releaseExport)
+		t.Fatalf("exporter Shutdown() calls before drain = %d, want 0", got)
+	}
+	if exporter.shutdownDuringExport.Load() {
+		close(exporter.releaseExport)
+		t.Fatal("exporter was shut down while ExportSpans() was in flight")
+	}
+
+	close(exporter.releaseExport)
+	waitForSignal(t, endDone, "Span.End() did not finish after export release")
+	waitForSignal(t, exporter.shutdownFinished, "exporter was not shut down after generation drain")
+	if err := tracer.Shutdown(context.Background()); err != nil {
+		t.Fatalf("final Shutdown() error = %v", err)
+	}
+	if got := exporter.shutdownCalls.Load(); got != 1 {
+		t.Fatalf("exporter Shutdown() calls = %d, want 1", got)
+	}
+}
+
+// TestTracerShutdownDeadlineFlushesActiveSpansBeforeExporterShutdown 锁定最终 Span 刷新先于导出器关闭。
+func TestTracerShutdownDeadlineFlushesActiveSpansBeforeExporterShutdown(t *testing.T) {
+	shutdownErr := errors.New("final exporter shutdown failed")
+	exporter := &finalizingLifecycleExporter{
+		exportStarted: make(chan []*SpanData, 1),
+		releaseExport: make(chan struct{}),
+		shutdownErr:   shutdownErr,
+	}
+	tracer := NewTracer()
+	mustSetExporter(t, tracer, exporter)
+	_, _ = tracer.StartSpan(context.Background(), "active-at-shutdown")
+
+	shutdownContext, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	shutdownDone := make(chan error, 1)
+	go func() {
+		shutdownDone <- tracer.Shutdown(shutdownContext)
+	}()
+	select {
+	case spans := <-exporter.exportStarted:
+		if len(spans) != 1 {
+			close(exporter.releaseExport)
+			t.Fatalf("final span count = %d, want 1", len(spans))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("final span flush did not start")
+	}
+	if err := <-shutdownDone; !errors.Is(err, context.DeadlineExceeded) {
+		close(exporter.releaseExport)
+		t.Fatalf("Shutdown() error = %v, want context.DeadlineExceeded", err)
+	}
+	if got := exporter.shutdownCalls.Load(); got != 0 {
+		close(exporter.releaseExport)
+		t.Fatalf("exporter Shutdown() calls before final flush = %d, want 0", got)
+	}
+
+	close(exporter.releaseExport)
+	finalDone := make(chan error, 1)
+	go func() {
+		finalDone <- tracer.Shutdown(context.Background())
+	}()
+	select {
+	case err := <-finalDone:
+		if !errors.Is(err, shutdownErr) {
+			t.Fatalf("final Shutdown() error = %v, want exporter shutdown error", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("final Shutdown() did not converge after final span flush")
+	}
+	if got := exporter.shutdownCalls.Load(); got != 1 {
+		t.Fatalf("exporter Shutdown() calls = %d, want 1", got)
+	}
 }
 
 // TestTracerShutdownDeadlineIncludesCompletedRetirementErrors 锁定超时时全部已知代际错误仍保留在错误链中。

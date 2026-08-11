@@ -172,7 +172,7 @@ func (t *Tracer) SetExporter(ctx context.Context, exporter Exporter) error {
 	if previous == nil {
 		return nil
 	}
-	previous.startRetirement(nil, t.reapRetirement)
+	previous.startRetirement(context.Background(), nil, t.reapRetirement)
 	_, err := previous.waitRetirement(ctx)
 	if err != nil {
 		return fmt.Errorf("shutdown previous exporter: %w", err)
@@ -193,7 +193,7 @@ func retireRejectedExporter(ctx context.Context, exporter Exporter) error {
 	}
 	generation := newExporterGeneration(exporter)
 	generation.beginDrain()
-	generation.startRetirement(nil, nil)
+	generation.startRetirement(context.Background(), nil, nil)
 	_, err := generation.waitRetirement(ctx)
 	if err != nil {
 		return fmt.Errorf("shutdown rejected exporter: %w", err)
@@ -321,8 +321,8 @@ func (t *Tracer) InjectTraceID(ctx context.Context, traceID string) context.Cont
 
 // Shutdown 关闭追踪器。
 //
-// 首次调用会原子终止全部活跃 Span 并启动所有导出器代际的退役。ctx 只约束当前
-// 调用等待关闭结果的时间；到期后退役仍会继续，后续调用可继续等待同一结果。
+// 首次调用会原子终止全部活跃 Span 并启动所有导出器代际的退役。ctx 约束当前
+// 调用的等待时间；代际排空并刷新最终 Span 后，导出器使用该 ctx 停止自有任务。
 func (t *Tracer) Shutdown(ctx context.Context) error {
 	t.mu.Lock()
 	if t.shutdownDone == nil {
@@ -360,9 +360,9 @@ func (t *Tracer) Shutdown(ctx context.Context) error {
 
 		for _, generation := range generations {
 			if generation == current {
-				generation.startRetirement(spans, t.reapRetirement)
+				generation.startRetirement(ctx, spans, t.reapRetirement)
 			} else {
-				generation.startRetirement(nil, t.reapRetirement)
+				generation.startRetirement(ctx, nil, t.reapRetirement)
 			}
 		}
 		go t.completeShutdown(generations)
@@ -375,7 +375,9 @@ func (t *Tracer) Shutdown(ctx context.Context) error {
 
 func (t *Tracer) completeShutdown(generations []*exporterGeneration) {
 	for _, generation := range generations {
-		_, _ = generation.waitRetirement(context.Background())
+		if _, err := generation.waitRetirement(context.Background()); err != nil {
+			continue
+		}
 	}
 	exportErr := t.exportErrorSnapshot()
 

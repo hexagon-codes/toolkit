@@ -117,6 +117,7 @@ func (l *exporterLease) release() {
 
 // startRetirement 只负责启动退役；全部外部调用均在代际锁之外执行。
 func (g *exporterGeneration) startRetirement(
+	shutdownCtx context.Context,
 	finalSpans []*SpanData,
 	onComplete func(*exporterGeneration, error),
 ) {
@@ -135,7 +136,7 @@ func (g *exporterGeneration) startRetirement(
 				}
 			}
 			var shutdownErr error
-			if err := g.exporter.Shutdown(context.Background()); err != nil {
+			if err := g.exporter.Shutdown(shutdownCtx); err != nil {
 				shutdownErr = fmt.Errorf("shutdown exporter: %w", err)
 			}
 			g.retireErr = errors.Join(flushErr, shutdownErr)
