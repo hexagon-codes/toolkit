@@ -109,6 +109,22 @@ jobs:
           path: toolkit
           persist-credentials: false
 
+      - name: Checkout ai-core
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: hexagon-codes/ai-core
+          ref: main
+          path: ai-core
+          persist-credentials: false
+
+      - name: Checkout hexagon
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: hexagon-codes/hexagon
+          ref: main
+          path: hexagon
+          persist-credentials: false
+
       - name: Checkout hexclaw
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -155,6 +171,8 @@ jobs:
           }
 
           remove_git_auth_config toolkit -C toolkit config --local
+          remove_git_auth_config ai-core -C ai-core config --local
+          remove_git_auth_config hexagon -C hexagon config --local
           remove_git_auth_config hexclaw -C hexclaw config --local
 
           if git config --global --name-only --get-regexp "$pattern"; then
@@ -199,7 +217,7 @@ jobs:
           unshare --version
 
       - name: Create Go workspace
-        run: go work init ./toolkit ./hexclaw
+        run: go work init ./toolkit ./ai-core ./hexagon ./hexclaw
 
       - name: Verify toolchain
         run: |
