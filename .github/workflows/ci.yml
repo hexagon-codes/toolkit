@@ -278,6 +278,10 @@ jobs:
           $credentialPattern = '^(http\..*\.extraheader|credential\..*|core\.askpass|url\..*\.insteadof)$'
           foreach ($scope in @("--local", "--global")) {
             $credentialKeys = @(git config $scope --name-only --get-regexp $credentialPattern 2>$null)
+            $gitConfigExitCode = $LASTEXITCODE
+            if ($gitConfigExitCode -ne 0 -and $gitConfigExitCode -ne 1) {
+              throw "Git credential configuration query failed for scope ${scope}: exit code $gitConfigExitCode"
+            }
             if ($credentialKeys.Count -ne 0) {
               throw "Git credential configuration must be absent before repository code runs: $scope"
             }
@@ -287,6 +291,7 @@ jobs:
               throw "Credential environment must be absent before repository code runs: $name"
             }
           }
+          $global:LASTEXITCODE = 0
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: '1.25.12'
@@ -448,9 +453,12 @@ jobs:
             "TestWindowsProcessQuarantineRetainsUnconfirmedResources"
             "TestWindowsSandboxCloseRetriesAndReclaimsQuarantinedLaunch"
             "TestWindowsSandboxCloseKeepsWorkspaceProtectedUntilRetriedReclaim"
+            "TestWindowsNativePostCreationFaultOwnership"
+            "TestWindowsNativePostCreationFaultCloseRetriesQuarantine"
+            "TestWindowsNativeRetainExecutionOwnership"
           )
-          if ($requiredTests.Count -ne 25) {
-            throw "The native Windows security gate must contain exactly 25 required tests."
+          if ($requiredTests.Count -ne 28) {
+            throw "The native Windows security gate must contain exactly 28 required tests."
           }
           $pattern = "^(" + ($requiredTests -join "|") + ")$"
           $listedTests = @(go test -tags windows_security ./os/sandbox -list $pattern)
@@ -574,12 +582,13 @@ jobs:
             TestLinuxPreLaunchIdentityRecheckRejectsCommandReplacement
             TestLinuxPreLaunchAuditRejectsNewExternalHardlink
             TestLinuxProcessContainmentTerminationIsBackedByPIDNamespace
-            TestLinuxBwrapHidesHostUnixSocketsAndExternalWorkspace
+            TestLinuxRootBwrapHidesHostUnixSocket
           )
           nonroot_tests=(
             TestLinuxBoundaryProbeNonRootProvesProcessLimitWithEAGAIN
             TestLinuxNonRootExecSeparatesAvailableProcessesCapabilityFromRequest
             TestLinuxNonRootConfiguredProcessLimitReachesEAGAIN
+            TestLinuxBwrapHidesExternalWorkspaceWithoutPrivilege
           )
           required_tests=("${root_tests[@]}" "${nonroot_tests[@]}")
           alternation="$(IFS='|'; echo "${required_tests[*]}")"

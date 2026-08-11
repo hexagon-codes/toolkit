@@ -224,6 +224,9 @@ UpdateQueueMetrics: changed from func(context.Context) error to func(context.Con
 
 # github.com/hexagon-codes/toolkit/lang/contextx
 ## incompatible changes
+(*Pool).Go: changed from func(func(ctx context.Context) error) to func(func(ctx context.Context) error) error
+(*WaitGroupContext).Go: changed from func(func(ctx context.Context) error) to func(func(ctx context.Context) error) error
+Go: changed from func(context.Context, func(ctx context.Context)) to func(context.Context, func(ctx context.Context)) error
 NewPool: changed from func(context.Context, int) *Pool to func(context.Context, int) (*Pool, error)
 Run: changed from func(context.Context, func() error) error to func(context.Context, func(context.Context) error) error
 RunTimeout: changed from func(time.Duration, func() error) error to func(context.Context, time.Duration, func(context.Context) error) error
@@ -247,6 +250,10 @@ SafeGo: changed from func(func(), func(error)) to func(func()) <-chan error
 # github.com/hexagon-codes/toolkit/lang/syncx
 ## incompatible changes
 (*OnceErr[T]).Value: changed from func() (T, error, bool) to func() (T, bool, error)
+
+# github.com/hexagon-codes/toolkit/lang/timex
+## incompatible changes
+Now: changed from var to func
 
 # github.com/hexagon-codes/toolkit/net/httpx
 ## incompatible changes
@@ -474,3 +481,7 @@ RetryIfHTTPOrNetwork: removed
 WithOnRetryZeroBased: removed
 WithReturnLastError: removed
 WithUnwrapFinalError: removed
+
+# github.com/hexagon-codes/toolkit/util/validator
+## incompatible changes
+FieldError.Value: removed

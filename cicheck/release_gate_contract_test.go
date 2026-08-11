@@ -1,7 +1,6 @@
 package cicheck
 
 import (
-	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,7 +9,7 @@ import (
 func TestReleaseTagsTriggerRequiredValidationWorkflows(t *testing.T) {
 	t.Parallel()
 
-	for _, name := range []string{"ci.yml", "downstream.yml", "sandbox-code-exec.yml"} {
+	for _, name := range []string{"ci.yml", "downstream.yml", "sandbox-code-exec.yml", "api-compat.yml"} {
 		name := name
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -35,6 +34,7 @@ func TestAPICompatibilityGateIsHardAndAuditable(t *testing.T) {
 		`API_BREAKING_CHECKER: ".github/workflows/check-api-breaking.py"`,
 		`gorelease -base="$API_BASE_VERSION" -version="$API_RELEASE_VERSION" | tee "$report_path"`,
 		`python3 "$API_BREAKING_CHECKER" "$report_path" "$API_BREAKING_BASELINE"`,
+		`if [[ "$GITHUB_REF_NAME" != "$API_RELEASE_VERSION" ]]; then`,
 	} {
 		if !strings.Contains(active, required) {
 			t.Fatalf("API compatibility gate is missing %q", required)
@@ -81,8 +81,8 @@ func TestAPICompatibilityGateIsHardAndAuditable(t *testing.T) {
 	)
 
 	baseline := readContractFile(t, filepath.Join(repositoryRoot(t), ".github", "workflows", "api-breaking-v0.3.0.txt"))
-	if strings.Count(baseline, "## incompatible changes") != 32 {
-		t.Fatalf("v0.3.0 breaking API baseline must contain exactly 32 package sections")
+	if strings.Count(baseline, "## incompatible changes") != 34 {
+		t.Fatalf("v0.3.0 breaking API baseline must contain exactly 34 package sections")
 	}
 	if strings.Contains(baseline, "## compatible changes") || strings.Contains(baseline, "# summary") {
 		t.Fatal("breaking API baseline must contain only incompatible change sections")
@@ -136,6 +136,12 @@ func TestRootCIReleaseAndPlatformContract(t *testing.T) {
 	requireContractText(t, "native Windows security job", windowsJob,
 		"go test -race -tags windows_security -json",
 		"go vet -tags windows_security ./os/sandbox",
+		"$gitConfigExitCode = $LASTEXITCODE",
+		"$gitConfigExitCode -ne 0 -and $gitConfigExitCode -ne 1",
+		"$global:LASTEXITCODE = 0",
+		"TestWindowsNativePostCreationFaultOwnership",
+		"TestWindowsNativePostCreationFaultCloseRetriesQuarantine",
+		"TestWindowsNativeRetainExecutionOwnership",
 		"TestWindowsLaunchFailureTransfersOwnershipToQuarantine",
 		"TestWindowsProcessQuarantineRetriesBoundedlyAndPreservesErrors",
 		"TestWindowsProcessQuarantineRetainsUnconfirmedResources",
@@ -145,7 +151,8 @@ func TestRootCIReleaseAndPlatformContract(t *testing.T) {
 
 	linuxRootJob := activeYAMLContract(extractJobContract(t, source, "linux-root-sandbox-security"))
 	requireContractText(t, "native root Linux security job", linuxRootJob,
-		"TestLinuxBwrapHidesHostUnixSocketsAndExternalWorkspace",
+		"TestLinuxRootBwrapHidesHostUnixSocket",
+		"TestLinuxBwrapHidesExternalWorkspaceWithoutPrivilege",
 		"root_events=",
 		`\"Action\":\"skip\"`,
 		`\"Action\":\"pass\"`,
@@ -325,8 +332,4 @@ func hasArgumentPrefix(arguments []string, prefix string) bool {
 		}
 	}
 	return false
-}
-
-func formatMutationName(index int, name string) string {
-	return fmt.Sprintf("%02d_%s", index, name)
 }

@@ -3,6 +3,9 @@ name: API Compatibility
 # 用 gorelease 对照上一个 tag 检测导出 API，并验证明确的候选版本满足 SemVer。
 # v0.x 允许在 minor 版本中包含有意破坏，但工具、网络、加载和版本验证失败都必须阻断。
 on:
+  push:
+    tags:
+      - "v*"
   pull_request:
     branches: [main]
 
@@ -53,6 +56,15 @@ jobs:
           check-latest: false
       - name: Install gorelease
         run: go install golang.org/x/exp/cmd/gorelease@v0.0.0-20260727155853-b88d891fe743
+      - name: Verify release tag
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_NAME" != "$API_RELEASE_VERSION" ]]; then
+            echo "Release tag must match the approved API release version: expected '$API_RELEASE_VERSION', got '$GITHUB_REF_NAME'." >&2
+            exit 1
+          fi
       - name: Check API compatibility
         shell: bash
         run: |
