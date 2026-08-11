@@ -185,6 +185,19 @@ func TestLinuxRuntimeLayoutsArePreciseAndMountParentsFirst(t *testing.T) {
 	}
 }
 
+func TestLinuxHostedToolcacheUsesCurrentHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	toolcache := filepath.Join(home, "hostedtoolcache")
+	executable := filepath.Join(toolcache, "go", "1.26.5", "x64", "bin", "go")
+	want := filepath.Join(toolcache, "go", "1.26.5", "x64")
+
+	paths, runtimeOnly := linuxInstalledRuntimePaths(executable)
+	if !slices.Contains(paths, want) || !runtimeOnly {
+		t.Fatalf("linux hosted toolcache paths = %q, runtimeOnly = %v, want %q and true", paths, runtimeOnly, want)
+	}
+}
+
 func TestLinuxCommandPathDoesNotResolveThroughHostPATH(t *testing.T) {
 	workspace := t.TempDir()
 	for _, command := range []string{"python3", "node", "go", "gofmt", "npm", "npx", "pip", "pip3"} {

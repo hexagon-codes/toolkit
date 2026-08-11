@@ -18,7 +18,8 @@ func inspectDarwinProcessGroup(processGroupID int) ([]posixProcessIdentity, erro
 		return nil, fmt.Errorf("inspect macOS process table: %w", err)
 	}
 	members := make([]posixProcessIdentity, 0)
-	for _, process := range processes {
+	for index := range processes {
+		process := &processes[index]
 		if process.Eproc.Pgid != int32(processGroupID) {
 			continue
 		}

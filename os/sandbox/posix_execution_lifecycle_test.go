@@ -26,7 +26,7 @@ const (
 )
 
 func TestPOSIXDetachedDescendantOutputDoesNotOutliveReturn(t *testing.T) {
-	result, execErr, childPID, elapsed := runPOSIXOutputFixture(t, false, true, 100*time.Millisecond)
+	result, childPID, elapsed, execErr := runPOSIXOutputFixture(t, false, true, 100*time.Millisecond)
 	if result == nil {
 		t.Fatal("canceled execution returned a nil result")
 	}
@@ -40,7 +40,7 @@ func TestPOSIXDetachedDescendantOutputDoesNotOutliveReturn(t *testing.T) {
 }
 
 func TestPOSIXNormalRootExitWithInheritedOutputIsBounded(t *testing.T) {
-	result, execErr, childPID, elapsed := runPOSIXOutputFixture(t, true, false, 100*time.Millisecond)
+	result, childPID, elapsed, execErr := runPOSIXOutputFixture(t, true, false, 100*time.Millisecond)
 	if result == nil || result.ExitCode != 0 {
 		t.Fatalf("execution result = %+v", result)
 	}
@@ -54,7 +54,7 @@ func TestPOSIXNormalRootExitWithInheritedOutputIsBounded(t *testing.T) {
 }
 
 func TestPOSIXRootExitTerminatesSilentSameGroupDescendant(t *testing.T) {
-	result, execErr, childPID, elapsed := runPOSIXFixtureMode(
+	result, childPID, elapsed, execErr := runPOSIXFixtureMode(
 		t,
 		"root-exit-silent",
 		false,
@@ -80,7 +80,7 @@ func TestPOSIXRootExitTerminatesSilentSameGroupDescendant(t *testing.T) {
 }
 
 func TestPOSIXSetsidSilentDescendantCannotBeReportedContained(t *testing.T) {
-	result, execErr, childPID, elapsed := runPOSIXFixtureMode(
+	result, childPID, elapsed, execErr := runPOSIXFixtureMode(
 		t,
 		"root-exit-silent-setsid",
 		false,
@@ -107,14 +107,14 @@ func TestPOSIXSetsidSilentDescendantCannotBeReportedContained(t *testing.T) {
 
 func TestPOSIXCancellationClosesOwnedOutputReadersAndDoesNotLeak(t *testing.T) {
 	// 先预热测试二进制和 runtime poller，随后比较固定次数前后的稳定资源量。
-	_, _, warmupPID, _ := runPOSIXOutputFixture(t, true, false, 20*time.Millisecond)
+	_, warmupPID, _, _ := runPOSIXOutputFixture(t, true, false, 20*time.Millisecond)
 	waitForPOSIXPIDExit(t, warmupPID, 2*time.Second)
 	runtime.GC()
 	baselineFDs := countPOSIXTestFileDescriptors(t)
 	baselineGoroutines := runtime.NumGoroutine()
 
 	for range 8 {
-		_, execErr, childPID, _ := runPOSIXOutputFixture(t, true, false, 20*time.Millisecond)
+		_, childPID, _, execErr := runPOSIXOutputFixture(t, true, false, 20*time.Millisecond)
 		if !errors.Is(execErr, ErrOutputDrainTimeout) {
 			t.Fatalf("execution error = %v, want ErrOutputDrainTimeout", execErr)
 		}
@@ -258,7 +258,7 @@ func TestPOSIXTerminationSettlementPreservesReapAndCopyErrors(t *testing.T) {
 }
 
 func TestPOSIXRetainedExecutionRejectsNewWorkAndCloseRetries(t *testing.T) {
-	cmd := exec.Command("/bin/sh", "-c", "while :; do sleep 60; done")
+	cmd := exec.CommandContext(context.Background(), "/bin/sh", "-c", "while :; do sleep 60; done")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -346,7 +346,7 @@ func TestPOSIXInheritedOutputPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	child := exec.Command(executable, "-test.run=^TestPOSIXInheritedOutputPayload$", "-test.count=1") // #nosec G204 -- 测试仅重启当前二进制。
+	child := exec.CommandContext(context.Background(), executable, "-test.run=^TestPOSIXInheritedOutputPayload$", "-test.count=1") // #nosec G204 -- 测试仅重启当前二进制。
 	childMode := "child"
 	if strings.HasPrefix(mode, "root-exit-silent") {
 		childMode = "child-silent"
@@ -384,7 +384,7 @@ func TestPOSIXPrestartMarkerPayload(t *testing.T) {
 	}
 }
 
-func runPOSIXOutputFixture(t *testing.T, rootExits, cancelRoot bool, drainLimit time.Duration) (*ExecResult, error, int, time.Duration) {
+func runPOSIXOutputFixture(t *testing.T, rootExits, cancelRoot bool, drainLimit time.Duration) (*ExecResult, int, time.Duration, error) {
 	t.Helper()
 	mode := "root-block"
 	if rootExits {
@@ -401,7 +401,7 @@ func runPOSIXFixtureMode(
 	cancelRoot bool,
 	drainLimit time.Duration,
 	capabilities posixExecutionCapabilities,
-) (*ExecResult, error, int, time.Duration) {
+) (*ExecResult, int, time.Duration, error) {
 	t.Helper()
 	workspace := t.TempDir()
 	ready := filepath.Join(workspace, "ready")
@@ -453,10 +453,10 @@ func runPOSIXFixtureMode(
 	}
 	select {
 	case got := <-done:
-		return got.result, got.err, childPID, time.Since(started)
+		return got.result, childPID, time.Since(started), got.err
 	case <-time.After(3 * time.Second):
 		t.Fatal("POSIX output fixture did not settle")
-		return nil, nil, childPID, 0
+		return nil, childPID, 0, nil
 	}
 }
 

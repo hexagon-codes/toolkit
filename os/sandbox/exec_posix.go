@@ -46,19 +46,6 @@ func runBoundedCommand(ctx context.Context, command Command, cfg Config, capabil
 	return executions.runBoundedCommand(ctx, command, cfg, capabilities)
 }
 
-// runBoundedPreparedCommandWithPreflight 在启动隔离载荷前执行最后一次对象身份复核。
-// 复核失败时不得调用 Start，确保载荷没有机会产生副作用。
-func runBoundedPreparedCommandWithPreflight(
-	ctx context.Context,
-	command Command,
-	cfg Config,
-	capabilities posixExecutionCapabilities,
-	preflight func(context.Context) error,
-) (*ExecResult, error) {
-	var executions posixExecutionRegistry
-	return executions.runBoundedPreparedCommandWithPreflight(ctx, command, cfg, capabilities, preflight)
-}
-
 func runBoundedCommandWithSysProcAttr(
 	ctx context.Context,
 	command Command,
@@ -289,20 +276,6 @@ func posixLimitReport(cfg Config, capabilities posixExecutionCapabilities) Limit
 		Output:     LimitStatusEnforced,
 		Filesystem: capabilities.Filesystem,
 	}
-}
-
-// probePosixMemoryLimitCapability 探测当前平台能否在载荷子进程中真实下调内存 rlimit。
-//
-// linux 内核允许无特权进程下调 AS/DATA/RSS 软限, 编译期即可判定为 enforced,
-// 且避免在父进程上做「真下调」探测(哪怕瞬时压低自身内存上限也有风险)。
-// 其余 POSIX 平台只在一次性辅助子进程内执行与真实启动器相同的 ulimit，
-// 无论成功、失败或恢复异常都不会改变宿主进程限制。
-func probePosixMemoryLimitCapability() LimitStatus {
-	status, err := probePosixMemoryLimitCapabilityContext(context.Background())
-	if err != nil {
-		return LimitStatusUnsupported
-	}
-	return status
 }
 
 func probePosixMemoryLimitCapabilityContext(ctx context.Context) (LimitStatus, error) {

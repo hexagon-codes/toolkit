@@ -225,7 +225,7 @@ type posixExecutionSettlement struct {
 	err                   error
 }
 
-func (executions *posixExecutionRegistry) runBoundedCommandWithOptions(
+func (registry *posixExecutionRegistry) runBoundedCommandWithOptions(
 	ctx context.Context,
 	command Command,
 	cfg Config,
@@ -238,17 +238,17 @@ func (executions *posixExecutionRegistry) runBoundedCommandWithOptions(
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("sandbox exec canceled before preparation: %w", err)
 	}
-	ticket, err := executions.begin()
+	ticket, err := registry.begin()
 	if err != nil {
 		return nil, err
 	}
 	defer ticket.release()
 
-	if err := enforceSandboxStorageLimits(cfg); err != nil {
-		return nil, err
+	if storageErr := enforceSandboxStorageLimits(cfg); storageErr != nil {
+		return nil, storageErr
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("sandbox exec canceled during preparation: %w", err)
+	if contextErr := ctx.Err(); contextErr != nil {
+		return nil, fmt.Errorf("sandbox exec canceled during preparation: %w", contextErr)
 	}
 
 	runCommand := command
@@ -258,8 +258,8 @@ func (executions *posixExecutionRegistry) runBoundedCommandWithOptions(
 			return nil, err
 		}
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("sandbox exec canceled during preparation: %w", err)
+	if contextErr := ctx.Err(); contextErr != nil {
+		return nil, fmt.Errorf("sandbox exec canceled during preparation: %w", contextErr)
 	}
 
 	execution, err := newPOSIXCommandExecution(
@@ -377,7 +377,10 @@ func newPOSIXCommandExecution(
 	}, nil
 }
 
-func (execution *posixCommandExecution) start(ctx context.Context, options posixExecutionOptions) (error, error) {
+func (execution *posixCommandExecution) start(
+	ctx context.Context,
+	options posixExecutionOptions,
+) (diagnostics, startErr error) {
 	cleanupUnstarted := func(primary error) (error, error) {
 		return nil, errors.Join(
 			primary,
@@ -409,7 +412,6 @@ func (execution *posixCommandExecution) start(ctx context.Context, options posix
 		execution.processGroupID = execution.cmd.Process.Pid
 	}
 
-	var diagnostics error
 	diagnostics = errors.Join(
 		diagnostics,
 		closePOSIXFile("parent stdout writer", execution.stdoutWriter),
@@ -437,9 +439,9 @@ func (execution *posixCommandExecution) settleAfterRootExit(
 	processGroupLimit time.Duration,
 ) posixExecutionSettlement {
 	settlement := posixExecutionSettlement{waitErr: waitErr, waitReceived: true}
-	groupErr, groupUnsettled := execution.settleProcessGroup(processGroupLimit, true)
+	groupUnsettled, groupErr := execution.settleProcessGroup(processGroupLimit, true)
 	settlement.processGroupUnsettled = groupUnsettled
-	drainErr, timedOut := execution.drainOutput(drainLimit)
+	timedOut, drainErr := execution.drainOutput(drainLimit)
 	settlement.outputDrainTimed = timedOut
 	settlement.err = errors.Join(groupErr, drainErr)
 	return settlement
@@ -461,7 +463,7 @@ func (execution *posixCommandExecution) settleAfterCancellation(waitLimit, drain
 	copies := 0
 	forcedDrain := false
 	waitExpired := false
-	waitChannel := (<-chan error)(execution.waitDone)
+	var waitChannel <-chan error = execution.waitDone
 	drainChannel := drainTimer.C
 	for copies < 2 || !settlement.waitReceived && !waitExpired {
 		select {
@@ -503,16 +505,16 @@ func (execution *posixCommandExecution) settleAfterCancellation(waitLimit, drain
 	}
 	settlement.err = errors.Join(settlement.err, execution.closeOutputReaders())
 	if settlement.waitReceived {
-		groupErr, groupUnsettled := execution.settleProcessGroup(posixProcessGroupWaitLimit, false)
+		groupUnsettled, groupErr := execution.settleProcessGroup(posixProcessGroupWaitLimit, false)
 		settlement.processGroupUnsettled = groupUnsettled
 		settlement.err = errors.Join(settlement.err, groupErr)
 	}
 	return settlement
 }
 
-func (execution *posixCommandExecution) settleProcessGroup(limit time.Duration, reportSurvivor bool) (error, bool) {
+func (execution *posixCommandExecution) settleProcessGroup(limit time.Duration, reportSurvivor bool) (bool, error) {
 	if !execution.ownsProcessGroup || execution.processGroupID <= 0 {
-		return nil, true
+		return true, nil
 	}
 	if limit <= 0 {
 		limit = posixProcessGroupWaitLimit
@@ -522,18 +524,18 @@ func (execution *posixCommandExecution) settleProcessGroup(limit time.Duration, 
 		var inspectErr error
 		originalMembers, inspectErr = execution.processGroupInspect(execution.processGroupID)
 		if inspectErr != nil {
-			return fmt.Errorf("%w: inspect failed: %w", ErrProcessGroupSettlement, inspectErr), true
+			return true, fmt.Errorf("%w: inspect failed: %w", ErrProcessGroupSettlement, inspectErr)
 		}
 		if len(originalMembers) == 0 {
-			return nil, false
+			return false, nil
 		}
 	} else {
 		probeErr := syscall.Kill(-execution.processGroupID, 0)
 		if errors.Is(probeErr, syscall.ESRCH) {
-			return nil, false
+			return false, nil
 		}
 		if probeErr != nil {
-			return fmt.Errorf("%w: probe failed: %w", ErrProcessGroupSettlement, probeErr), true
+			return true, fmt.Errorf("%w: probe failed: %w", ErrProcessGroupSettlement, probeErr)
 		}
 	}
 
@@ -543,11 +545,11 @@ func (execution *posixCommandExecution) settleProcessGroup(limit time.Duration, 
 	}
 	if killErr := syscall.Kill(-execution.processGroupID, syscall.SIGKILL); killErr != nil &&
 		!posixTerminationAlreadyComplete(killErr) {
-		return errors.Join(result, fmt.Errorf("%w: kill failed: %w", ErrProcessGroupSettlement, killErr)), true
+		return true, errors.Join(result, fmt.Errorf("%w: kill failed: %w", ErrProcessGroupSettlement, killErr))
 	}
 	if execution.processGroupInspect == nil {
 		// 非 macOS 后端未提供稳定进程身份枚举；SIGKILL 成功只证明信号已经投递。
-		return result, false
+		return false, result
 	}
 
 	timer := time.NewTimer(limit)
@@ -557,15 +559,15 @@ func (execution *posixCommandExecution) settleProcessGroup(limit time.Duration, 
 	for {
 		currentMembers, inspectErr := execution.processGroupInspect(execution.processGroupID)
 		if inspectErr != nil {
-			return errors.Join(result, fmt.Errorf("%w: inspect failed: %w", ErrProcessGroupSettlement, inspectErr)), true
+			return true, errors.Join(result, fmt.Errorf("%w: inspect failed: %w", ErrProcessGroupSettlement, inspectErr))
 		}
 		if !posixProcessIdentitiesRemain(originalMembers, currentMembers) {
-			return result, false
+			return false, result
 		}
 		select {
 		case <-ticker.C:
 		case <-timer.C:
-			return errors.Join(result, fmt.Errorf("%w after %s", ErrProcessGroupSettlement, limit)), true
+			return true, errors.Join(result, fmt.Errorf("%w after %s", ErrProcessGroupSettlement, limit))
 		}
 	}
 }
@@ -583,7 +585,7 @@ func posixProcessIdentitiesRemain(original, current []posixProcessIdentity) bool
 	return false
 }
 
-func (execution *posixCommandExecution) drainOutput(limit time.Duration) (error, bool) {
+func (execution *posixCommandExecution) drainOutput(limit time.Duration) (bool, error) {
 	if limit <= 0 {
 		limit = posixOutputDrainLimit
 	}
@@ -609,7 +611,7 @@ func (execution *posixCommandExecution) drainOutput(limit time.Duration) (error,
 		}
 	}
 	resultErr = errors.Join(resultErr, execution.closeOutputReaders())
-	return resultErr, forced
+	return forced, resultErr
 }
 
 func normalizePOSIXCopyError(result posixCopyResult, forced bool) error {

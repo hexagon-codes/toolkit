@@ -95,10 +95,6 @@ func newDarwinExecutionGuardWithIdentity(
 	return guard, nil
 }
 
-func rejectDarwinWorkspaceHardlinks(workspace string) error {
-	return rejectDarwinWorkspaceHardlinksContext(context.Background(), workspace)
-}
-
 func rejectDarwinWorkspaceHardlinksContext(ctx context.Context, workspace string) error {
 	return filepath.WalkDir(workspace, func(path string, entry fs.DirEntry, walkErr error) error {
 		if err := checkPOSIXPreparationContext(ctx, "audit macOS workspace"); err != nil {

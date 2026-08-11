@@ -720,11 +720,12 @@ func linuxInstalledRuntimePaths(executable string) (paths []string, runtimeOnly 
 		if root := linuxRuntimeRootBelow(cleaned, toolchains, 1); root != "" && strings.HasPrefix(filepath.Base(root), "toolchain@") {
 			return []string{root}, true
 		}
-	}
-	for _, hosted := range []string{"/opt/hostedtoolcache", "/home/runner/hostedtoolcache"} {
-		if root := linuxRuntimeRootBelow(cleaned, hosted, 3); root != "" {
+		if root := linuxRuntimeRootBelow(cleaned, filepath.Join(home, "hostedtoolcache"), 3); root != "" {
 			return []string{root}, true
 		}
+	}
+	if root := linuxRuntimeRootBelow(cleaned, "/opt/hostedtoolcache", 3); root != "" {
+		return []string{root}, true
 	}
 	if filepath.Dir(cleaned) == "/usr/local/bin" && strings.HasPrefix(strings.ToLower(filepath.Base(cleaned)), "python") {
 		version := strings.TrimPrefix(strings.ToLower(filepath.Base(cleaned)), "python")

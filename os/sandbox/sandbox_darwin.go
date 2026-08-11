@@ -228,8 +228,8 @@ func (s *darwinSandbox) Exec(ctx context.Context, requested Command) (*ExecResul
 	if err != nil {
 		return nil, err
 	}
-	if err := checkPOSIXPreparationContext(ctx, "prepare macOS execution"); err != nil {
-		return nil, err
+	if contextErr := checkPOSIXPreparationContext(ctx, "prepare macOS execution"); contextErr != nil {
+		return nil, contextErr
 	}
 	commandPlan := darwinCommandExecutionPlanContext(ctx, command, s.cfg.Workspace)
 	if commandPlan.err != nil {
@@ -238,8 +238,8 @@ func (s *darwinSandbox) Exec(ctx context.Context, requested Command) (*ExecResul
 	if s.afterCommandPlan != nil {
 		s.afterCommandPlan()
 	}
-	if err := checkPOSIXPreparationContext(ctx, "prepare macOS execution"); err != nil {
-		return nil, err
+	if contextErr := checkPOSIXPreparationContext(ctx, "prepare macOS execution"); contextErr != nil {
+		return nil, contextErr
 	}
 	guard, err := newDarwinExecutionGuardFromPlanContext(ctx, s.cfg.Workspace, commandPlan)
 	if err != nil {
@@ -578,11 +578,12 @@ func darwinInstalledRuntimeRoot(executable string) (root string, runtimeOnly boo
 		if root := darwinRuntimeRootBelow(cleaned, toolchains, 1); root != "" && strings.HasPrefix(filepath.Base(root), "toolchain@") {
 			return root, true
 		}
-	}
-	for _, hosted := range []string{"/opt/hostedtoolcache", "/Users/runner/hostedtoolcache"} {
-		if root := darwinRuntimeRootBelow(cleaned, hosted, 3); root != "" {
+		if root := darwinRuntimeRootBelow(cleaned, filepath.Join(home, "hostedtoolcache"), 3); root != "" {
 			return root, true
 		}
+	}
+	if root := darwinRuntimeRootBelow(cleaned, "/opt/hostedtoolcache", 3); root != "" {
+		return root, true
 	}
 	return "", false
 }

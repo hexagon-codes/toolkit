@@ -875,7 +875,7 @@ func withTimeout(ctx context.Context, timeoutSec int) (context.Context, context.
 	if timeoutSec <= 0 {
 		return ctx, func() {}
 	}
-	limit := time.Duration(1<<63 - 1)
+	var limit time.Duration
 	if uint64(timeoutSec) > uint64((1<<63-1)/int64(time.Second)) {
 		// 正常入口会在任何副作用前拒绝该配置；包内直接调用仍使用不溢出的有限上界。
 		limit = time.Duration(1<<63 - 1)

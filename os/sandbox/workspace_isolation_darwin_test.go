@@ -653,6 +653,19 @@ func TestDarwinHomebrewRuntimeRootsAreVersionScoped(t *testing.T) {
 	}
 }
 
+func TestDarwinHostedToolcacheUsesCurrentHome(t *testing.T) {
+	home := darwinCanonicalPath(t.TempDir())
+	t.Setenv("HOME", home)
+	toolcache := filepath.Join(home, "hostedtoolcache")
+	executable := filepath.Join(toolcache, "go", "1.26.5", "x64", "bin", "go")
+	want := filepath.Join(toolcache, "go", "1.26.5", "x64")
+
+	got, runtimeOnly := darwinInstalledRuntimeRoot(executable)
+	if got != want || !runtimeOnly {
+		t.Fatalf("darwin hosted toolcache root = %q, runtimeOnly = %v, want %q and true", got, runtimeOnly, want)
+	}
+}
+
 func TestDarwinForgedExternalRuntimePathsFailClosed(t *testing.T) {
 	_, workspace, otherWorkspace := newDarwinSharedWorkspacePair(t)
 	paths := []string{
