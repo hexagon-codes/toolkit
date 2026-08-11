@@ -864,10 +864,7 @@ func validateClientConfig(config ClientConfig) error {
 			return err
 		}
 	}
-	if err := validateReaderOptions(config.ReaderOptions); err != nil {
-		return err
-	}
-	return nil
+	return validateReaderOptions(config.ReaderOptions)
 }
 
 func validateReaderOptions(options []ReaderOption) error {
@@ -1522,11 +1519,11 @@ func CollectOpenAIStream[T any](r io.Reader, config CollectConfig) (results []T,
 			results = nil
 		}
 	}()
-	if err := config.validate(); err != nil {
-		return nil, err
+	if validationErr := config.validate(); validationErr != nil {
+		return nil, validationErr
 	}
-	if err := WithMaxTotalBytes(config.MaxTotalBytes)(reader); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrInvalidCollectionConfig, err)
+	if optionErr := WithMaxTotalBytes(config.MaxTotalBytes)(reader); optionErr != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidCollectionConfig, optionErr)
 	}
 	err = consumeOpenAIStream(reader, config.MaxEvents, func(item T) error {
 		results = append(results, item)

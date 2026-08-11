@@ -15,6 +15,7 @@ func TestSemaphoreZeroValueAndNilContext(t *testing.T) {
 		t.Fatal("zero-value Semaphore could not release its acquired permit")
 	}
 
+	//nolint:staticcheck // 此处刻意传入 nil context，验证公开 API 对无效参数的拒绝边界。
 	if err := semaphore.AcquireContext(nil); err == nil || err.Error() != "syncx: semaphore context must not be nil" {
 		t.Fatalf("AcquireContext(nil) error = %v, want a stable nil-context error", err)
 	}

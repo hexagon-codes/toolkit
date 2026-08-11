@@ -116,7 +116,7 @@ func IsPrivateOrReservedIP(ip net.IP) bool {
 		address.IsLinkLocalUnicast() || address.IsMulticast() || address.IsUnspecified() {
 		return true
 	}
-	for _, prefix := range specialUsePrefixes {
+	for _, prefix := range &specialUsePrefixes {
 		if prefix.Contains(address) {
 			return true
 		}

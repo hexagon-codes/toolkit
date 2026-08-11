@@ -237,12 +237,12 @@ func (c *UnstableCache) getOrLoadInternal(
 		case !found:
 			return ErrNotFound
 		default:
-			if decodeErr := c.opts.Codec.Unmarshal(payload, dest); decodeErr == nil {
+			decodeErr := c.opts.Codec.Unmarshal(payload, dest)
+			if decodeErr == nil {
 				return nil
-			} else {
-				c.onError(ctx, "unstable_decode", fullKey, decodeErr)
-				forceReload = true
 			}
+			c.onError(ctx, "unstable_decode", fullKey, decodeErr)
+			forceReload = true
 		}
 	} else if err != redis.Nil {
 		if contextErr := ctx.Err(); contextErr != nil {

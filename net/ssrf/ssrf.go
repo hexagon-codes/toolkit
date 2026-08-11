@@ -81,8 +81,8 @@ func validateURLWithResolver(ctx context.Context, rawURL string, lookupNetIP loo
 	if err != nil {
 		return err
 	}
-	if literal, _, err := validateHostWithoutDNS(host); literal || err != nil {
-		return err
+	if literal, _, policyErr := validateHostWithoutDNS(host); literal || policyErr != nil {
+		return policyErr
 	}
 	if lookupNetIP == nil {
 		return fmt.Errorf("%w: DNS resolver must not be nil", ErrInvalidTransport)
@@ -207,7 +207,7 @@ func isLegacyIPv4Literal(host string) bool {
 
 	switch len(values) {
 	case 1:
-		return values[0] <= 1<<32-1
+		return values[0] < 1<<32
 	case 2:
 		return values[0] <= 0xff && values[1] <= 0xffffff
 	case 3:

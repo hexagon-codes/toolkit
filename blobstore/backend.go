@@ -52,10 +52,10 @@ func (s *Store) SaveStream(ctx context.Context, r io.Reader, ext string) (string
 		return "", err
 	}
 	defer release()
-	return s.saveStream(root, ctx, r, ext)
+	return s.saveStream(ctx, root, r, ext)
 }
 
-func (s *Store) saveStream(root *os.Root, ctx context.Context, r io.Reader, ext string) (relResult string, err error) {
+func (s *Store) saveStream(ctx context.Context, root *os.Root, r io.Reader, ext string) (relResult string, err error) {
 	if isNilInterface(ctx) {
 		return "", errors.New("blobstore: context must not be nil")
 	}

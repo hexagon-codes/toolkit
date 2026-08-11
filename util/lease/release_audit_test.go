@@ -35,6 +35,7 @@ func TestMemoryLeaseHonorsCanceledContextWithoutMutation(t *testing.T) {
 func TestMemoryLeaseRejectsInvalidInput(t *testing.T) {
 	lease := NewMemoryLease()
 	ctx := context.Background()
+	//nolint:staticcheck // 此处刻意传入 nil context，验证 Acquire 拒绝空上下文。
 	if _, _, err := lease.Acquire(nil, "key", time.Second); !errors.Is(err, ErrNilContext) {
 		t.Fatalf("Acquire(nil) error = %v, want ErrNilContext", err)
 	}
@@ -49,6 +50,7 @@ func TestMemoryLeaseRejectsInvalidInput(t *testing.T) {
 			t.Fatalf("Refresh(ttl=%s) error = %v, want ErrInvalidTTL", ttl, err)
 		}
 	}
+	//nolint:staticcheck // 此处刻意传入 nil context，验证 Release 拒绝空上下文。
 	if err := lease.Release(nil, "key", 1); !errors.Is(err, ErrNilContext) {
 		t.Fatalf("Release(nil) error = %v, want ErrNilContext", err)
 	}
@@ -92,8 +94,8 @@ func TestMemoryLeaseCannotRefreshExpiredGeneration(t *testing.T) {
 	}
 
 	current = current.Add(time.Second)
-	if err := lease.Refresh(context.Background(), "key", token, time.Second); !errors.Is(err, ErrNotHolder) {
-		t.Fatalf("Refresh() at expiry error = %v, want ErrNotHolder", err)
+	if refreshErr := lease.Refresh(context.Background(), "key", token, time.Second); !errors.Is(refreshErr, ErrNotHolder) {
+		t.Fatalf("Refresh() at expiry error = %v, want ErrNotHolder", refreshErr)
 	}
 	next, acquired, err := lease.Acquire(context.Background(), "key", time.Second)
 	if err != nil || !acquired || next <= token {

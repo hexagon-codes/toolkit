@@ -72,8 +72,8 @@ func TestLeaseOperationsRejectNilContext(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = manager.Stop() })
 
-	if _, _, err := manager.AcquirePollingLease(nil, "nil-context-task"); !errors.Is(err, ErrInvalidContext) { //nolint:staticcheck // 专门验证 nil context 防护。
-		t.Fatalf("AcquirePollingLease(nil) error = %v, want ErrInvalidContext", err)
+	if _, _, acquireErr := manager.AcquirePollingLease(nil, "nil-context-task"); !errors.Is(acquireErr, ErrInvalidContext) { //nolint:staticcheck // 专门验证 nil context 防护。
+		t.Fatalf("AcquirePollingLease(nil) error = %v, want ErrInvalidContext", acquireErr)
 	}
 	lease, acquired, err := manager.AcquirePollingLease(context.Background(), "lease-nil-context-task")
 	if err != nil || !acquired || lease == nil {

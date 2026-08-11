@@ -82,18 +82,18 @@ func TestStoreOperationsRemainBoundToOpenedRootAfterPathRebind(t *testing.T) {
 	}
 
 	openedRootPath := filepath.Join(parent, "opened-root")
-	if err := os.Rename(rootPath, openedRootPath); err != nil {
-		t.Fatalf("rename opened root: %v", err)
+	if renameErr := os.Rename(rootPath, openedRootPath); renameErr != nil {
+		t.Fatalf("rename opened root: %v", renameErr)
 	}
-	if err := os.Mkdir(rootPath, 0o700); err != nil {
-		t.Fatalf("create replacement root: %v", err)
+	if mkdirErr := os.Mkdir(rootPath, 0o700); mkdirErr != nil {
+		t.Fatalf("create replacement root: %v", mkdirErr)
 	}
 	replacementBlobPath := filepath.Join(rootPath, filepath.FromSlash(existingPath))
-	if err := os.MkdirAll(filepath.Dir(replacementBlobPath), 0o700); err != nil {
-		t.Fatalf("create replacement blob directory: %v", err)
+	if mkdirAllErr := os.MkdirAll(filepath.Dir(replacementBlobPath), 0o700); mkdirAllErr != nil {
+		t.Fatalf("create replacement blob directory: %v", mkdirAllErr)
 	}
-	if err := os.WriteFile(replacementBlobPath, []byte("replacement content"), 0o600); err != nil {
-		t.Fatalf("write replacement blob: %v", err)
+	if writeErr := os.WriteFile(replacementBlobPath, []byte("replacement content"), 0o600); writeErr != nil {
+		t.Fatalf("write replacement blob: %v", writeErr)
 	}
 
 	file, err := store.Open(existingPath)
@@ -121,17 +121,17 @@ func TestStoreOperationsRemainBoundToOpenedRootAfterPathRebind(t *testing.T) {
 	}
 	assertBlobExistsOnlyInOpenedRoot(t, openedRootPath, rootPath, streamPath)
 
-	if err := store.SetTTL(existingPath, time.Hour); err != nil {
-		t.Fatalf("SetTTL after rebind failed: %v", err)
+	if setTTLErr := store.SetTTL(existingPath, time.Hour); setTTLErr != nil {
+		t.Fatalf("SetTTL after rebind failed: %v", setTTLErr)
 	}
-	if _, ok, err := store.ExpiresAt(existingPath); err != nil || !ok {
-		t.Fatalf("ExpiresAt after rebind = (_, %v, %v), want metadata", ok, err)
+	if _, ok, expiresErr := store.ExpiresAt(existingPath); expiresErr != nil || !ok {
+		t.Fatalf("ExpiresAt after rebind = (_, %v, %v), want metadata", ok, expiresErr)
 	}
-	if _, err := os.Stat(filepath.Join(openedRootPath, filepath.FromSlash(existingPath)) + ttlSuffix); err != nil {
-		t.Fatalf("TTL metadata missing from opened root: %v", err)
+	if _, statErr := os.Stat(filepath.Join(openedRootPath, filepath.FromSlash(existingPath)) + ttlSuffix); statErr != nil {
+		t.Fatalf("TTL metadata missing from opened root: %v", statErr)
 	}
-	if _, err := os.Stat(replacementBlobPath + ttlSuffix); !os.IsNotExist(err) {
-		t.Fatalf("TTL metadata reached replacement root: %v", err)
+	if _, replacementStatErr := os.Stat(replacementBlobPath + ttlSuffix); !os.IsNotExist(replacementStatErr) {
+		t.Fatalf("TTL metadata reached replacement root: %v", replacementStatErr)
 	}
 
 	purged, err := store.Purge(expiredAt.Add(time.Nanosecond))

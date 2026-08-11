@@ -374,9 +374,7 @@ func (d *SSEJSONDecoder) Decode(v any) error {
 			if line != "data" {
 				data = strings.TrimPrefix(line, "data:")
 			}
-			if strings.HasPrefix(data, " ") {
-				data = data[1:]
-			}
+			data = strings.TrimPrefix(data, " ")
 			totalBytes += len(data)
 			if len(dataLines) > 0 {
 				totalBytes++

@@ -309,16 +309,16 @@ func TestClientConvenienceMethodsRejectNilContext(t *testing.T) {
 		name string
 		run  func() error
 	}{
-		{name: "get", run: func() error { _, err := client.GetWithDefault(nil, "key", "fallback"); return err }},
-		{name: "set", run: func() error { return client.SetWithExpire(nil, "key", "value", time.Minute) }},
-		{name: "set-nx", run: func() error { _, err := client.SetNX(nil, "key", "value", time.Minute); return err }},
-		{name: "mget", run: func() error { _, err := client.MGetValues(nil, "key"); return err }},
-		{name: "mset", run: func() error { return client.MSetValues(nil, "key", "value") }},
-		{name: "increment", run: func() error { _, err := client.IncrByWithExpire(nil, "key", 1, time.Minute); return err }},
-		{name: "exists", run: func() error { _, err := client.ExistsCount(nil, "key"); return err }},
-		{name: "delete", run: func() error { return client.DeleteKeys(nil, "key") }},
-		{name: "expire-at", run: func() error { return client.SetExpireAt(nil, "key", time.Now()) }},
-		{name: "ttl", run: func() error { _, err := client.GetTTL(nil, "key"); return err }},
+		{name: "get", run: func() error { _, err := client.GetWithDefault(nil, "key", "fallback"); return err }},             //nolint:staticcheck // 测试刻意传入 nil 上下文，验证该方法拒绝无效上下文。
+		{name: "set", run: func() error { return client.SetWithExpire(nil, "key", "value", time.Minute) }},                   //nolint:staticcheck // 测试刻意传入 nil 上下文，验证该方法拒绝无效上下文。
+		{name: "set-nx", run: func() error { _, err := client.SetNX(nil, "key", "value", time.Minute); return err }},         //nolint:staticcheck // 测试刻意传入 nil 上下文，验证该方法拒绝无效上下文。
+		{name: "mget", run: func() error { _, err := client.MGetValues(nil, "key"); return err }},                            //nolint:staticcheck // 测试刻意传入 nil 上下文，验证该方法拒绝无效上下文。
+		{name: "mset", run: func() error { return client.MSetValues(nil, "key", "value") }},                                  //nolint:staticcheck // 测试刻意传入 nil 上下文，验证该方法拒绝无效上下文。
+		{name: "increment", run: func() error { _, err := client.IncrByWithExpire(nil, "key", 1, time.Minute); return err }}, //nolint:staticcheck // 测试刻意传入 nil 上下文，验证该方法拒绝无效上下文。
+		{name: "exists", run: func() error { _, err := client.ExistsCount(nil, "key"); return err }},                         //nolint:staticcheck // 测试刻意传入 nil 上下文，验证该方法拒绝无效上下文。
+		{name: "delete", run: func() error { return client.DeleteKeys(nil, "key") }},                                         //nolint:staticcheck // 测试刻意传入 nil 上下文，验证该方法拒绝无效上下文。
+		{name: "expire-at", run: func() error { return client.SetExpireAt(nil, "key", time.Now()) }},                         //nolint:staticcheck // 测试刻意传入 nil 上下文，验证该方法拒绝无效上下文。
+		{name: "ttl", run: func() error { _, err := client.GetTTL(nil, "key"); return err }},                                 //nolint:staticcheck // 测试刻意传入 nil 上下文，验证该方法拒绝无效上下文。
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

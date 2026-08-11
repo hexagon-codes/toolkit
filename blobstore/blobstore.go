@@ -418,7 +418,7 @@ func (s *Store) SaveFromURL(ctx context.Context, url, ext string) (relPath strin
 		return "", errRemoteBlobTooLarge
 	}
 	// 流式限制下载大小，并额外探测一个字节，禁止把超限响应静默截断后落盘。
-	return s.saveStream(root, rctx, newMaxBytesReader(resp.Body, maxRemoteBlobBytes), ext)
+	return s.saveStream(rctx, root, newMaxBytesReader(resp.Body, maxRemoteBlobBytes), ext)
 }
 
 type maxBytesReader struct {

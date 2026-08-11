@@ -121,8 +121,8 @@ func TestGuardedTransportRevalidatesDNSForEveryNewConnection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := first.Close(); err != nil {
-		t.Fatal(err)
+	if closeErr := first.Close(); closeErr != nil {
+		t.Fatal(closeErr)
 	}
 	second, err := transport.dialContext(context.Background(), "tcp", "example.com:443")
 	if second != nil || !errors.Is(err, ErrBlocked) {
@@ -272,7 +272,7 @@ func TestGuardedTransportDisablesProxyAndTLSDialBypasses(t *testing.T) {
 	if transport.transport.Proxy != nil {
 		t.Fatal("guarded transport retained a proxy function")
 	}
-	//lint:ignore SA1019 需要验证旧 TLS 拨号入口未形成安全绕过。
+	//nolint:staticcheck // 此测试刻意检查已废弃的 DialTLS 字段，确保旧入口不能绕过 SSRF 连接期防护。
 	if transport.transport.DialTLS != nil || transport.transport.DialTLSContext != nil {
 		t.Fatal("guarded transport retained a TLS dial bypass")
 	}
@@ -334,6 +334,11 @@ func TestGuardedTransportRoundTripRejectsAmbiguousURLBeforeDial(t *testing.T) {
 	}
 	request.URL.User = url.UserPassword("user", "secret")
 	response, err := transport.RoundTrip(request)
+	if response != nil && response.Body != nil {
+		t.Cleanup(func() {
+			_ = response.Body.Close()
+		})
+	}
 	if response != nil || !errors.Is(err, ErrBlocked) || !strings.Contains(err.Error(), "user information") {
 		t.Fatalf("RoundTrip() = (%v, %v), want blocked user information", response, err)
 	}

@@ -69,7 +69,7 @@ func TestValidationErrorsDoNotRetainRejectedValue(t *testing.T) {
 }
 
 func TestUnknownRuleFailsClosed(t *testing.T) {
-	err := NewValidator().Var("value", "requried")
+	err := NewValidator().Var("value", "unknown")
 	if err == nil {
 		t.Fatal("unknown validation rule was silently ignored")
 	}
@@ -79,7 +79,7 @@ func TestUnknownRuleFailsClosed(t *testing.T) {
 }
 
 func TestUnknownRuleFailsClosedForEmptyValue(t *testing.T) {
-	err := NewValidator().Var("", "requried")
+	err := NewValidator().Var("", "unknown")
 	if !errors.Is(err, ErrUnknownRule) {
 		t.Fatalf("empty value unknown-rule error = %v, want ErrUnknownRule", err)
 	}

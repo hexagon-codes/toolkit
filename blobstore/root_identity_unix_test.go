@@ -24,8 +24,8 @@ func TestOpenedRootFilesystemRootDetectionUsesResolvedIdentity(t *testing.T) {
 		t.Fatalf("open root symlink: %v", err)
 	}
 	t.Cleanup(func() {
-		if err := openedRoot.Close(); err != nil {
-			t.Errorf("close opened root: %v", err)
+		if closeErr := openedRoot.Close(); closeErr != nil {
+			t.Errorf("close opened root: %v", closeErr)
 		}
 	})
 

@@ -66,8 +66,8 @@ func TestBlobstoreTTL_ExpiresAt(t *testing.T) {
 		t.Fatal("无 TTL 时 ExpiresAt 应 ok=false")
 	}
 
-	if err := s.SetTTL(rel, time.Hour); err != nil {
-		t.Fatalf("SetTTL error = %v", err)
+	if setErr := s.SetTTL(rel, time.Hour); setErr != nil {
+		t.Fatalf("SetTTL error = %v", setErr)
 	}
 	exp, ok, err := s.ExpiresAt(rel)
 	if err != nil || !ok {

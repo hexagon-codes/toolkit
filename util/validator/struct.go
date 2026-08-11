@@ -64,11 +64,11 @@ func (e ValidationErrors) HasErrors() bool {
 
 // Unwrap 返回所有字段错误，支持 errors.Is 和 errors.As 聚合检查。
 func (e ValidationErrors) Unwrap() []error {
-	errors := make([]error, len(e))
+	unwrappedErrors := make([]error, len(e))
 	for index := range e {
-		errors[index] = e[index]
+		unwrappedErrors[index] = e[index]
 	}
-	return errors
+	return unwrappedErrors
 }
 
 // RuleFunc 验证规则函数类型
@@ -434,7 +434,7 @@ func (v *Validator) Struct(obj any) error {
 
 // validateField 验证单个字段
 func validateField(snapshot validatorSnapshot, fieldName string, value any, tag string) []FieldError {
-	var errors []FieldError
+	var fieldErrors []FieldError
 	rules := parseTag(tag)
 
 	for _, rule := range rules {
@@ -442,7 +442,7 @@ func validateField(snapshot validatorSnapshot, fieldName string, value any, tag 
 
 		fn, ok := snapshot.rules[ruleName]
 		if !ok {
-			errors = append(errors, FieldError{
+			fieldErrors = append(fieldErrors, FieldError{
 				Field:   fieldName,
 				Tag:     ruleName,
 				Message: fmt.Sprintf("%s validation failed: unknown rule %s", fieldName, ruleName),
@@ -462,7 +462,7 @@ func validateField(snapshot validatorSnapshot, fieldName string, value any, tag 
 			if cause != nil {
 				msg = fmt.Sprintf("%s validation failed for rule %s", fieldName, ruleName)
 			}
-			errors = append(errors, FieldError{
+			fieldErrors = append(fieldErrors, FieldError{
 				Field:   fieldName,
 				Tag:     ruleName,
 				Message: msg,
@@ -471,7 +471,7 @@ func validateField(snapshot validatorSnapshot, fieldName string, value any, tag 
 		}
 	}
 
-	return errors
+	return fieldErrors
 }
 
 // formatMessage 格式化错误消息

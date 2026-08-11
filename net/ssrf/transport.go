@@ -82,8 +82,8 @@ func (t *Transport) dialContext(ctx context.Context, network, address string) (n
 	if err != nil {
 		return nil, fmt.Errorf("%w: invalid dial address %q: %w", ErrBlocked, address, err)
 	}
-	if err := validateASCIIHost(host); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrBlocked, err)
+	if hostErr := validateASCIIHost(host); hostErr != nil {
+		return nil, fmt.Errorf("%w: %w", ErrBlocked, hostErr)
 	}
 
 	var candidates []netip.Addr

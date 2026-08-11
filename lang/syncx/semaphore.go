@@ -6,6 +6,7 @@ import (
 	"sync"
 )
 
+// ErrNilSemaphoreContext 表示信号量操作收到了空上下文。
 var ErrNilSemaphoreContext = errors.New("syncx: semaphore context must not be nil")
 
 // Semaphore 信号量，用于限制并发访问数量

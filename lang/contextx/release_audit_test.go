@@ -116,11 +116,11 @@ func TestPoolWaitPreservesTaskAndCancellationErrors(t *testing.T) {
 		t.Fatalf("NewPool() error = %v", err)
 	}
 	taskErr := errors.New("pool task failed")
-	if err := pool.Go(func(context.Context) error {
+	if submitErr := pool.Go(func(context.Context) error {
 		cancel()
 		return taskErr
-	}); err != nil {
-		t.Fatalf("Pool.Go() error = %v", err)
+	}); submitErr != nil {
+		t.Fatalf("Pool.Go() error = %v", submitErr)
 	}
 	err = pool.Wait()
 	if !errors.Is(err, taskErr) || !errors.Is(err, context.Canceled) {

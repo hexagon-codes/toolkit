@@ -7,9 +7,7 @@ import (
 
 func TestPaginationUsesInt64ForCountDerivedFields(t *testing.T) {
 	pagination := New(1, 1, math.MaxInt64)
-	var _ int64 = pagination.Page
-	var _ int64 = pagination.TotalPages
-	var _ int64 = pagination.Offset
+	_ = [...]int64{pagination.Page, pagination.TotalPages, pagination.Offset}
 	if pagination.TotalPages != math.MaxInt64 {
 		t.Fatalf("TotalPages = %d, want %d", pagination.TotalPages, int64(math.MaxInt64))
 	}

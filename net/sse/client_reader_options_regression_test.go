@@ -28,7 +28,8 @@ func TestClientAppliesReaderResourceLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for range stream.Events() {
+	for event := range stream.Events() {
+		_ = event
 	}
 	var terminalErr error
 	for err := range stream.Errors() {
