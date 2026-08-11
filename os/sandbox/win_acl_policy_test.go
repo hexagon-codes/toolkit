@@ -38,7 +38,8 @@ func TestWindowsWorkspaceRejectsRootJunction(t *testing.T) {
 	junctionParent := t.TempDir()
 	targetPath := t.TempDir()
 	junctionPath := filepath.Join(junctionParent, "workspace-junction")
-	command := exec.Command(
+	command := exec.CommandContext(
+		context.Background(),
 		canonicalWindowsSystemExecutable(t, "cmd.exe"),
 		"/d",
 		"/c",
@@ -67,7 +68,8 @@ func TestWindowsWorkspaceRejectsRootJunction(t *testing.T) {
 func TestWindowsWorkspaceRootGuardRejectsJunction(t *testing.T) {
 	junctionPath := filepath.Join(t.TempDir(), "workspace-junction")
 	targetPath := t.TempDir()
-	command := exec.Command(
+	command := exec.CommandContext(
+		context.Background(),
 		canonicalWindowsSystemExecutable(t, "cmd.exe"),
 		"/d",
 		"/c",
@@ -151,7 +153,8 @@ func TestWindowsWorkspaceRejectsJunction(t *testing.T) {
 	sandboxValue := newWindowsTestSandbox(t, Config{Workspace: workspacePath, RequiredCapabilities: UntrustedCodeIsolationCapabilities})
 	externalDirectory := t.TempDir()
 	junctionPath := filepath.Join(workspacePath, "outside-junction")
-	command := exec.Command(
+	command := exec.CommandContext(
+		context.Background(),
 		canonicalWindowsSystemExecutable(t, "cmd.exe"),
 		"/d",
 		"/c",

@@ -301,7 +301,8 @@ func TestWindows_ProcessContainmentRootPayload(t *testing.T) {
 		fmt.Print("PROCESS_TREE_FIXTURE_INVALID")
 		return
 	}
-	child := exec.Command(
+	child := exec.CommandContext(
+		context.Background(),
 		os.Args[0],
 		"-test.run=^TestWindows_ProcessContainmentChildPayload$",
 		"-test.count=1",
@@ -395,7 +396,7 @@ func TestWindows_PersistentIdentitySurvivesInitializerCrash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve test executable: %v", err)
 	}
-	initializer := exec.Command(testExecutable, "-test.run=^TestWindows_CrashingInitializerPayload$", "-test.count=1") // #nosec G204 -- 仅重启当前测试二进制。
+	initializer := exec.CommandContext(context.Background(), testExecutable, "-test.run=^TestWindows_CrashingInitializerPayload$", "-test.count=1") // #nosec G204 -- 仅重启当前测试二进制。
 	initializer.Env = append(
 		os.Environ(),
 		"TOOLKIT_WINDOWS_CRASH_INITIALIZER=1",
@@ -819,8 +820,8 @@ func installWindowsTestPayload(t *testing.T, workspacePath, filename string) str
 		t.Fatalf("read test executable: %v", err)
 	}
 	payloadPath := filepath.Join(workspacePath, filename)
-	if err := os.WriteFile(payloadPath, payload, 0o700); err != nil {
-		t.Fatalf("write test payload: %v", err)
+	if writeErr := os.WriteFile(payloadPath, payload, 0o700); writeErr != nil {
+		t.Fatalf("write test payload: %v", writeErr)
 	}
 	file, openErr := os.Open(payloadPath)
 	if openErr != nil {

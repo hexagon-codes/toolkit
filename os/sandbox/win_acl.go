@@ -581,13 +581,25 @@ func setPersistentWindowsWorkspaceACL(file *os.File, ownerSID *windows.SID, appC
 		return fmt.Errorf("build persistent workspace DACL: %w", err)
 	}
 
-	writableHandle, err := reopenWindowsHandle(
-		windows.Handle(file.Fd()),
+	// ReOpenFile 不能提升访问权限（请求超过原句柄权限会得到 ACCESS_DENIED），
+	// DACL 更新必须按路径重新打开文件请求 WRITE_DAC。
+	objectPath, pathErr := canonicalWindowsPathFromHandle(file)
+	if pathErr != nil {
+		return fmt.Errorf("resolve workspace object path for DACL update: %w", pathErr)
+	}
+	pathPointer, pathErr := windows.UTF16PtrFromString(objectPath)
+	if pathErr != nil {
+		return fmt.Errorf("encode workspace object path for DACL update: %w", pathErr)
+	}
+	writableHandle, err := windows.CreateFile(
+		pathPointer,
 		windows.READ_CONTROL|windows.WRITE_DAC,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
 		windowsReparseFlag,
+		0,
 	)
-	runtime.KeepAlive(file)
 	if err != nil {
 		return fmt.Errorf("open workspace object for DACL update: %w", err)
 	}
