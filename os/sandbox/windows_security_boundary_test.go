@@ -249,7 +249,7 @@ func windowsUDP4Fixture() (string, func(), error) {
 }
 
 func windowsUDP6Fixture() (string, func(), error) {
-	connection, err := net.ListenPacket("udp6", "[::1]:0")
+	connection, err := (&net.ListenConfig{}).ListenPacket(context.Background(), "udp6", "[::1]:0")
 	if err != nil {
 		return "", nil, err
 	}

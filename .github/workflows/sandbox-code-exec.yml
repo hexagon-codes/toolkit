@@ -190,6 +190,7 @@ jobs:
 
       - name: Normalize checkout line endings (Windows)
         if: runner.os == 'Windows'
+        working-directory: toolkit
         shell: pwsh
         run: |
           # Windows runner 全局 autocrlf=true 会把文本文件检出为 CRLF，导致 gofmt/tidy/

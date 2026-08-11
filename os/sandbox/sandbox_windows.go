@@ -29,7 +29,7 @@ func (*windowsSandbox) sandboxCloseRetryable() {}
 
 func newPlatformSandbox(cfg Config) (Sandbox, error) {
 	if len(cfg.ReadablePaths) != 0 {
-		return nil, fmt.Errorf("Windows ReadablePaths are unsupported without brokered read-only mappings")
+		return nil, fmt.Errorf("windows ReadablePaths are unsupported without brokered read-only mappings")
 	}
 	if cfg.Network != NetworkDisabled {
 		return nil, fmt.Errorf(
@@ -60,10 +60,10 @@ func (s *windowsSandbox) sandboxCapabilities(ctx context.Context) (CapabilitySet
 		return 0, err
 	}
 	if s == nil || s.workspace == nil {
-		return 0, fmt.Errorf("Windows sandbox is not initialized")
+		return 0, fmt.Errorf("windows sandbox is not initialized")
 	}
 	if s.cfg.Network != NetworkDisabled {
-		return 0, fmt.Errorf("%w: Windows cannot provide the complete host network view", ErrUnsupportedNetworkPolicy)
+		return 0, fmt.Errorf("%w: windows cannot provide the complete host network view", ErrUnsupportedNetworkPolicy)
 	}
 	available := CapabilityFilesystem |
 		CapabilityNetwork |
