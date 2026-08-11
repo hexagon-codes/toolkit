@@ -215,20 +215,20 @@ func (h *priorityHeap) Pop() any {
 
 // PriorityQueue is a thread-safe priority queue for tasks
 type PriorityQueue struct {
-	heap priorityHeap
-	lock sync.Mutex
-	cond *sync.Cond
-	cap  int
+	heap    priorityHeap
+	lock    sync.Mutex
+	waiters *waitNotifier
+	cap     int
 }
 
 // NewPriorityQueue creates a new priority queue with optional capacity.
 // If cap <= 0, the queue is unbounded.
 func NewPriorityQueue(capacity int) *PriorityQueue {
 	pq := &PriorityQueue{
-		heap: make(priorityHeap, 0),
-		cap:  capacity,
+		heap:    make(priorityHeap, 0),
+		waiters: newWaitNotifier(),
+		cap:     capacity,
 	}
-	pq.cond = sync.NewCond(&pq.lock)
 	heap.Init(&pq.heap)
 	return pq
 }
@@ -249,7 +249,7 @@ func (pq *PriorityQueue) Push(fn func(), priority int) bool {
 		submitted: time.Now(),
 	}
 	heap.Push(&pq.heap, task)
-	pq.cond.Signal()
+	pq.waiters.signalLocked()
 	return true
 }
 
@@ -269,59 +269,24 @@ func (pq *PriorityQueue) Pop() func() {
 
 // PopWait removes and returns the highest priority task, waiting if empty.
 // Returns nil if the done channel is closed.
-// 使用定时唤醒机制来检查 done 通道，避免每次等待都创建监听 goroutine。
 func (pq *PriorityQueue) PopWait(done <-chan struct{}) func() {
-	// 先不持锁检查 done
-	select {
-	case <-done:
-		return nil
-	default:
-	}
-
 	pq.lock.Lock()
 	defer pq.lock.Unlock()
 
-	// 启动一个后台定时器，定期唤醒等待者检查 done 通道
-	// 这比每次循环创建 goroutine 更高效
-	stopTimer := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(50 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-done:
-				pq.cond.Broadcast()
-				return
-			case <-stopTimer:
-				return
-			case <-ticker.C:
-				pq.cond.Broadcast()
-			}
-		}
-	}()
-	defer close(stopTimer)
-
-	for len(pq.heap) == 0 {
-		// 检查是否已关闭
+	for {
 		select {
 		case <-done:
 			return nil
 		default:
 		}
 
-		// 等待条件变量（会被定时器或 Push 唤醒）
-		pq.cond.Wait()
-
-		// 再次检查 done 通道
-		select {
-		case <-done:
-			return nil
-		default:
+		if len(pq.heap) > 0 {
+			task := mustPoolValue[*PriorityTask](heap.Pop(&pq.heap))
+			return task.fn
 		}
+
+		pq.waiters.waitLocked(&pq.lock, done)
 	}
-
-	task := mustPoolValue[*PriorityTask](heap.Pop(&pq.heap))
-	return task.fn
 }
 
 // Len returns the number of tasks in the queue.
@@ -345,12 +310,16 @@ func (pq *PriorityQueue) Clear() {
 
 // Signal wakes up one waiting consumer.
 func (pq *PriorityQueue) Signal() {
-	pq.cond.Signal()
+	pq.lock.Lock()
+	pq.waiters.signalLocked()
+	pq.lock.Unlock()
 }
 
 // Broadcast wakes up all waiting consumers.
 func (pq *PriorityQueue) Broadcast() {
-	pq.cond.Broadcast()
+	pq.lock.Lock()
+	pq.waiters.broadcastLocked()
+	pq.lock.Unlock()
 }
 
 // ============================================================================

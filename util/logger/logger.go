@@ -119,6 +119,7 @@ func New(cfg *Config) (*Logger, error) {
 	} else {
 		handler = slog.NewJSONHandler(output, opts)
 	}
+	handler = newSecureHandler(handler)
 
 	return &Logger{
 		slog:   slog.New(handler),

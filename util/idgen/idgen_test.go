@@ -1,6 +1,7 @@
 package idgen
 
 import (
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -215,10 +216,9 @@ func TestNanoIDSize(t *testing.T) {
 }
 
 func TestNanoIDSize_ZeroSize(t *testing.T) {
-	id := NanoIDSize(0)
-	// 应该返回默认长度
-	if len(id) != DefaultSize {
-		t.Errorf("expected default length %d, got %d", DefaultSize, len(id))
+	id, err := TryNanoIDSize(0)
+	if id != "" || !errors.Is(err, ErrInvalidSize) {
+		t.Fatalf("TryNanoIDSize(0) = (%q, %v), want empty ErrInvalidSize", id, err)
 	}
 }
 
@@ -241,11 +241,9 @@ func TestNanoIDCustom(t *testing.T) {
 }
 
 func TestNanoIDCustom_EmptyAlphabet(t *testing.T) {
-	id := NanoIDCustom("", 10)
-
-	// 应该使用默认字符集
-	if len(id) != 10 {
-		t.Errorf("expected length 10, got %d", len(id))
+	id, err := TryNanoIDCustom("", 10)
+	if id != "" || !errors.Is(err, ErrInvalidAlphabet) {
+		t.Fatalf("TryNanoIDCustom() = (%q, %v), want empty ErrInvalidAlphabet", id, err)
 	}
 }
 

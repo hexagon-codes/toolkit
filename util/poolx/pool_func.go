@@ -21,8 +21,6 @@ type PoolWithFunc struct {
 	argChanSize int32
 
 	// Worker management
-	workers     *workerFuncStack
-	workerCount atomic.Int32
 	workerID    atomic.Int32
 	workerCache sync.Pool
 
@@ -30,24 +28,22 @@ type PoolWithFunc struct {
 	argCh chan any
 
 	// Blocking control
-	blockingCount atomic.Int32
-	cond          *sync.Cond
+	waiters *waitNotifier
 
 	// State
-	state     atomic.Int32
-	heartbeat chan struct{}
-	wg        sync.WaitGroup
-
-	// Metrics
-	metrics *Metrics
+	state        atomic.Int32
+	generationID atomic.Uint64
+	generation   atomic.Pointer[poolFuncGeneration]
 
 	// Hooks
 	hooks *Hooks
 
-	// Creation time
-	createdAt time.Time
+	maxWorkers atomic.Int32
 
-	lock sync.Mutex
+	panicHandler atomic.Pointer[panicHandlerSnapshot]
+
+	lifecycleMu sync.Mutex
+	lock        sync.Mutex
 }
 
 // NewPoolWithFunc creates a new pool with a single function
@@ -80,26 +76,25 @@ func NewPoolWithFunc(name string, poolFunc func(any), opts ...Option) *PoolWithF
 		name:        name,
 		poolFunc:    poolFunc,
 		argChanSize: config.QueueSize,
-		workers:     newWorkerFuncStack(int(config.MaxWorkers)),
 		argCh:       make(chan any, config.QueueSize),
-		heartbeat:   make(chan struct{}),
-		metrics:     &Metrics{},
-		createdAt:   time.Now(),
+		waiters:     newWaitNotifier(),
 	}
-
-	p.cond = sync.NewCond(&p.lock)
+	p.maxWorkers.Store(config.MaxWorkers)
+	p.panicHandler.Store(newPanicHandlerSnapshot(config.PanicHandler))
+	generation := newPoolFuncGeneration(p.generationID.Add(1), config.MaxWorkers)
+	p.generation.Store(generation)
 
 	p.workerCache.New = func() any {
-		return &workerFunc{
-			pool: p,
-		}
+		return &workerFunc{}
 	}
 
 	// Preheat workers
-	p.preheat()
+	p.lock.Lock()
+	p.preheatLocked(generation)
+	p.lock.Unlock()
 
 	// Start cleaner
-	go p.purgeStaleWorkers()
+	go p.purgeStaleWorkers(generation)
 
 	// 注意：PoolWithFunc 目前不支持 AutoScaler。
 	// 如需自动扩缩容，请使用 Pool + SubmitFunc。
@@ -107,53 +102,48 @@ func NewPoolWithFunc(name string, poolFunc func(any), opts ...Option) *PoolWithF
 	return p
 }
 
-// preheat creates the minimum number of workers
-func (p *PoolWithFunc) preheat() {
+// preheatLocked 在调用方持有生命周期锁时创建本代际的最小 Worker 集合。
+func (p *PoolWithFunc) preheatLocked(generation *poolFuncGeneration) {
 	for i := int32(0); i < p.config.MinWorkers; i++ {
-		w := p.createWorker()
+		w := p.createWorkerLocked(generation)
 		if w == nil {
 			break
 		}
 		w.run()
-		p.workers.push(w)
-		p.metrics.IdleWorkers.Add(1)
+		generation.workers.push(w)
+		generation.metrics.IdleWorkers.Add(1)
 	}
 }
 
-// createWorker creates a new worker
-func (p *PoolWithFunc) createWorker() *workerFunc {
-	if p.workerCount.Load() >= p.config.MaxWorkers {
+// createWorkerLocked 只为仍处于运行状态的指定代际登记 Worker。
+func (p *PoolWithFunc) createWorkerLocked(generation *poolFuncGeneration) *workerFunc {
+	if generation == nil || p.generation.Load() != generation || generation.state.Load() == stateClosed {
 		return nil
 	}
-
-	// Atomic increment
-	for {
-		current := p.workerCount.Load()
-		if current >= p.config.MaxWorkers {
-			return nil
-		}
-		if p.workerCount.CompareAndSwap(current, current+1) {
-			break
-		}
+	if generation.workerCount.Load() >= p.maxWorkers.Load() {
+		return nil
 	}
+	generation.workerCount.Add(1)
+	generation.wg.Add(1)
 
 	id := p.workerID.Add(1)
 	w := mustPoolValue[*workerFunc](p.workerCache.Get())
 	w.pool = p
+	w.generation = generation
 	w.id = id
 	w.lastActive.Store(time.Now().UnixNano())
 	w.argCh = make(chan any, 1)
 
-	p.metrics.RunningWorkers.Add(1)
+	generation.metrics.RunningWorkers.Add(1)
 
 	// Update peak
 	for {
-		peak := p.metrics.PeakWorkers.Load()
-		current := p.metrics.RunningWorkers.Load()
+		peak := generation.metrics.PeakWorkers.Load()
+		current := generation.metrics.RunningWorkers.Load()
 		if current <= peak {
 			break
 		}
-		if p.metrics.PeakWorkers.CompareAndSwap(peak, current) {
+		if generation.metrics.PeakWorkers.CompareAndSwap(peak, current) {
 			break
 		}
 	}
@@ -161,16 +151,18 @@ func (p *PoolWithFunc) createWorker() *workerFunc {
 	return w
 }
 
-// retrieveWorker gets an available worker
-func (p *PoolWithFunc) retrieveWorker() *workerFunc {
-	// Try idle stack first
-	if w := p.workers.pop(); w != nil {
-		p.metrics.IdleWorkers.Add(-1)
+// retrieveWorkerLocked 从指定代际获取或创建一个 Worker。
+func (p *PoolWithFunc) retrieveWorkerLocked(generation *poolFuncGeneration) *workerFunc {
+	if generation == nil || p.generation.Load() != generation || generation.state.Load() == stateClosed {
+		return nil
+	}
+	if w := generation.workers.pop(); w != nil {
+		generation.metrics.IdleWorkers.Add(-1)
 		return w
 	}
 
 	// Try to create new worker
-	if w := p.createWorker(); w != nil {
+	if w := p.createWorkerLocked(generation); w != nil {
 		w.run()
 		return w
 	}
@@ -181,18 +173,21 @@ func (p *PoolWithFunc) retrieveWorker() *workerFunc {
 // revertWorker returns a worker to the idle stack
 func (p *PoolWithFunc) revertWorker(w *workerFunc) bool {
 	w.lastActive.Store(time.Now().UnixNano())
+	generation := w.generation
 
 	p.lock.Lock()
 	defer p.lock.Unlock()
 
-	// Check state under lock to avoid race with Release
-	if p.state.Load() == stateClosed {
+	if generation.state.Load() == stateClosed {
+		return false
+	}
+	if generation.workerCount.Load() > p.maxWorkers.Load() {
 		return false
 	}
 
-	if p.workers.push(w) {
-		p.metrics.IdleWorkers.Add(1)
-		p.cond.Signal()
+	if generation.workers.push(w) {
+		generation.metrics.IdleWorkers.Add(1)
+		p.waiters.signalLocked()
 		return true
 	}
 
@@ -200,39 +195,39 @@ func (p *PoolWithFunc) revertWorker(w *workerFunc) bool {
 }
 
 // purgeStaleWorkers removes expired workers
-func (p *PoolWithFunc) purgeStaleWorkers() {
+func (p *PoolWithFunc) purgeStaleWorkers(generation *poolFuncGeneration) {
 	ticker := time.NewTicker(p.config.WorkerExpiry)
 	defer ticker.Stop()
-
-	// Capture heartbeat channel under lock
-	p.lock.Lock()
-	heartbeat := p.heartbeat
-	p.lock.Unlock()
 
 	for {
 		select {
 		case <-ticker.C:
-			if p.state.Load() == stateClosed {
+			if generation.state.Load() == stateClosed {
 				return
 			}
-			p.cleanupExpiredWorkers()
-		case <-heartbeat:
+			p.cleanupExpiredWorkers(generation)
+		case <-generation.heartbeat:
 			return
 		}
 	}
 }
 
-func (p *PoolWithFunc) cleanupExpiredWorkers() {
-	expired := p.workers.retrieveExpiry(p.config.WorkerExpiry)
-	p.metrics.IdleWorkers.Add(-int32(len(expired)))
+func (p *PoolWithFunc) cleanupExpiredWorkers(generation *poolFuncGeneration) {
+	p.lock.Lock()
+	defer p.lock.Unlock()
+	if generation.state.Load() == stateClosed {
+		return
+	}
+	expired := generation.workers.retrieveExpiry(p.config.WorkerExpiry)
+	generation.metrics.IdleWorkers.Add(-int32(len(expired)))
 
 	minToKeep := p.config.MinWorkers
-	currentRunning := p.workerCount.Load()
+	currentRunning := generation.workerCount.Load()
 
 	for _, w := range expired {
 		if currentRunning <= minToKeep {
-			if p.workers.push(w) {
-				p.metrics.IdleWorkers.Add(1)
+			if generation.workers.push(w) {
+				generation.metrics.IdleWorkers.Add(1)
 			} else {
 				w.finish()
 			}
@@ -246,116 +241,158 @@ func (p *PoolWithFunc) cleanupExpiredWorkers() {
 // Invoke submits an argument to be processed by the pool function.
 // Blocks if no workers are available.
 func (p *PoolWithFunc) Invoke(arg any) error {
-	if p.state.Load() == stateClosed {
+	generation := p.loadRunningGeneration()
+	if generation == nil {
 		return ErrPoolClosed
 	}
 
-	p.metrics.SubmittedTasks.Add(1)
+	generation.metrics.SubmittedTasks.Add(1)
 
-	// Try to get a worker
-	if w := p.retrieveWorker(); w != nil {
+	p.lock.Lock()
+	if !p.generationRunningLocked(generation) {
+		p.lock.Unlock()
+		return ErrPoolClosed
+	}
+	if w := p.retrieveWorkerLocked(generation); w != nil {
+		p.lock.Unlock()
 		w.argCh <- arg
 		return nil
 	}
+	p.lock.Unlock()
 
 	// Non-blocking mode
 	if p.config.NonBlocking {
-		p.metrics.RejectedTasks.Add(1)
+		generation.metrics.RejectedTasks.Add(1)
 		return ErrPoolOverload
 	}
 
 	// Check blocking limit
 	if p.config.MaxBlockingTasks > 0 {
-		if p.blockingCount.Load() >= p.config.MaxBlockingTasks {
-			p.metrics.RejectedTasks.Add(1)
+		if generation.blockingCount.Load() >= p.config.MaxBlockingTasks {
+			generation.metrics.RejectedTasks.Add(1)
 			return ErrPoolOverload
 		}
 	}
 
 	// Wait for worker
-	p.blockingCount.Add(1)
-	p.metrics.BlockingTasks.Add(1)
+	generation.blockingCount.Add(1)
+	generation.metrics.BlockingTasks.Add(1)
 	defer func() {
-		p.blockingCount.Add(-1)
-		p.metrics.BlockingTasks.Add(-1)
+		generation.blockingCount.Add(-1)
+		generation.metrics.BlockingTasks.Add(-1)
 	}()
 
 	p.lock.Lock()
 	for {
-		if p.state.Load() == stateClosed {
+		if !p.generationRunningLocked(generation) {
 			p.lock.Unlock()
 			return ErrPoolClosed
 		}
 
-		if w := p.workers.pop(); w != nil {
-			p.metrics.IdleWorkers.Add(-1)
+		if w := p.retrieveWorkerLocked(generation); w != nil {
 			p.lock.Unlock()
 			w.argCh <- arg
 			return nil
 		}
 
-		if w := p.createWorker(); w != nil {
-			p.lock.Unlock()
-			w.run()
-			w.argCh <- arg
-			return nil
-		}
-
-		p.cond.Wait()
+		p.waiters.waitLocked(&p.lock, nil)
 	}
+}
+
+func (p *PoolWithFunc) loadRunningGeneration() *poolFuncGeneration {
+	generation := p.generation.Load()
+	if generation == nil || generation.state.Load() == stateClosed {
+		return nil
+	}
+	return generation
+}
+
+func (p *PoolWithFunc) generationRunningLocked(generation *poolFuncGeneration) bool {
+	return generation != nil && p.generation.Load() == generation && generation.state.Load() == stateRunning
 }
 
 // TryInvoke attempts to submit an argument without blocking.
 // Returns false if no worker is immediately available.
 func (p *PoolWithFunc) TryInvoke(arg any) bool {
-	if p.state.Load() == stateClosed {
+	generation := p.loadRunningGeneration()
+	if generation == nil {
 		return false
 	}
 
-	if w := p.retrieveWorker(); w != nil {
-		p.metrics.SubmittedTasks.Add(1)
+	p.lock.Lock()
+	if !p.generationRunningLocked(generation) {
+		p.lock.Unlock()
+		return false
+	}
+	if w := p.retrieveWorkerLocked(generation); w != nil {
+		p.lock.Unlock()
+		generation.metrics.SubmittedTasks.Add(1)
 		w.argCh <- arg
 		return true
 	}
+	p.lock.Unlock()
 
-	p.metrics.RejectedTasks.Add(1)
+	generation.metrics.RejectedTasks.Add(1)
 	return false
 }
 
 // InvokeWithTimeout submits an argument with a timeout for getting a worker.
 func (p *PoolWithFunc) InvokeWithTimeout(arg any, timeout time.Duration) error {
-	if p.state.Load() == stateClosed {
+	generation := p.loadRunningGeneration()
+	if generation == nil {
 		return ErrPoolClosed
 	}
 
-	// 快速路径：尝试非阻塞获取 worker
-	if w := p.retrieveWorker(); w != nil {
-		p.metrics.SubmittedTasks.Add(1)
+	p.lock.Lock()
+	if !p.generationRunningLocked(generation) {
+		p.lock.Unlock()
+		return ErrPoolClosed
+	}
+	if w := p.retrieveWorkerLocked(generation); w != nil {
+		p.lock.Unlock()
+		generation.metrics.SubmittedTasks.Add(1)
 		w.argCh <- arg
 		return nil
 	}
+	p.lock.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return p.invokeWithContext(ctx, arg)
+	return p.invokeWithContext(ctx, generation, arg)
 }
 
 // InvokeWithContext submits an argument with context cancellation support.
 func (p *PoolWithFunc) InvokeWithContext(ctx context.Context, arg any) error {
-	if p.state.Load() == stateClosed {
+	generation := p.loadRunningGeneration()
+	if generation == nil {
 		return ErrPoolClosed
 	}
 
-	// 快速路径：尝试非阻塞获取 worker
-	if p.TryInvoke(arg) {
+	p.lock.Lock()
+	if !p.generationRunningLocked(generation) {
+		p.lock.Unlock()
+		return ErrPoolClosed
+	}
+	if w := p.retrieveWorkerLocked(generation); w != nil {
+		p.lock.Unlock()
+		generation.metrics.SubmittedTasks.Add(1)
+		w.argCh <- arg
 		return nil
 	}
+	p.lock.Unlock()
 
-	return p.invokeWithContext(ctx, arg)
+	return p.invokeWithContext(ctx, generation, arg)
 }
 
 // invokeWithContext 直接在当前 goroutine 等待，避免启动额外 goroutine 导致泄漏。
-func (p *PoolWithFunc) invokeWithContext(ctx context.Context, arg any) error {
+func (p *PoolWithFunc) invokeWithContext(ctx context.Context, generation *poolFuncGeneration, arg any) error {
+	generation.blockingCount.Add(1)
+	generation.metrics.BlockingTasks.Add(1)
+	defer func() {
+		generation.blockingCount.Add(-1)
+		generation.metrics.BlockingTasks.Add(-1)
+	}()
+
 	p.lock.Lock()
 	for {
 		select {
@@ -365,54 +402,57 @@ func (p *PoolWithFunc) invokeWithContext(ctx context.Context, arg any) error {
 		default:
 		}
 
-		if p.state.Load() == stateClosed {
+		if !p.generationRunningLocked(generation) {
 			p.lock.Unlock()
 			return ErrPoolClosed
 		}
 
-		if w := p.workers.pop(); w != nil {
-			p.metrics.IdleWorkers.Add(-1)
+		if w := p.retrieveWorkerLocked(generation); w != nil {
 			p.lock.Unlock()
-			p.metrics.SubmittedTasks.Add(1)
+			generation.metrics.SubmittedTasks.Add(1)
 			w.argCh <- arg
 			return nil
 		}
 
-		if w := p.createWorker(); w != nil {
-			p.lock.Unlock()
-			w.run()
-			p.metrics.SubmittedTasks.Add(1)
-			w.argCh <- arg
-			return nil
-		}
-
-		p.cond.Wait()
+		p.waiters.waitLocked(&p.lock, ctx.Done())
 	}
 }
 
 // Running returns the number of running workers.
 func (p *PoolWithFunc) Running() int32 {
-	return p.workerCount.Load()
+	generation := p.generation.Load()
+	if generation == nil {
+		return 0
+	}
+	return generation.workerCount.Load()
 }
 
 // Free returns the number of available worker slots.
 func (p *PoolWithFunc) Free() int32 {
-	return p.config.MaxWorkers - p.workerCount.Load()
+	return p.maxWorkers.Load() - p.Running()
 }
 
 // Waiting returns the number of waiting callers.
 func (p *PoolWithFunc) Waiting() int32 {
-	return p.metrics.BlockingTasks.Load()
+	generation := p.generation.Load()
+	if generation == nil {
+		return 0
+	}
+	return generation.metrics.BlockingTasks.Load()
 }
 
 // Idle returns the number of idle workers.
 func (p *PoolWithFunc) Idle() int32 {
-	return int32(p.workers.size())
+	generation := p.generation.Load()
+	if generation == nil {
+		return 0
+	}
+	return int32(generation.workers.size())
 }
 
 // Cap returns the pool capacity.
 func (p *PoolWithFunc) Cap() int32 {
-	return p.config.MaxWorkers
+	return p.maxWorkers.Load()
 }
 
 // Name returns the pool name.
@@ -427,39 +467,71 @@ func (p *PoolWithFunc) IsClosed() bool {
 
 // Metrics returns performance metrics.
 func (p *PoolWithFunc) Metrics() MetricsSnapshot {
-	return p.metrics.Snapshot()
+	return p.generation.Load().metrics.Snapshot()
 }
 
 // ResetMetrics resets all metrics.
 func (p *PoolWithFunc) ResetMetrics() {
-	p.metrics.Reset()
+	p.generation.Load().metrics.Reset()
 }
 
 // Uptime returns how long the pool has been running.
 func (p *PoolWithFunc) Uptime() time.Duration {
-	return time.Since(p.createdAt)
+	return time.Since(p.generation.Load().createdAt)
 }
 
 // Tune dynamically adjusts the pool capacity.
 func (p *PoolWithFunc) Tune(newCap int32) {
-	if newCap <= 0 || p.state.Load() == stateClosed {
+	if newCap <= 0 {
 		return
 	}
 
 	p.lock.Lock()
 	defer p.lock.Unlock()
+	generation := p.generation.Load()
+	if !p.generationRunningLocked(generation) {
+		return
+	}
 
-	p.config.MaxWorkers = newCap
+	p.maxWorkers.Store(newCap)
+	p.waiters.broadcastLocked()
 
-	// Shrink if necessary
-	for p.workerCount.Load() > newCap {
-		if w := p.workers.pop(); w != nil {
-			p.metrics.IdleWorkers.Add(-1)
+	excess := generation.workerCount.Load() - newCap
+	for excess > 0 {
+		if w := generation.workers.pop(); w != nil {
+			generation.metrics.IdleWorkers.Add(-1)
 			w.finish()
+			excess--
 		} else {
 			break
 		}
 	}
+	generation.workers.resize(int(newCap))
+}
+
+// closeCurrentGeneration 封口当前代际，并返回其唯一的退出通知。
+func (p *PoolWithFunc) closeCurrentGeneration() (generation *poolFuncGeneration, done <-chan struct{}) {
+	p.lock.Lock()
+	defer p.lock.Unlock()
+	generation = p.generation.Load()
+	if generation == nil || generation.state.Load() == stateClosed {
+		return nil, nil
+	}
+
+	generation.state.Store(stateClosed)
+	p.state.Store(stateClosed)
+	p.waiters.broadcastLocked()
+	generation.stopCleaner()
+	for {
+		worker := generation.workers.pop()
+		if worker == nil {
+			break
+		}
+		generation.metrics.IdleWorkers.Add(-1)
+		worker.finish()
+	}
+	done = generation.retire()
+	return generation, done
 }
 
 // OnHook registers a hook callback.
@@ -474,92 +546,61 @@ func (p *PoolWithFunc) OnHook(hookType HookType, fn HookFunc) {
 
 // Release shuts down the pool and waits for all workers to finish.
 func (p *PoolWithFunc) Release() {
-	if !p.state.CompareAndSwap(stateRunning, stateClosed) {
+	p.lifecycleMu.Lock()
+	defer p.lifecycleMu.Unlock()
+	_, done := p.closeCurrentGeneration()
+	if done == nil {
 		return
 	}
-
-	p.lock.Lock()
-	p.cond.Broadcast()
-	p.lock.Unlock()
-
-	close(p.heartbeat)
-
-	// Close all idle workers
-	// Need to keep trying because workers that were busy might
-	// finish and push themselves back to the stack after we pop.
-	for p.workerCount.Load() > 0 {
-		for {
-			if w := p.workers.pop(); w != nil {
-				w.finish()
-			} else {
-				break
-			}
-		}
-		time.Sleep(time.Millisecond)
-	}
-
-	p.wg.Wait()
+	<-done
 }
 
 // ReleaseTimeout shuts down with a timeout.
 func (p *PoolWithFunc) ReleaseTimeout(timeout time.Duration) error {
-	if !p.state.CompareAndSwap(stateRunning, stateClosed) {
+	p.lifecycleMu.Lock()
+	defer p.lifecycleMu.Unlock()
+	deadline := time.Now().Add(timeout)
+	_, done := p.closeCurrentGeneration()
+	if done == nil {
 		return nil
 	}
-
-	p.lock.Lock()
-	p.cond.Broadcast()
-	p.lock.Unlock()
-
-	close(p.heartbeat)
-
-	// Close all idle workers with timeout
-	deadline := time.Now().Add(timeout)
-	for p.workerCount.Load() > 0 && time.Now().Before(deadline) {
-		for {
-			if w := p.workers.pop(); w != nil {
-				w.finish()
-			} else {
-				break
-			}
-		}
-		time.Sleep(time.Millisecond)
-	}
-
-	done := make(chan struct{})
-	go func() {
-		p.wg.Wait()
-		close(done)
-	}()
 
 	remaining := time.Until(deadline)
 	if remaining <= 0 {
+		select {
+		case <-done:
+			return nil
+		default:
+		}
 		return ErrTimeout
 	}
 
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
 	select {
 	case <-done:
 		return nil
-	case <-time.After(remaining):
+	case <-timer.C:
 		return ErrTimeout
 	}
 }
 
 // Reboot restarts the pool after it has been closed.
 func (p *PoolWithFunc) Reboot() {
-	if !p.state.CompareAndSwap(stateClosed, stateRunning) {
+	p.lifecycleMu.Lock()
+	defer p.lifecycleMu.Unlock()
+	p.lock.Lock()
+	if p.state.Load() != stateClosed {
+		p.lock.Unlock()
 		return
 	}
-
-	p.lock.Lock()
-	p.heartbeat = make(chan struct{})
-	p.workers = newWorkerFuncStack(int(p.config.MaxWorkers))
-	p.metrics.Reset()
-	p.createdAt = time.Now()
+	generation := newPoolFuncGeneration(p.generationID.Add(1), p.maxWorkers.Load())
+	p.generation.Store(generation)
+	p.state.Store(stateRunning)
+	p.preheatLocked(generation)
 	p.lock.Unlock()
 
-	p.preheat()
-	go p.purgeStaleWorkers()
+	go p.purgeStaleWorkers(generation)
 }
 
 // ============================================================================
@@ -568,23 +609,29 @@ func (p *PoolWithFunc) Reboot() {
 
 type workerFunc struct {
 	pool       *PoolWithFunc
+	generation *poolFuncGeneration
 	argCh      chan any
 	lastActive atomic.Int64
 	id         int32
 }
 
 func (w *workerFunc) run() {
-	w.pool.wg.Add(1)
 	go w.loop()
 }
 
 func (w *workerFunc) loop() {
+	pool := w.pool
+	generation := w.generation
 	defer func() {
-		w.pool.workerCount.Add(-1)
-		w.pool.metrics.RunningWorkers.Add(-1)
-		// Put back to cache before wg.Done to avoid race with Reboot
-		w.pool.workerCache.Put(w)
-		w.pool.wg.Done()
+		generation.workerCount.Add(-1)
+		generation.metrics.RunningWorkers.Add(-1)
+		pool.lock.Lock()
+		if pool.generationRunningLocked(generation) {
+			pool.waiters.signalLocked()
+		}
+		pool.lock.Unlock()
+		generation.wg.Done()
+		pool.workerCache.Put(w)
 	}()
 
 	for arg := range w.argCh {
@@ -595,17 +642,18 @@ func (w *workerFunc) loop() {
 		w.execute(arg)
 		w.lastActive.Store(time.Now().UnixNano())
 
-		if !w.pool.revertWorker(w) {
+		if !pool.revertWorker(w) {
 			return
 		}
 	}
 }
 
 func (w *workerFunc) execute(arg any) {
+	generation := w.generation
 	defer func() {
 		if r := recover(); r != nil {
-			w.pool.metrics.FailedTasks.Add(1)
-			if w.pool.config.PanicHandler != nil {
+			generation.metrics.FailedTasks.Add(1)
+			if handler := w.pool.panicHandler.Load(); handler != nil {
 				// 包装 panic handler 调用，防止它本身 panic
 				func() {
 					defer func() {
@@ -613,7 +661,7 @@ func (w *workerFunc) execute(arg any) {
 							return
 						}
 					}()
-					w.pool.config.PanicHandler(r)
+					handler.handle(r)
 				}()
 			}
 		}
@@ -623,8 +671,8 @@ func (w *workerFunc) execute(arg any) {
 	w.pool.poolFunc(arg)
 	execTime := time.Since(startTime)
 
-	w.pool.metrics.TotalExecTime.Add(int64(execTime))
-	w.pool.metrics.CompletedTasks.Add(1)
+	generation.metrics.TotalExecTime.Add(int64(execTime))
+	generation.metrics.CompletedTasks.Add(1)
 }
 
 func (w *workerFunc) finish() {
@@ -682,6 +730,27 @@ func (s *workerFuncStack) size() int {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	return s.len
+}
+
+// resize 调整空闲栈容量，并保持当前 Worker 的栈顺序。
+func (s *workerFuncStack) resize(capacity int) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	if capacity <= 0 || capacity == s.cap {
+		return
+	}
+	if capacity < s.len {
+		capacity = s.len
+	}
+	items := make([]*workerFunc, capacity)
+	for index := 0; index < s.len; index++ {
+		oldIndex := (s.head - s.len + index + s.cap) % s.cap
+		items[index] = s.items[oldIndex]
+	}
+	s.items = items
+	s.cap = capacity
+	s.head = s.len % capacity
+	s.expiry = nil
 }
 
 func (s *workerFuncStack) retrieveExpiry(duration time.Duration) []*workerFunc {

@@ -7,12 +7,12 @@ import (
 func TestNew(t *testing.T) {
 	tests := []struct {
 		name       string
-		page       int
+		page       int64
 		pageSize   int
 		total      int64
-		wantPage   int
-		wantOffset int
-		wantPages  int
+		wantPage   int64
+		wantOffset int64
+		wantPages  int64
 	}{
 		{"normal", 1, 10, 100, 1, 0, 10},
 		{"page 2", 2, 10, 100, 2, 10, 10},

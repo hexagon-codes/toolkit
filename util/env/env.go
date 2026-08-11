@@ -2,6 +2,7 @@
 package env
 
 import (
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -15,7 +16,7 @@ func Get(key string) string {
 
 // GetDefault 获取环境变量，不存在返回默认值
 func GetDefault(key, defaultVal string) string {
-	if val := os.Getenv(key); val != "" {
+	if val, ok := os.LookupEnv(key); ok {
 		return val
 	}
 	return defaultVal
@@ -41,7 +42,7 @@ func MustGet(key string) string {
 
 // GetInt 获取整数环境变量
 func GetInt(key string) int {
-	val := os.Getenv(key)
+	val := strings.TrimSpace(os.Getenv(key))
 	if val == "" {
 		return 0
 	}
@@ -54,7 +55,7 @@ func GetInt(key string) int {
 
 // GetIntDefault 获取整数环境变量，不存在或解析失败返回默认值
 func GetIntDefault(key string, defaultVal int) int {
-	val := os.Getenv(key)
+	val := strings.TrimSpace(os.Getenv(key))
 	if val == "" {
 		return defaultVal
 	}
@@ -67,7 +68,7 @@ func GetIntDefault(key string, defaultVal int) int {
 
 // GetInt64 获取 int64 环境变量
 func GetInt64(key string) int64 {
-	val := os.Getenv(key)
+	val := strings.TrimSpace(os.Getenv(key))
 	if val == "" {
 		return 0
 	}
@@ -80,7 +81,7 @@ func GetInt64(key string) int64 {
 
 // GetInt64Default 获取 int64 环境变量，不存在或解析失败返回默认值
 func GetInt64Default(key string, defaultVal int64) int64 {
-	val := os.Getenv(key)
+	val := strings.TrimSpace(os.Getenv(key))
 	if val == "" {
 		return defaultVal
 	}
@@ -93,12 +94,12 @@ func GetInt64Default(key string, defaultVal int64) int64 {
 
 // GetFloat64 获取 float64 环境变量
 func GetFloat64(key string) float64 {
-	val := os.Getenv(key)
+	val := strings.TrimSpace(os.Getenv(key))
 	if val == "" {
 		return 0
 	}
 	f, err := strconv.ParseFloat(val, 64)
-	if err != nil {
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
 		return 0
 	}
 	return f
@@ -106,12 +107,12 @@ func GetFloat64(key string) float64 {
 
 // GetFloat64Default 获取 float64 环境变量，不存在或解析失败返回默认值
 func GetFloat64Default(key string, defaultVal float64) float64 {
-	val := os.Getenv(key)
+	val := strings.TrimSpace(os.Getenv(key))
 	if val == "" {
 		return defaultVal
 	}
 	f, err := strconv.ParseFloat(val, 64)
-	if err != nil {
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
 		return defaultVal
 	}
 	return f
@@ -121,7 +122,7 @@ func GetFloat64Default(key string, defaultVal float64) float64 {
 // 支持: "true", "1", "yes", "on" (不区分大小写) 返回 true
 // 其他值返回 false
 func GetBool(key string) bool {
-	val := strings.ToLower(os.Getenv(key))
+	val := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
 	return val == "true" || val == "1" || val == "yes" || val == "on"
 }
 
@@ -131,14 +132,14 @@ func GetBoolDefault(key string, defaultVal bool) bool {
 	if !ok {
 		return defaultVal
 	}
-	val = strings.ToLower(val)
+	val = strings.ToLower(strings.TrimSpace(val))
 	return val == "true" || val == "1" || val == "yes" || val == "on"
 }
 
 // GetDuration 获取时间间隔环境变量
 // 支持格式: "1s", "5m", "2h" 等
 func GetDuration(key string) time.Duration {
-	val := os.Getenv(key)
+	val := strings.TrimSpace(os.Getenv(key))
 	if val == "" {
 		return 0
 	}
@@ -151,7 +152,7 @@ func GetDuration(key string) time.Duration {
 
 // GetDurationDefault 获取时间间隔环境变量，不存在或解析失败返回默认值
 func GetDurationDefault(key string, defaultVal time.Duration) time.Duration {
-	val := os.Getenv(key)
+	val := strings.TrimSpace(os.Getenv(key))
 	if val == "" {
 		return defaultVal
 	}
@@ -181,9 +182,9 @@ func GetSlice(key string) []string {
 
 // GetSliceDefault 获取切片环境变量，不存在返回默认值
 func GetSliceDefault(key string, defaultVal []string) []string {
-	val := os.Getenv(key)
-	if val == "" {
-		return defaultVal
+	val, ok := os.LookupEnv(key)
+	if !ok {
+		return append([]string(nil), defaultVal...)
 	}
 	parts := strings.Split(val, ",")
 	result := make([]string, 0, len(parts))
@@ -192,9 +193,6 @@ func GetSliceDefault(key string, defaultVal []string) []string {
 		if p != "" {
 			result = append(result, p)
 		}
-	}
-	if len(result) == 0 {
-		return defaultVal
 	}
 	return result
 }
@@ -218,48 +216,30 @@ func Exists(key string) bool {
 // IsProd 判断是否为生产环境
 // 检查 GO_ENV, ENV, ENVIRONMENT 变量
 func IsProd() bool {
-	envVars := []string{"GO_ENV", "ENV", "ENVIRONMENT"}
-	prodValues := []string{"prod", "production"}
-
-	for _, envVar := range envVars {
-		val := strings.ToLower(os.Getenv(envVar))
-		for _, prodVal := range prodValues {
-			if val == prodVal {
-				return true
-			}
-		}
-	}
-	return false
+	value := currentEnvironment()
+	return value == "prod" || value == "production"
 }
 
 // IsDev 判断是否为开发环境
 func IsDev() bool {
-	envVars := []string{"GO_ENV", "ENV", "ENVIRONMENT"}
-	devValues := []string{"dev", "development", "local"}
-
-	for _, envVar := range envVars {
-		val := strings.ToLower(os.Getenv(envVar))
-		for _, devVal := range devValues {
-			if val == devVal {
-				return true
-			}
-		}
-	}
-	return false
+	value := currentEnvironment()
+	return value == "dev" || value == "development" || value == "local"
 }
 
 // IsTest 判断是否为测试环境
 func IsTest() bool {
-	envVars := []string{"GO_ENV", "ENV", "ENVIRONMENT"}
-	testValues := []string{"test", "testing", "staging"}
+	value := currentEnvironment()
+	return value == "test" || value == "testing" || value == "staging"
+}
 
+// currentEnvironment 按固定优先级返回第一个非空环境标识。
+func currentEnvironment() string {
+	envVars := []string{"GO_ENV", "ENV", "ENVIRONMENT"}
 	for _, envVar := range envVars {
-		val := strings.ToLower(os.Getenv(envVar))
-		for _, testVal := range testValues {
-			if val == testVal {
-				return true
-			}
+		value := strings.ToLower(strings.TrimSpace(os.Getenv(envVar)))
+		if value != "" {
+			return value
 		}
 	}
-	return false
+	return ""
 }

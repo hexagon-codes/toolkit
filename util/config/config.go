@@ -2,11 +2,17 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,7 +27,20 @@ var (
 	ErrInvalidType = errors.New("config: invalid type")
 	// ErrUnsupportedFormat 不支持的配置文件格式
 	ErrUnsupportedFormat = errors.New("config: unsupported file format")
+	// ErrInvalidConfig 配置内容无效
+	ErrInvalidConfig = errors.New("config: invalid data")
+	// ErrUnsafePath 配置路径不满足安全约束
+	ErrUnsafePath = errors.New("config: unsafe path")
+	// ErrInsecurePermissions 配置文件可被非所有者修改
+	ErrInsecurePermissions = errors.New("config: insecure permissions")
+	// ErrFileTooLarge 配置文件超过大小限制
+	ErrFileTooLarge = errors.New("config: file too large")
+	// ErrInvalidPrefix 环境变量前缀无效
+	ErrInvalidPrefix = errors.New("config: invalid environment prefix")
 )
+
+// DefaultMaxFileBytes 是单个配置文件的默认大小上限。
+const DefaultMaxFileBytes = 8 << 20
 
 // Config 配置管理器
 type Config struct {
@@ -47,37 +66,123 @@ func Load(path string) (*Config, error) {
 
 // LoadFile 从文件加载配置
 //
-// 注意：如果路径来自用户输入，调用者应先验证路径安全性
+// 读取时固定父目录句柄，拒绝最终符号链接、非常规文件和可被组或其他用户写入的文件。
 func (c *Config) LoadFile(path string) error {
-	// 规范化路径，防止路径遍历
 	cleanPath := filepath.Clean(path)
-
-	data, err := os.ReadFile(cleanPath)
+	format, err := configFormat(cleanPath)
 	if err != nil {
 		return err
 	}
-
-	ext := strings.ToLower(filepath.Ext(cleanPath))
-	return c.loadData(data, ext)
+	data, err := readConfigFile(cleanPath)
+	if err != nil {
+		return err
+	}
+	return c.loadData(data, format)
 }
 
 // loadData 根据格式解析数据
 func (c *Config) loadData(data []byte, format string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
+	if len(data) > DefaultMaxFileBytes {
+		return fmt.Errorf("%w: got %d bytes, limit is %d", ErrFileTooLarge, len(data), DefaultMaxFileBytes)
+	}
+	parsed := make(map[string]any)
+	parser := &Config{data: parsed}
 	switch format {
 	case ".json":
-		return json.Unmarshal(data, &c.data)
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		decoder.UseNumber()
+		if err := decoder.Decode(&parsed); err != nil {
+			return fmt.Errorf("%w: %w", ErrInvalidConfig, err)
+		}
+		var trailing json.RawMessage
+		if err := decoder.Decode(&trailing); err != io.EOF {
+			if err == nil {
+				return fmt.Errorf("%w: trailing data", ErrInvalidConfig)
+			}
+			return fmt.Errorf("%w: %w", ErrInvalidConfig, err)
+		}
+		if parsed == nil {
+			return fmt.Errorf("%w: root must be an object", ErrInvalidConfig)
+		}
 	case ".yaml", ".yml":
-		return c.parseYAML(data)
+		if err := parser.parseYAML(data); err != nil {
+			return err
+		}
 	case ".toml":
-		return c.parseTOML(data)
+		if err := parser.parseTOML(data); err != nil {
+			return err
+		}
 	case ".env":
-		return c.parseEnv(data)
+		if err := parser.parseEnv(data); err != nil {
+			return err
+		}
 	default:
 		return ErrUnsupportedFormat
 	}
+
+	c.mu.Lock()
+	c.data = parsed
+	c.mu.Unlock()
+	return nil
+}
+
+func configFormat(path string) (string, error) {
+	format := strings.ToLower(filepath.Ext(path))
+	switch format {
+	case ".json", ".yaml", ".yml", ".toml", ".env":
+		return format, nil
+	default:
+		return "", ErrUnsupportedFormat
+	}
+}
+
+func readConfigFile(path string) (data []byte, err error) {
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		err = errors.Join(err, root.Close())
+	}()
+
+	name := filepath.Base(path)
+	linkInfo, err := root.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if linkInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%w: final path is a symbolic link", ErrUnsafePath)
+	}
+	file, err := root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		err = errors.Join(err, file.Close())
+	}()
+
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fileInfo.Mode().IsRegular() || !os.SameFile(linkInfo, fileInfo) {
+		return nil, fmt.Errorf("%w: path identity changed", ErrUnsafePath)
+	}
+	if runtime.GOOS != "windows" && fileInfo.Mode().Perm()&0o022 != 0 {
+		return nil, fmt.Errorf("%w: file must not be group-writable or world-writable", ErrInsecurePermissions)
+	}
+	if fileInfo.Size() > DefaultMaxFileBytes {
+		return nil, fmt.Errorf("%w: got %d bytes, limit is %d", ErrFileTooLarge, fileInfo.Size(), DefaultMaxFileBytes)
+	}
+
+	data, err = io.ReadAll(io.LimitReader(file, DefaultMaxFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > DefaultMaxFileBytes {
+		return nil, fmt.Errorf("%w: limit is %d bytes", ErrFileTooLarge, DefaultMaxFileBytes)
+	}
+	return data, nil
 }
 
 // parseYAML 简单的 YAML 解析（不依赖外部库）
@@ -85,26 +190,39 @@ func (c *Config) loadData(data []byte, format string) error {
 // 不支持嵌套结构、数组、多行字符串等复杂 YAML 特性
 // 对于复杂配置，建议使用 gopkg.in/yaml.v3
 func (c *Config) parseYAML(data []byte) error {
-	// 简化实现：只支持简单的 key: value 格式
 	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
+	for index, line := range lines {
+		line = strings.TrimSuffix(line, "\r")
+		if strings.TrimSpace(line) != "" && len(line) != len(strings.TrimLeft(line, " \t")) {
+			return configLineError("YAML", index+1, "nested values are not supported")
+		}
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+		line = stripInlineComment(line, true)
 
 		parts := strings.SplitN(line, ":", 2)
 		if len(parts) != 2 {
-			continue
+			return configLineError("YAML", index+1, "expected key: value")
 		}
 
 		key := strings.TrimSpace(parts[0])
-		value := strings.TrimSpace(parts[1])
-
-		// 移除引号
-		value = strings.Trim(value, "\"'")
-
-		c.data[key] = parseValue(value)
+		if key == "" {
+			return configLineError("YAML", index+1, "key is empty")
+		}
+		if _, exists := c.data[key]; exists {
+			return configLineError("YAML", index+1, "duplicate key")
+		}
+		rawValue := stripInlineComment(strings.TrimSpace(parts[1]), true)
+		if isUnsupportedCompositeValue(rawValue) {
+			return configLineError("YAML", index+1, "composite values are not supported")
+		}
+		value, err := parseTextValue(rawValue, true)
+		if err != nil {
+			return configLineError("YAML", index+1, err.Error())
+		}
+		c.data[key] = value
 	}
 	return nil
 }
@@ -114,38 +232,56 @@ func (c *Config) parseYAML(data []byte) error {
 // 不支持嵌套表、数组、内联表等复杂 TOML 特性
 // 对于复杂配置，建议使用 github.com/BurntSushi/toml
 func (c *Config) parseTOML(data []byte) error {
-	// 简化实现：只支持简单的 key = value 格式
 	lines := strings.Split(string(data), "\n")
 	currentSection := ""
 
-	for _, line := range lines {
+	for index, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+		line = stripInlineComment(line, false)
+		if line == "" {
+			continue
+		}
 
 		// Section
-		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
-			currentSection = strings.Trim(line, "[]")
+		if strings.HasPrefix(line, "[") {
+			if !strings.HasSuffix(line, "]") {
+				return configLineError("TOML", index+1, "unterminated section")
+			}
+			currentSection = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "["), "]"))
+			if currentSection == "" {
+				return configLineError("TOML", index+1, "section is empty")
+			}
 			continue
 		}
 
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) != 2 {
-			continue
+			return configLineError("TOML", index+1, "expected key = value")
 		}
 
 		key := strings.TrimSpace(parts[0])
-		value := strings.TrimSpace(parts[1])
-
-		// 移除引号
-		value = strings.Trim(value, "\"'")
+		if key == "" {
+			return configLineError("TOML", index+1, "key is empty")
+		}
 
 		if currentSection != "" {
 			key = currentSection + "." + key
 		}
-
-		c.data[key] = parseValue(value)
+		if _, exists := c.data[key]; exists {
+			return configLineError("TOML", index+1, "duplicate key")
+		}
+		rawValue := stripInlineComment(strings.TrimSpace(parts[1]), false)
+		if isUnsupportedCompositeValue(rawValue) {
+			return configLineError("TOML", index+1, "composite values are not supported")
+		}
+		value, err := parseTextValue(rawValue, true)
+		if err != nil {
+			return configLineError("TOML", index+1, err.Error())
+		}
+		c.data[key] = value
 	}
 	return nil
 }
@@ -153,7 +289,7 @@ func (c *Config) parseTOML(data []byte) error {
 // parseEnv 解析 .env 文件
 func (c *Config) parseEnv(data []byte) error {
 	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
+	for index, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
@@ -161,27 +297,97 @@ func (c *Config) parseEnv(data []byte) error {
 
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) != 2 {
-			continue
+			return configLineError("dotenv", index+1, "expected key=value")
 		}
 
 		key := strings.TrimSpace(parts[0])
-		value := strings.TrimSpace(parts[1])
-
-		// 移除引号
-		value = strings.Trim(value, "\"'")
-
+		if key == "" {
+			return configLineError("dotenv", index+1, "key is empty")
+		}
+		if _, exists := c.data[key]; exists {
+			return configLineError("dotenv", index+1, "duplicate key")
+		}
+		value, err := parseTextValue(strings.TrimSpace(parts[1]), false)
+		if err != nil {
+			return configLineError("dotenv", index+1, err.Error())
+		}
 		c.data[key] = value
 	}
 	return nil
 }
 
+func parseTextValue(raw string, inferType bool) (any, error) {
+	value := raw
+	if strings.HasPrefix(raw, "\"") || strings.HasSuffix(raw, "\"") {
+		if len(raw) < 2 || !strings.HasPrefix(raw, "\"") || !strings.HasSuffix(raw, "\"") {
+			return nil, errors.New("mismatched double quote")
+		}
+		unquoted, err := strconv.Unquote(raw)
+		if err != nil {
+			return nil, errors.New("invalid quoted value")
+		}
+		value = unquoted
+	} else if strings.HasPrefix(raw, "'") || strings.HasSuffix(raw, "'") {
+		if len(raw) < 2 || !strings.HasPrefix(raw, "'") || !strings.HasSuffix(raw, "'") {
+			return nil, errors.New("mismatched single quote")
+		}
+		value = strings.ReplaceAll(raw[1:len(raw)-1], "''", "'")
+	}
+	if inferType && value == raw {
+		return parseValue(value), nil
+	}
+	return value, nil
+}
+
+func isUnsupportedCompositeValue(raw string) bool {
+	if raw == "" || strings.HasPrefix(raw, "\"") || strings.HasPrefix(raw, "'") {
+		return false
+	}
+	return strings.HasPrefix(raw, "[") || strings.HasPrefix(raw, "{") ||
+		strings.HasPrefix(raw, "|") || strings.HasPrefix(raw, ">")
+}
+
+func stripInlineComment(raw string, requireWhitespace bool) string {
+	var quote byte
+	escaped := false
+	for index := 0; index < len(raw); index++ {
+		current := raw[index]
+		if quote != 0 {
+			if quote == '"' && escaped {
+				escaped = false
+				continue
+			}
+			if quote == '"' && current == '\\' {
+				escaped = true
+				continue
+			}
+			if current == quote {
+				quote = 0
+			}
+			continue
+		}
+		if current == '"' || current == '\'' {
+			quote = current
+			continue
+		}
+		if current == '#' && (!requireWhitespace || index == 0 || raw[index-1] == ' ' || raw[index-1] == '\t') {
+			return strings.TrimSpace(raw[:index])
+		}
+	}
+	return raw
+}
+
+func configLineError(format string, line int, detail string) error {
+	return fmt.Errorf("%w: %s line %d: %s", ErrInvalidConfig, format, line, detail)
+}
+
 // parseValue 解析值的类型
 func parseValue(s string) any {
-	// Bool
-	if s == "true" {
+	s = strings.TrimSpace(s)
+	if strings.EqualFold(s, "true") {
 		return true
 	}
-	if s == "false" {
+	if strings.EqualFold(s, "false") {
 		return false
 	}
 
@@ -191,7 +397,7 @@ func parseValue(s string) any {
 	}
 
 	// Float
-	if f, err := strconv.ParseFloat(s, 64); err == nil {
+	if f, err := strconv.ParseFloat(s, 64); err == nil && !math.IsNaN(f) && !math.IsInf(f, 0) {
 		return f
 	}
 
@@ -204,10 +410,173 @@ func parseValue(s string) any {
 	return s
 }
 
-// LoadEnv 从环境变量加载配置
-func (c *Config) LoadEnv(prefix string) {
+func configInt(value any) (int, bool) {
+	parsed, ok := configInt64(value)
+	if !ok {
+		return 0, false
+	}
+	if strconv.IntSize == 32 && (parsed < math.MinInt32 || parsed > math.MaxInt32) {
+		return 0, false
+	}
+	return int(parsed), true
+}
+
+func configInt64(value any) (int64, bool) {
+	switch typed := value.(type) {
+	case int:
+		return int64(typed), true
+	case int8:
+		return int64(typed), true
+	case int16:
+		return int64(typed), true
+	case int32:
+		return int64(typed), true
+	case int64:
+		return typed, true
+	case uint:
+		if uint64(typed) > math.MaxInt64 {
+			return 0, false
+		}
+		return int64(typed), true
+	case uint8:
+		return int64(typed), true
+	case uint16:
+		return int64(typed), true
+	case uint32:
+		return int64(typed), true
+	case uint64:
+		if typed > math.MaxInt64 {
+			return 0, false
+		}
+		return int64(typed), true
+	case float32:
+		return exactFloatInt64(float64(typed))
+	case float64:
+		return exactFloatInt64(typed)
+	case json.Number:
+		parsed, err := strconv.ParseInt(typed.String(), 10, 64)
+		return parsed, err == nil
+	case string:
+		parsed, err := strconv.ParseInt(strings.TrimSpace(typed), 10, 64)
+		return parsed, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func exactFloatInt64(value float64) (int64, bool) {
+	if math.IsNaN(value) || math.IsInf(value, 0) || math.Trunc(value) != value {
+		return 0, false
+	}
+	if value < math.MinInt64 || value >= -math.MinInt64 {
+		return 0, false
+	}
+	return int64(value), true
+}
+
+func configFloat64(value any) (float64, bool) {
+	var parsed float64
+	switch typed := value.(type) {
+	case float32:
+		parsed = float64(typed)
+	case float64:
+		parsed = typed
+	case int:
+		parsed = float64(typed)
+	case int8:
+		parsed = float64(typed)
+	case int16:
+		parsed = float64(typed)
+	case int32:
+		parsed = float64(typed)
+	case int64:
+		parsed = float64(typed)
+	case uint:
+		parsed = float64(typed)
+	case uint8:
+		parsed = float64(typed)
+	case uint16:
+		parsed = float64(typed)
+	case uint32:
+		parsed = float64(typed)
+	case uint64:
+		parsed = float64(typed)
+	case json.Number:
+		var err error
+		parsed, err = strconv.ParseFloat(typed.String(), 64)
+		if err != nil {
+			return 0, false
+		}
+	case string:
+		var err error
+		parsed, err = strconv.ParseFloat(strings.TrimSpace(typed), 64)
+		if err != nil {
+			return 0, false
+		}
+	default:
+		return 0, false
+	}
+	if math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+		return 0, false
+	}
+	return parsed, true
+}
+
+func parseConfigBool(value string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "true", "t", "1", "yes", "on":
+		return true, nil
+	case "false", "f", "0", "no", "off":
+		return false, nil
+	default:
+		return false, errors.New("invalid boolean value")
+	}
+}
+
+func cloneConfigValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		cloned := make(map[string]any, len(typed))
+		for key, item := range typed {
+			cloned[key] = cloneConfigValue(item)
+		}
+		return cloned
+	case map[string]string:
+		cloned := make(map[string]string, len(typed))
+		for key, item := range typed {
+			cloned[key] = item
+		}
+		return cloned
+	case []any:
+		cloned := make([]any, len(typed))
+		for index, item := range typed {
+			cloned[index] = cloneConfigValue(item)
+		}
+		return cloned
+	case []string:
+		return append([]string(nil), typed...)
+	case []byte:
+		return append([]byte(nil), typed...)
+	default:
+		return value
+	}
+}
+
+// LoadEnv 从带有非空前缀的环境变量加载配置。
+func (c *Config) LoadEnv(prefix string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.data == nil {
+		c.data = make(map[string]any)
+	}
+	prefix = strings.TrimSuffix(prefix, "_")
+	if prefix == "" {
+		return ErrInvalidPrefix
+	}
+	prefixBoundary := prefix
+	if prefixBoundary != "" {
+		prefixBoundary += "_"
+	}
 
 	for _, env := range os.Environ() {
 		parts := strings.SplitN(env, "=", 2)
@@ -219,11 +588,13 @@ func (c *Config) LoadEnv(prefix string) {
 		value := parts[1]
 
 		if prefix != "" {
-			if !strings.HasPrefix(key, prefix) {
+			if !strings.HasPrefix(key, prefixBoundary) {
 				continue
 			}
-			key = strings.TrimPrefix(key, prefix)
-			key = strings.TrimPrefix(key, "_")
+			key = strings.TrimPrefix(key, prefixBoundary)
+		}
+		if key == "" {
+			continue
 		}
 
 		// 转换 key 格式: APP_DATABASE_HOST -> database.host
@@ -232,28 +603,31 @@ func (c *Config) LoadEnv(prefix string) {
 
 		c.data[key] = parseValue(value)
 	}
+	return nil
 }
 
 // Set 设置配置项
 func (c *Config) Set(key string, value any) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.data[key] = value
+	if c.data == nil {
+		c.data = make(map[string]any)
+	}
+	c.data[key] = cloneConfigValue(value)
 }
 
 // Get 获取配置项
 func (c *Config) Get(key string) (any, bool) {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	// 直接查找
 	if v, ok := c.data[key]; ok {
-		return v, true
+		result := cloneConfigValue(v)
+		c.mu.RUnlock()
+		return result, true
 	}
+	c.mu.RUnlock()
 
-	// 尝试环境变量
 	envKey := strings.ToUpper(strings.ReplaceAll(key, ".", "_"))
-	if v := os.Getenv(envKey); v != "" {
+	if v, ok := os.LookupEnv(envKey); ok {
 		return parseValue(v), true
 	}
 
@@ -276,11 +650,15 @@ func (c *Config) GetString(key string) string {
 
 // GetStringDefault 获取字符串配置，带默认值
 func (c *Config) GetStringDefault(key, defaultValue string) string {
-	v := c.GetString(key)
-	if v == "" {
+	v, ok := c.Get(key)
+	if !ok {
 		return defaultValue
 	}
-	return v
+	value, ok := v.(string)
+	if !ok {
+		return defaultValue
+	}
+	return value
 }
 
 // GetInt 获取整数配置
@@ -289,17 +667,8 @@ func (c *Config) GetInt(key string) int {
 	if !ok {
 		return 0
 	}
-	switch val := v.(type) {
-	case int:
-		return val
-	case int64:
-		return int(val)
-	case float64:
-		return int(val)
-	case string:
-		if i, err := strconv.Atoi(val); err == nil {
-			return i
-		}
+	if value, valid := configInt(v); valid {
+		return value
 	}
 	return 0
 }
@@ -310,17 +679,8 @@ func (c *Config) GetIntDefault(key string, defaultValue int) int {
 	if !ok {
 		return defaultValue
 	}
-	switch val := v.(type) {
-	case int:
-		return val
-	case int64:
-		return int(val)
-	case float64:
-		return int(val)
-	case string:
-		if i, err := strconv.Atoi(val); err == nil {
-			return i
-		}
+	if value, valid := configInt(v); valid {
+		return value
 	}
 	return defaultValue
 }
@@ -331,17 +691,8 @@ func (c *Config) GetInt64(key string) int64 {
 	if !ok {
 		return 0
 	}
-	switch val := v.(type) {
-	case int64:
-		return val
-	case int:
-		return int64(val)
-	case float64:
-		return int64(val)
-	case string:
-		if i, err := strconv.ParseInt(val, 10, 64); err == nil {
-			return i
-		}
+	if value, valid := configInt64(v); valid {
+		return value
 	}
 	return 0
 }
@@ -352,17 +703,8 @@ func (c *Config) GetFloat64(key string) float64 {
 	if !ok {
 		return 0
 	}
-	switch val := v.(type) {
-	case float64:
-		return val
-	case int64:
-		return float64(val)
-	case int:
-		return float64(val)
-	case string:
-		if f, err := strconv.ParseFloat(val, 64); err == nil {
-			return f
-		}
+	if value, valid := configFloat64(v); valid {
+		return value
 	}
 	return 0
 }
@@ -373,17 +715,8 @@ func (c *Config) GetFloat64Default(key string, defaultValue float64) float64 {
 	if !ok {
 		return defaultValue
 	}
-	switch val := v.(type) {
-	case float64:
-		return val
-	case int64:
-		return float64(val)
-	case int:
-		return float64(val)
-	case string:
-		if f, err := strconv.ParseFloat(val, 64); err == nil {
-			return f
-		}
+	if value, valid := configFloat64(v); valid {
+		return value
 	}
 	return defaultValue
 }
@@ -398,13 +731,12 @@ func (c *Config) GetBool(key string) bool {
 	case bool:
 		return val
 	case string:
-		return val == "true" || val == "1" || val == "yes"
-	case int:
-		return val != 0
-	case int64:
-		return val != 0
+		parsed, err := parseConfigBool(val)
+		return err == nil && parsed
+	default:
+		parsed, valid := configInt64(v)
+		return valid && parsed != 0
 	}
-	return false
 }
 
 // GetBoolDefault 获取布尔配置，带默认值
@@ -417,11 +749,15 @@ func (c *Config) GetBoolDefault(key string, defaultValue bool) bool {
 	case bool:
 		return val
 	case string:
-		return val == "true" || val == "1" || val == "yes"
-	case int:
-		return val != 0
-	case int64:
-		return val != 0
+		parsed, err := parseConfigBool(val)
+		if err == nil {
+			return parsed
+		}
+	default:
+		parsed, valid := configInt64(v)
+		if valid {
+			return parsed != 0
+		}
 	}
 	return defaultValue
 }
@@ -439,10 +775,10 @@ func (c *Config) GetDuration(key string) time.Duration {
 		if d, err := time.ParseDuration(val); err == nil {
 			return d
 		}
-	case int64:
-		return time.Duration(val)
-	case int:
-		return time.Duration(val)
+	default:
+		if parsed, valid := configInt64(v); valid {
+			return time.Duration(parsed)
+		}
 	}
 	return 0
 }
@@ -460,10 +796,10 @@ func (c *Config) GetDurationDefault(key string, defaultValue time.Duration) time
 		if d, err := time.ParseDuration(val); err == nil {
 			return d
 		}
-	case int64:
-		return time.Duration(val)
-	case int:
-		return time.Duration(val)
+	default:
+		if parsed, valid := configInt64(v); valid {
+			return time.Duration(parsed)
+		}
 	}
 	return defaultValue
 }
@@ -536,6 +872,7 @@ func (c *Config) Keys() []string {
 	for k := range c.data {
 		keys = append(keys, k)
 	}
+	sort.Strings(keys)
 	return keys
 }
 
@@ -546,7 +883,7 @@ func (c *Config) All() map[string]any {
 
 	result := make(map[string]any, len(c.data))
 	for k, v := range c.data {
-		result[k] = v
+		result[k] = cloneConfigValue(v)
 	}
 	return result
 }
@@ -554,14 +891,12 @@ func (c *Config) All() map[string]any {
 // Unmarshal 将配置解析到结构体
 func (c *Config) Unmarshal(v any) error {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	// 转为 JSON 再解析（简化实现）
 	data, err := json.Marshal(c.data)
+	c.mu.RUnlock()
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal(data, v)
+	return decodeConfigTarget(data, v)
 }
 
 // UnmarshalKey 将指定 key 的配置解析到结构体
@@ -571,12 +906,34 @@ func (c *Config) UnmarshalKey(key string, v any) error {
 		return ErrNotFound
 	}
 
-	// 转为 JSON 再解析
 	data, err := json.Marshal(val)
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal(data, v)
+	return decodeConfigTarget(data, v)
+}
+
+func decodeConfigTarget(data []byte, target any) error {
+	rv := reflect.ValueOf(target)
+	if rv.Kind() != reflect.Pointer || rv.IsNil() {
+		return ErrInvalidType
+	}
+	temporary := reflect.New(rv.Elem().Type())
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(temporary.Interface()); err != nil {
+		return fmt.Errorf("unmarshal config: %w", err)
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("unmarshal config: trailing data")
+		}
+		return fmt.Errorf("unmarshal config: %w", err)
+	}
+	rv.Elem().Set(temporary.Elem())
+	return nil
 }
 
 // BindEnv 绑定环境变量到结构体字段
@@ -606,19 +963,17 @@ func BindEnv(v any, prefix string) error {
 			envName = prefix + "_" + envName
 		}
 
-		envValue := os.Getenv(envName)
-		if envValue == "" {
-			// 使用默认值
-			if defaultValue := fieldType.Tag.Get("default"); defaultValue != "" {
-				envValue = defaultValue
-			} else {
+		envValue, exists := os.LookupEnv(envName)
+		if !exists {
+			defaultValue, hasDefault := fieldType.Tag.Lookup("default")
+			if !hasDefault {
 				continue
 			}
+			envValue = defaultValue
 		}
 
-		// 设置值
 		if err := setField(field, envValue); err != nil {
-			return err
+			return fmt.Errorf("bind environment variable %s to field %s: %w", envName, fieldType.Name, err)
 		}
 	}
 
@@ -638,36 +993,47 @@ func setField(field reflect.Value, value string) error {
 			}
 			field.SetInt(int64(d))
 		} else {
-			i, err := strconv.ParseInt(value, 10, 64)
+			i, err := strconv.ParseInt(value, 10, field.Type().Bits())
 			if err != nil {
 				return err
 			}
 			field.SetInt(i)
 		}
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		u, err := strconv.ParseUint(value, 10, 64)
+		u, err := strconv.ParseUint(value, 10, field.Type().Bits())
 		if err != nil {
 			return err
 		}
 		field.SetUint(u)
 	case reflect.Float32, reflect.Float64:
-		f, err := strconv.ParseFloat(value, 64)
+		f, err := strconv.ParseFloat(value, field.Type().Bits())
 		if err != nil {
 			return err
 		}
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return errors.New("non-finite floating-point value")
+		}
 		field.SetFloat(f)
 	case reflect.Bool:
-		b := value == "true" || value == "1" || value == "yes"
+		b, err := parseConfigBool(value)
+		if err != nil {
+			return err
+		}
 		field.SetBool(b)
 	case reflect.Slice:
-		if field.Type().Elem().Kind() == reflect.String {
-			parts := strings.Split(value, ",")
-			slice := reflect.MakeSlice(field.Type(), len(parts), len(parts))
-			for i, p := range parts {
-				slice.Index(i).SetString(strings.TrimSpace(p))
-			}
-			field.Set(slice)
+		if field.Type().Elem().Kind() != reflect.String {
+			return ErrInvalidType
 		}
+		if value == "" {
+			field.Set(reflect.MakeSlice(field.Type(), 0, 0))
+			return nil
+		}
+		parts := strings.Split(value, ",")
+		slice := reflect.MakeSlice(field.Type(), len(parts), len(parts))
+		for i, p := range parts {
+			slice.Index(i).SetString(strings.TrimSpace(p))
+		}
+		field.Set(slice)
 	default:
 		return ErrInvalidType
 	}
@@ -687,9 +1053,13 @@ func Global() *Config {
 	return globalConfigPtr.Load()
 }
 
-// SetGlobal 设置全局配置
-func SetGlobal(c *Config) {
+// SetGlobal 设置非空的全局配置。
+func SetGlobal(c *Config) error {
+	if c == nil {
+		return ErrInvalidType
+	}
 	globalConfigPtr.Store(c)
+	return nil
 }
 
 // LoadGlobal 加载全局配置

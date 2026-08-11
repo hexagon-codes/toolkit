@@ -34,6 +34,12 @@ func TestTryStringVariants(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := tt.fn(tt.length)
+			if tt.length < 0 {
+				if got != "" || !errors.Is(err, ErrInvalidLength) {
+					t.Fatalf("%s = (%q, %v), want empty ErrInvalidLength", tt.name, got, err)
+				}
+				return
+			}
 			// 正常与边界路径均不应返回错误。
 			if err != nil {
 				t.Fatalf("%s 返回非预期错误: %v", tt.name, err)
@@ -62,10 +68,10 @@ func TestTryStringFrom(t *testing.T) {
 	}{
 		{"正常采样", "ABC123", 20, 20, false},
 		{"零长度返回空串", "ABC", 0, 0, false},
-		{"负长度返回空串", "ABC", -1, 0, false},
+		{"负长度返回错误", "ABC", -1, 0, true},
 		{"空字符集且零长度不报错", "", 0, 0, false}, // length<=0 优先短路，不触发空集错误
 		{"空字符集且正长度报错", "", 8, 0, true},   // 无法采样，返回 error 而非 panic
-		{"单字符字符集", "X", 5, 5, false},
+		{"单字符字符集返回错误", "X", 5, 0, true},
 	}
 
 	for _, tt := range tests {
@@ -98,31 +104,44 @@ func TestTryStringFrom(t *testing.T) {
 }
 
 func TestTryStringFromSamplesWholeUnicodeCharacters(t *testing.T) {
-	got, err := TryStringFrom("界", 4)
+	const charset = "界甲"
+	got, err := TryStringFrom(charset, 4)
 	if err != nil {
 		t.Fatalf("TryStringFrom() error = %v", err)
 	}
-	if got != "界界界界" {
+	if len([]rune(got)) != 4 {
 		t.Fatalf("TryStringFrom() = %q, want four complete Unicode characters", got)
+	}
+	for _, character := range got {
+		if !strings.ContainsRune(charset, character) {
+			t.Fatalf("TryStringFrom() contains unexpected character %q", character)
+		}
 	}
 }
 
 // TestTryInt 表驱动测试 TryInt 的范围、边界（min>=max）路径。
 func TestTryInt(t *testing.T) {
 	tests := []struct {
-		name string // 子测试名称
-		min  int    // 下界
-		max  int    // 上界（开区间）
-		want int    // min>=max 时的期望返回值（-1 表示需做范围校验）
+		name    string // 子测试名称
+		min     int    // 下界
+		max     int    // 上界（开区间）
+		want    int    // 有效范围内无需固定返回值时为 -1
+		wantErr bool   // 是否期望 ErrInvalidRange
 	}{
-		{"min等于max返回min", 5, 5, 5},
-		{"min大于max返回min", 10, 5, 10},
-		{"正常范围", 1, 100, -1},
+		{"min等于max返回错误", 5, 5, 5, true},
+		{"min大于max返回错误", 10, 5, 10, true},
+		{"正常范围", 1, 100, -1, false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := TryInt(tt.min, tt.max)
+			if tt.wantErr {
+				if got != tt.want || !errors.Is(err, ErrInvalidRange) {
+					t.Fatalf("TryInt(%d,%d) = (%d, %v), want %d ErrInvalidRange", tt.min, tt.max, got, err, tt.want)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("非预期错误: %v", err)
 			}
@@ -149,19 +168,26 @@ func TestTryInt(t *testing.T) {
 // TestTryInt64 表驱动测试 TryInt64 的范围与边界路径。
 func TestTryInt64(t *testing.T) {
 	tests := []struct {
-		name string // 子测试名称
-		min  int64  // 下界
-		max  int64  // 上界（开区间）
-		want int64  // min>=max 时期望值（-1 表示需范围校验）
+		name    string // 子测试名称
+		min     int64  // 下界
+		max     int64  // 上界（开区间）
+		want    int64  // 有效范围内无需固定返回值时为 -1
+		wantErr bool   // 是否期望 ErrInvalidRange
 	}{
-		{"min等于max返回min", 7, 7, 7},
-		{"min大于max返回min", 100, 50, 100},
-		{"正常范围", 1, 1000000, -1},
+		{"min等于max返回错误", 7, 7, 7, true},
+		{"min大于max返回错误", 100, 50, 100, true},
+		{"正常范围", 1, 1000000, -1, false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := TryInt64(tt.min, tt.max)
+			if tt.wantErr {
+				if got != tt.want || !errors.Is(err, ErrInvalidRange) {
+					t.Fatalf("TryInt64(%d,%d) = (%d, %v), want %d ErrInvalidRange", tt.min, tt.max, got, err, tt.want)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("非预期错误: %v", err)
 			}
@@ -204,15 +230,22 @@ func TestTryBytes(t *testing.T) {
 		length  int    // 请求长度
 		wantLen int    // 期望长度
 		wantNil bool   // 是否期望 nil
+		wantErr bool   // 是否期望 ErrInvalidLength
 	}{
-		{"正常长度", 32, 32, false},
-		{"零长度返回nil", 0, 0, true},
-		{"负长度返回nil", -3, 0, true},
+		{"正常长度", 32, 32, false, false},
+		{"零长度返回nil", 0, 0, true, false},
+		{"负长度返回错误", -3, 0, true, true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := TryBytes(tt.length)
+			if tt.wantErr {
+				if got != nil || !errors.Is(err, ErrInvalidLength) {
+					t.Fatalf("TryBytes(%d) = (%v, %v), want nil ErrInvalidLength", tt.length, got, err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("非预期错误: %v", err)
 			}

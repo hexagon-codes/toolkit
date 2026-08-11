@@ -2,15 +2,21 @@ package logger
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 )
 
 // fileWriter 简单的文件写入器
 type fileWriter struct {
-	file *os.File
-	path string
+	mu       sync.Mutex
+	file     *os.File
+	path     string
+	closed   bool
+	closeErr error
 }
 
 // newFileWriter 创建文件写入器。
@@ -48,39 +54,76 @@ func newFileWriter(path string, _ *FileConfig) (io.Writer, error) {
 
 // Write 实现 io.Writer 接口
 func (w *fileWriter) Write(p []byte) (n int, err error) {
-	return w.file.Write(p)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed || w.file == nil {
+		return 0, os.ErrClosed
+	}
+	n, err = w.file.Write(p)
+	if err == nil && n != len(p) {
+		err = io.ErrShortWrite
+	}
+	return n, err
 }
 
 // Close 关闭文件
 func (w *fileWriter) Close() error {
-	if w.file != nil {
-		return w.file.Close()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return w.closeErr
 	}
-	return nil
+	w.closed = true
+	if w.file == nil {
+		return nil
+	}
+	w.closeErr = w.file.Close()
+	w.file = nil
+	return w.closeErr
 }
 
 // Sync 同步文件
 func (w *fileWriter) Sync() error {
-	if w.file != nil {
-		return w.file.Sync()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return w.closeErr
 	}
-	return nil
+	if w.file == nil {
+		return nil
+	}
+	return w.file.Sync()
+}
+
+type writerSnapshot struct {
+	writers []io.Writer
 }
 
 // MultiWriter 多输出写入器
 type MultiWriter struct {
-	writers []io.Writer
+	addMu   sync.Mutex
+	writeMu sync.Mutex
+	writers atomic.Pointer[writerSnapshot]
 }
 
 // NewMultiWriter 创建多输出写入器
 func NewMultiWriter(writers ...io.Writer) *MultiWriter {
-	return &MultiWriter{writers: writers}
+	w := &MultiWriter{}
+	w.writers.Store(&writerSnapshot{writers: append([]io.Writer(nil), writers...)})
+	return w
 }
 
 // Write 写入到所有输出，任何一个 writer 出错时立即返回
 func (w *MultiWriter) Write(p []byte) (n int, err error) {
-	for _, writer := range w.writers {
-		n, err = writer.Write(p)
+	w.writeMu.Lock()
+	defer w.writeMu.Unlock()
+
+	snapshot := w.writers.Load()
+	if snapshot == nil {
+		return len(p), nil
+	}
+	for _, writer := range snapshot.writers {
+		n, err = writeSafely(writer, p)
 		if err != nil {
 			return
 		}
@@ -94,5 +137,32 @@ func (w *MultiWriter) Write(p []byte) (n int, err error) {
 
 // Add 添加写入器
 func (w *MultiWriter) Add(writer io.Writer) {
-	w.writers = append(w.writers, writer)
+	w.addMu.Lock()
+	defer w.addMu.Unlock()
+
+	current := w.writers.Load()
+	var writers []io.Writer
+	if current != nil {
+		writers = make([]io.Writer, len(current.writers), len(current.writers)+1)
+		copy(writers, current.writers)
+	}
+	writers = append(writers, writer)
+	w.writers.Store(&writerSnapshot{writers: writers})
+}
+
+func writeSafely(writer io.Writer, p []byte) (n int, err error) {
+	if writer == nil {
+		return 0, errors.New("logger: writer is nil")
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			n = 0
+			err = recoveredError("logger: writer panicked", recovered)
+		}
+	}()
+	n, err = writer.Write(p)
+	if n < 0 || n > len(p) {
+		return 0, fmt.Errorf("logger: writer returned invalid byte count %d", n)
+	}
+	return n, err
 }

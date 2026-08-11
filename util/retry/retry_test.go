@@ -142,7 +142,7 @@ func TestDo_OnRetry(t *testing.T) {
 	}
 }
 
-func TestDo_RetryIf(t *testing.T) {
+func TestDo_IfPredicate(t *testing.T) {
 	errSpecial := errors.New("special error")
 	attempts := 0
 
@@ -385,7 +385,6 @@ func TestCalculateDelayAppliesJitterAfterConfiguredBackoff(t *testing.T) {
 		Multiplier:  1,
 		DelayFunc:   FixedDelay,
 		JitterType:  FullJitter,
-		RetryIf:     func(error) bool { return true },
 		MaxAttempts: 2,
 	}
 

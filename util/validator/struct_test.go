@@ -517,7 +517,6 @@ func TestFieldError_Error(t *testing.T) {
 	e := FieldError{
 		Field:   "name",
 		Tag:     "required",
-		Value:   "",
 		Message: "name 是必填字段",
 	}
 

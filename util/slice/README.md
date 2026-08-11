@@ -49,7 +49,7 @@ result := slice.RemoveAll([]int{1, 2, 2, 3}, 2)  // [1, 3]
 nums := []int{1, 2, 3, 4, 5}
 reversed := slice.Reverse(nums)  // [5, 4, 3, 2, 1]
 
-// 打乱（简化版随机）
+// 使用 Fisher-Yates 算法打乱
 shuffled := slice.Shuffle(nums)  // [3, 1, 5, 2, 4]
 
 // 分块
@@ -218,16 +218,16 @@ Equal[T comparable](slice1, slice2 []T) bool
 
 ```go
 // Sum 求和（整数）
-Sum[T int | int64 | int32](slice []T) T
+Sum[T integer](slice []T) T
 
 // SumFloat 求和（浮点数）
-SumFloat[T float32 | float64](slice []T) T
+SumFloat[T floating](slice []T) T
 
 // Max 获取最大值
-Max[T int | int64 | int32 | float32 | float64](slice []T) T
+Max[T number](slice []T) T
 
 // Min 获取最小值
-Min[T int | int64 | int32 | float32 | float64](slice []T) T
+Min[T number](slice []T) T
 ```
 
 ### 高阶函数
@@ -469,7 +469,7 @@ Remove():       O(n)
 Reverse():      O(n)
 Chunk():        O(n)
 Union():        O(n+m)
-Intersect():    O(n*m)
+Intersect():    O(n+m)
 Sum():          O(n)
 GroupBy():      O(n)
 ```
@@ -481,9 +481,8 @@ GroupBy():      O(n)
    - 原切片保持不变
 
 2. **Shuffle 实现**：
-   - 当前实现是简化版
-   - 不使用真正的随机数
-   - 不适合安全敏感场景
+   - 使用 Fisher-Yates 算法和 `math/rand/v2` 全局伪随机源
+	- 不适合安全敏感场景
 
 3. **空切片处理**：
    - `Max/Min` 返回零值

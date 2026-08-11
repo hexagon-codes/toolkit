@@ -11,6 +11,14 @@ var (
 	// ErrClockSkew 时钟回拨错误
 	// 当检测到系统时钟回拨且超过最大允许等待时间时返回此错误
 	ErrClockSkew = errors.New("idgen: clock skew detected, time moved backwards")
+	// ErrInvalidClockSkewWait 表示最大时钟回拨等待预算无效。
+	ErrInvalidClockSkewWait = errors.New("idgen: clock skew wait must not be negative")
+	// ErrSequenceExhausted 表示同一毫秒的序列已耗尽且时钟未在预算内前进。
+	ErrSequenceExhausted = errors.New("idgen: sequence exhausted before clock advanced")
+	// ErrTimestampOutOfRange 表示时间戳无法编码进 Snowflake 的 41 位时间字段。
+	ErrTimestampOutOfRange = errors.New("idgen: timestamp is outside the 41-bit range")
+	// ErrUninitializedGenerator 表示生成器未通过构造器完成初始化。
+	ErrUninitializedGenerator = errors.New("idgen: generator is not initialized")
 )
 
 const (
@@ -26,6 +34,8 @@ const (
 	maxWorkerID = -1 ^ (-1 << workerIDBits) // 1023
 	maxSequence = -1 ^ (-1 << sequenceBits) // 4095
 
+	maxTimestampDelta int64 = 1<<timestampBits - 1
+
 	// 位移
 	workerIDShift  = sequenceBits
 	timestampShift = sequenceBits + workerIDBits
@@ -39,6 +49,8 @@ type Snowflake struct {
 	sequence         int64
 	lastTimestamp    int64
 	maxClockSkewWait time.Duration // 最大时钟回拨等待时间
+	clock            func() time.Time
+	sleep            func(time.Duration)
 }
 
 var (
@@ -72,11 +84,14 @@ func NewSnowflake(workerID int64) (*Snowflake, error) {
 // NewSnowflakeWithOptions 创建 Snowflake 生成器（可配置最大时钟回拨等待时间）
 //
 // maxClockSkewWait: 最大时钟回拨等待时间。当检测到时钟回拨且回拨时间 <= maxClockSkewWait 时，
-// 会等待时间追上。如果回拨时间 > maxClockSkewWait，Generate 会返回错误。
+// 会等待时间追上。如果回拨时间 > maxClockSkewWait，GenerateSafe 返回错误，Generate 则 panic。
 // 默认为 100ms，设置为 0 表示不等待（立即报错）。
 func NewSnowflakeWithOptions(workerID int64, maxClockSkewWait time.Duration) (*Snowflake, error) {
 	if workerID < 0 || workerID > maxWorkerID {
 		return nil, fmt.Errorf("worker ID must be between 0 and %d", maxWorkerID)
+	}
+	if maxClockSkewWait < 0 {
+		return nil, fmt.Errorf("%w: %s", ErrInvalidClockSkewWait, maxClockSkewWait)
 	}
 
 	return &Snowflake{
@@ -85,6 +100,8 @@ func NewSnowflakeWithOptions(workerID int64, maxClockSkewWait time.Duration) (*S
 		sequence:         0,
 		lastTimestamp:    0,
 		maxClockSkewWait: maxClockSkewWait,
+		clock:            time.Now,
+		sleep:            time.Sleep,
 	}, nil
 }
 
@@ -92,8 +109,7 @@ func NewSnowflakeWithOptions(workerID int64, maxClockSkewWait time.Duration) (*S
 func (s *Snowflake) Generate() int64 {
 	id, err := s.GenerateSafe()
 	if err != nil {
-		// 为保持向后兼容，失败时返回 0（调用者可使用 GenerateSafe 获取错误）
-		return 0
+		panic(err)
 	}
 	return id
 }
@@ -102,10 +118,19 @@ func (s *Snowflake) Generate() int64 {
 //
 // 当检测到时钟回拨且超过最大等待时间时，返回 ErrClockSkew。
 func (s *Snowflake) GenerateSafe() (int64, error) {
+	if s == nil {
+		return 0, ErrUninitializedGenerator
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.clock == nil || s.sleep == nil {
+		return 0, ErrUninitializedGenerator
+	}
 
 	timestamp := s.currentTimestamp()
+	if err := s.validateTimestamp(timestamp); err != nil {
+		return 0, err
+	}
 
 	if timestamp < s.lastTimestamp {
 		// 时钟回拨
@@ -117,54 +142,92 @@ func (s *Snowflake) GenerateSafe() (int64, error) {
 			return 0, ErrClockSkew
 		}
 
-		// 等待直到时间追上（持有锁，防止其他 goroutine 产生不一致的 ID）
-		// 时钟回拨是极其罕见的情况，短暂阻塞是可接受的
-		deadline := time.Now().Add(s.maxClockSkewWait)
-		for timestamp < s.lastTimestamp {
-			if time.Now().After(deadline) {
-				return 0, ErrClockSkew
-			}
-			// 短暂休眠避免 busy-wait
-			time.Sleep(time.Millisecond)
-			timestamp = s.currentTimestamp()
+		// 持锁等待可以保持 ID 单调；等待预算保证冻结时钟不会导致永久阻塞。
+		var err error
+		timestamp, err = s.waitUntilAtLeast(s.lastTimestamp)
+		if err != nil {
+			return 0, err
 		}
 	}
 
+	var nextSequence int64
 	if timestamp == s.lastTimestamp {
 		// 同一毫秒内，序列号递增
-		s.sequence = (s.sequence + 1) & maxSequence
-		if s.sequence == 0 {
+		nextSequence = (s.sequence + 1) & maxSequence
+		if nextSequence == 0 {
 			// 序列号溢出，等待下一毫秒
-			timestamp = s.waitNextMillis(timestamp)
+			var err error
+			timestamp, err = s.waitNextMillis(timestamp)
+			if err != nil {
+				return 0, err
+			}
 		}
-	} else {
-		// 新的毫秒，序列号重置
-		s.sequence = 0
 	}
 
+	if err := s.validateTimestamp(timestamp); err != nil {
+		return 0, err
+	}
+	// 所有等待与校验成功后再一次性提交状态，错误路径不会污染后续生成。
+	s.sequence = nextSequence
 	s.lastTimestamp = timestamp
 
 	// 生成 ID
 	id := ((timestamp - s.epoch) << timestampShift) |
 		(s.workerID << workerIDShift) |
-		s.sequence
+		nextSequence
 
 	return id, nil
 }
 
 // currentTimestamp 获取当前时间戳（毫秒）
 func (s *Snowflake) currentTimestamp() int64 {
-	return time.Now().UnixMilli()
+	return s.clock().UnixMilli()
 }
 
 // waitNextMillis 等待下一毫秒
-func (s *Snowflake) waitNextMillis(timestamp int64) int64 {
+func (s *Snowflake) waitNextMillis(timestamp int64) (int64, error) {
+	var waited time.Duration
 	for timestamp <= s.lastTimestamp {
-		// 短暂休眠避免 busy-wait 消耗 CPU
-		time.Sleep(100 * time.Microsecond)
+		if waited >= s.maxClockSkewWait {
+			return 0, ErrSequenceExhausted
+		}
+		delay := boundedDelay(100*time.Microsecond, s.maxClockSkewWait-waited)
+		s.sleep(delay)
+		waited += delay
 		timestamp = s.currentTimestamp()
 	}
-	return timestamp
+	return timestamp, nil
+}
+
+// waitUntilAtLeast 等待时钟追上目标毫秒，并严格受最大回拨预算约束。
+func (s *Snowflake) waitUntilAtLeast(target int64) (int64, error) {
+	var waited time.Duration
+	for {
+		timestamp := s.currentTimestamp()
+		if timestamp >= target {
+			return timestamp, nil
+		}
+		if waited >= s.maxClockSkewWait {
+			return 0, ErrClockSkew
+		}
+		delay := boundedDelay(time.Millisecond, s.maxClockSkewWait-waited)
+		s.sleep(delay)
+		waited += delay
+	}
+}
+
+func boundedDelay(preferred, remaining time.Duration) time.Duration {
+	if remaining < preferred {
+		return remaining
+	}
+	return preferred
+}
+
+func (s *Snowflake) validateTimestamp(timestamp int64) error {
+	if timestamp < s.epoch || timestamp > s.epoch+maxTimestampDelta {
+		return fmt.Errorf("%w: timestamp=%d epoch=%d", ErrTimestampOutOfRange, timestamp, s.epoch)
+	}
+	return nil
 }
 
 // SnowflakeID 使用默认生成器生成 ID

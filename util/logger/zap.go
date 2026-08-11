@@ -25,7 +25,7 @@ import (
 // UseHandler 使用自定义 Handler（可用于集成 zap）
 func UseHandler(h slog.Handler) {
 	logger := &Logger{
-		slog:   slog.New(h),
+		slog:   slog.New(newSecureHandler(h)),
 		level:  &slog.LevelVar{},
 		config: DefaultConfig(),
 	}
@@ -38,7 +38,7 @@ func UseHandlerWithConfig(h slog.Handler, cfg *Config) {
 	levelVar.Set(parseLevel(cfg.Level))
 
 	logger := &Logger{
-		slog:   slog.New(h),
+		slog:   slog.New(newSecureHandler(h)),
 		level:  levelVar,
 		config: cfg,
 	}
@@ -48,7 +48,7 @@ func UseHandlerWithConfig(h slog.Handler, cfg *Config) {
 // NewWithHandler 使用自定义 Handler 创建 Logger
 func NewWithHandler(h slog.Handler) *Logger {
 	return &Logger{
-		slog:   slog.New(h),
+		slog:   slog.New(newSecureHandler(h)),
 		level:  &slog.LevelVar{},
 		config: DefaultConfig(),
 	}
@@ -63,7 +63,7 @@ type ContextHandler struct {
 // NewContextHandler 创建支持 context 提取的 Handler
 func NewContextHandler(h slog.Handler, extractor func(context.Context) []slog.Attr) *ContextHandler {
 	return &ContextHandler{
-		handler:   h,
+		handler:   newSecureHandler(h),
 		extractor: extractor,
 	}
 }
@@ -74,7 +74,12 @@ func (h *ContextHandler) Enabled(ctx context.Context, level slog.Level) bool {
 }
 
 // Handle 实现 slog.Handler 接口
-func (h *ContextHandler) Handle(ctx context.Context, r slog.Record) error {
+func (h *ContextHandler) Handle(ctx context.Context, r slog.Record) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = recoveredError("logger: context extractor panicked", recovered)
+		}
+	}()
 	if h.extractor != nil {
 		attrs := h.extractor(ctx)
 		for _, attr := range attrs {

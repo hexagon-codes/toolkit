@@ -3,7 +3,6 @@ package rand
 
 import (
 	"crypto/rand"
-	"math/big"
 )
 
 const (
@@ -52,9 +51,9 @@ func UpperString(length int) string {
 func StringFrom(charset string, length int) string {
 	// 复用与 TryStringFrom 共享的核心实现 stringFrom，保持行为完全一致；
 	// 唯一区别是本函数在出错时将 error 转为 panic（保持原有契约不变）。
-	s, err := stringFrom(charset, length)
+	s, err := stringFrom(rand.Reader, charset, length)
 	if err != nil {
-		panic("crypto/rand.Int failed: " + err.Error())
+		panic(err)
 	}
 	return s
 }
@@ -62,53 +61,29 @@ func StringFrom(charset string, length int) string {
 // Int 生成指定范围的随机整数 [min, max)
 // 使用 crypto/rand 生成加密安全的随机数
 func Int(lower, upper int) int {
-	if lower >= upper {
-		return lower
-	}
-
-	num, err := randomInt64(int64(lower), int64(upper))
+	num, err := TryInt(lower, upper)
 	if err != nil {
-		panic("crypto/rand.Int failed: " + err.Error())
+		panic(err)
 	}
-	return int(num)
+	return num
 }
 
 // Int64 生成指定范围的随机 int64 [min, max)
 // 使用 crypto/rand 生成加密安全的随机数
 func Int64(lower, upper int64) int64 {
-	if lower >= upper {
-		return lower
-	}
-
-	num, err := randomInt64(lower, upper)
+	num, err := TryInt64(lower, upper)
 	if err != nil {
-		panic("crypto/rand.Int failed: " + err.Error())
+		panic(err)
 	}
 	return num
-}
-
-// randomInt64 在 big.Int 上计算区间宽度，避免有符号整数减法溢出。
-func randomInt64(lower, upper int64) (int64, error) {
-	lowerValue := big.NewInt(lower)
-	rangeSize := new(big.Int).Sub(big.NewInt(upper), lowerValue)
-	num, err := rand.Int(rand.Reader, rangeSize)
-	if err != nil {
-		return lower, err
-	}
-
-	return num.Add(num, lowerValue).Int64(), nil
 }
 
 // Bytes 生成指定长度的随机字节数组
 // 使用 crypto/rand 生成加密安全的随机字节
 func Bytes(length int) []byte {
-	if length <= 0 {
-		return nil
-	}
-
-	bytes := make([]byte, length)
-	if _, err := rand.Read(bytes); err != nil {
-		panic("crypto/rand.Read failed: " + err.Error())
+	bytes, err := TryBytes(length)
+	if err != nil {
+		panic(err)
 	}
 	return bytes
 }

@@ -1,6 +1,7 @@
 package json
 
 import (
+	stdjson "encoding/json"
 	"testing"
 )
 
@@ -180,8 +181,8 @@ func TestToMap(t *testing.T) {
 		t.Errorf("ToMap[name] = %v, want Alice", result["name"])
 	}
 
-	// age is float64 in JSON
-	if result["age"] != float64(30) {
+	// 以 json.Number 保留整数精度。
+	if result["age"] != stdjson.Number("30") {
 		t.Errorf("ToMap[age] = %v, want 30", result["age"])
 	}
 }

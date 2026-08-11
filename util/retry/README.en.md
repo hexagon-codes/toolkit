@@ -98,7 +98,7 @@ defer cancel()
 
 err := retry.DoWithContext(ctx,
     func() error {
-        return apiCall()
+        return apiCall(ctx)
     },
     retry.Attempts(10),
     retry.Delay(time.Second),
@@ -141,14 +141,30 @@ retry.DelayType(retry.ExponentialBackoff)
 | `Attempts(n)` | Maximum number of attempts | 3 |
 | `Delay(d)` | Retry delay | 1s |
 | `MaxDelay(d)` | Maximum delay | 30s |
-| `Multiplier(m)` | Delay multiplier (exponential backoff) | 2.0 |
+| `Multiplier(m)` | Exponential-backoff multiplier; does not select a strategy | 2.0 |
 | `OnRetry(fn)` | Retry callback function | nil |
 | `If(fn)` | Retry condition check | Retry on any error |
 | `DelayType(fn)` | Delay strategy | Fixed delay |
 
+`Multiplier` only configures a parameter and never switches the delay strategy implicitly.
+Exponential backoff must be selected explicitly with `DelayType(ExponentialBackoff)`;
+option order does not change the selected strategy.
+
+When calling `FixedDelay`, `LinearBackoff`, or `ExponentialBackoff` directly, use
+`DefaultConfig()` to obtain an independent parameter snapshot and adjust its exported
+backoff fields. This configuration is not an input to `Do`; retry execution still uses
+Options, and `If` is the only retry-predicate configuration entry point.
+
 When all retries are exhausted, the final error wraps both
 `ErrMaxAttemptsReached` and the last execution error for `errors.Is`/`errors.As`.
-`OnRetry` uses one-based numbering, so the first retry is 1.
+`OnRetry` and `DelayType` use one-based numbering, so the first retry is 1. Direct
+calls to linear or exponential backoff must also start at 1; non-positive indexes return 0.
+On context cancellation or deadline, the error chain preserves both `ctx.Err()` and the
+last execution error that already occurred. No retry predicate, `OnRetry`, or delay
+function runs after cancellation is observed.
+`DoWithContext` observes cancellation before and after attempts and while waiting, but it
+does not launch a background goroutine to preempt an in-flight `fn`. To cancel one
+attempt, capture and propagate `ctx` from the closure as shown above.
 
 ## Use Cases
 

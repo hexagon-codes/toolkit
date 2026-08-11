@@ -133,9 +133,9 @@ Token(length int) string
 
 ### Error-Returning Safe Variants (Try*)
 
-The functions above **panic** when the underlying entropy source (`crypto/rand`) fails, which suits "a random-number failure is fatal" scenarios. On paths like OAuth state, CSRF tokens, or one-time credentials, where you want to propagate the failure gracefully as an error rather than panic, use the corresponding `Try*` variant.
+The plain functions above **panic** on invalid input or an underlying entropy-source (`crypto/rand`) failure. This is suitable when arguments are trusted constants and random generation failure is fatal. Request paths such as OAuth state, CSRF tokens, or one-time credentials should use the corresponding `Try*` variant.
 
-Each `Try*` function behaves identically to its counterpart; the only difference is that it returns an error instead of panicking on entropy failure. Use `errors.Is(err, rand.ErrInsufficientEntropy)` to detect an entropy-source failure.
+`Try*` returns `ErrInvalidLength`, `ErrInvalidCharset`, `ErrInvalidRange`, or `ErrInsufficientEntropy`; classify them with `errors.Is`. Length zero returns an empty value; other lengths must not exceed `MaxGeneratedLength` (1048576). A custom character set must contain at least two distinct Unicode characters.
 
 ```go
 s, err := rand.TryToken(32)
@@ -299,26 +299,18 @@ num := rand.Int(1, 10)  // may return 1-9, does not include 10
 num := rand.Int(1, 11)  // may return 1-10
 ```
 
-### ✅ Uniqueness Guarantee
+### Collision Characteristics
 
-Although theoretically possible, collisions are extremely unlikely in practice:
+Random tokens are not an absolute uniqueness guarantee. The space is `alphabet size^length`, while collision probability also depends on how many values are generated. Use a database uniqueness constraint and handle conflicts when business uniqueness is required.
 
 ```go
 // Number of possible combinations for 32-char alphanumeric token: 62^32 ≈ 2^190
-// Collision probability: < 10^-50 (virtually impossible)
 token := rand.Token(32)
 ```
 
 ## Performance
 
-```
-BenchmarkString          500000       3000 ns/op
-BenchmarkNumericString  1000000       2000 ns/op
-BenchmarkInt            2000000        800 ns/op
-BenchmarkBytes           500000       3500 ns/op
-```
-
-`crypto/rand` is slightly slower than `math/rand` but more secure.
+Performance depends on the operating-system entropy source, alphabet, and requested length. Run the package benchmarks in the target environment rather than using fixed historical numbers for capacity planning.
 
 ## Notes
 
@@ -327,20 +319,20 @@ BenchmarkBytes           500000       3500 ns/op
    - ✅ Does not use pseudo-random number generators (PRNG)
 
 2. **Performance**:
-   - Slightly slower than `math/rand` (about 3-5x)
-   - Sufficient performance for most application scenarios
+   - Prioritize correctness for security use cases; benchmark capacity in the target environment
 
 3. **Range**:
    - `Int(min, max)` returns **[min, max)** half-open interval
+   - `min >= max` is invalid: `TryInt*` returns `ErrInvalidRange`, while the plain variant panics
    - To include upper bound, use `Int(min, max+1)`
 
 4. **Error Handling**:
-   - The plain functions (`String`/`Int`/`Bytes`, etc.) **panic** when `crypto/rand` fails (very rare, usually a system entropy-source issue)
-   - To propagate the failure gracefully as an error instead of panicking, use the corresponding `Try*` safe variant and detect entropy failures with `errors.Is(err, rand.ErrInsufficientEntropy)`
+   - Plain functions (`String`/`Int`/`Bytes`, etc.) **panic** on invalid input or entropy failure
+   - Request paths should use `Try*` and distinguish input errors from entropy failures with `errors.Is`
 
 5. **Length Limit**:
-   - May be slow for generating very long strings (> 1MB)
-   - Recommended single generation length < 10000
+   - String and byte APIs generate at most `MaxGeneratedLength` (1048576) elements per call
+   - Negative lengths are invalid; zero returns an empty value
 
 ## Dependencies
 
@@ -359,7 +351,7 @@ import (
 | Security | Cryptographically secure | Insecure (predictable) |
 | Performance | Slower | Fast |
 | Use Case | Keys, tokens, passwords | Games, simulations, testing |
-| Randomness | True random | Pseudo-random |
+| Random Source | Operating-system CSPRNG | In-process PRNG |
 
 **Recommendation**:
 - ✅ Use this package for security scenarios (tokens, passwords, keys)

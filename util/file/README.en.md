@@ -7,14 +7,14 @@ A convenient toolkit that simplifies file operations, encapsulating common file 
 ## Features
 
 - ✅ File/directory existence and attribute checks
-- ✅ Atomic file replacement (file sync, same-directory rename, parent-directory sync)
+- ✅ Atomic replacement through a pinned parent Root (rejects parent rebinding and destination symlinks)
 - ✅ Private defaults (`0600` files and `0750` directories)
 - ✅ File reading and writing (supports strings and bytes)
-- ✅ File append operations
+- ✅ File append operations that never follow the final symlink
 - ✅ File copy and move
 - ✅ Directory creation and traversal
 - ✅ Path operations (join, absolute path)
-- ✅ Zero external dependencies
+- ✅ Depends only on the Go standard library and `golang.org/x/sys`
 
 ## Quick Start
 
@@ -61,7 +61,7 @@ err = file.WriteString("/path/to/output.txt", "Hello, World!")
 // Atomically write bytes with 0600 permissions
 err = file.Write("/path/to/output.bin", []byte{0x01, 0x02})
 
-// Append directly without atomic-replacement or crash-durability guarantees
+// Append directly while rejecting a final symlink; no crash-durability guarantee
 err = file.AppendString("/path/to/log.txt", "New log entry\n")
 ```
 
@@ -87,7 +87,7 @@ dir := file.Dir("/path/to/file.txt")  // "/path/to"
 ### File Operations
 
 ```go
-// Atomically copy a regular file without following a destination symlink
+// Atomically copy a regular file; return an error for a destination symlink
 err := file.Copy("/path/to/source.txt", "/path/to/dest.txt")
 
 // Move file
@@ -165,13 +165,13 @@ ReadString(path string) (string, error)
 ### Write Functions
 
 ```go
-// Write atomically replaces a file with 0600 permissions
+// Write atomically replaces a file with 0600 permissions and rejects parent rebinding or a destination symlink
 Write(path string, data []byte) error
 
 // WriteString atomically replaces string content with 0600 permissions
 WriteString(path, content string) error
 
-// Append directly appends bytes with a default 0600 creation mode
+// Append directly appends bytes with a default 0600 creation mode and rejects a final symlink
 Append(path string, data []byte) error
 
 // AppendString appends string to file
@@ -203,7 +203,7 @@ Dir(path string) string
 ### Operation Functions
 
 ```go
-// Copy atomically copies a regular file and replaces a destination symlink
+// Copy atomically copies a regular file and rejects a destination symlink
 Copy(src, dst string) error
 
 // Move moves a file
@@ -498,12 +498,12 @@ Walk():         depends on file count (1000 files ≈ 100ms)
    - Uses `filepath` package to ensure cross-platform compatibility
 
 2. **File Permissions**:
-   - Default permissions: file 0644, directory 0755
-   - Use the `os` package for custom permissions
+   - Default permissions: file 0600, directory 0750
+   - Use `WriteWithPerm` or `AppendWithPerm` for custom write permissions
 
 3. **Concurrency Safety**:
    - Functions themselves are stateless and can be called concurrently
-   - However, file I/O itself does not guarantee atomicity
+   - `Write()` and `Copy()` publish complete files with a same-directory rename; the last successful writer wins
 
 4. **Large File Handling**:
    - `Read()` reads the entire file into memory
@@ -514,13 +514,13 @@ Walk():         depends on file count (1000 files ≈ 100ms)
    - Always check the returned `error`
 
 6. **File Overwriting**:
-   - `Write()` overwrites existing files
-   - `Append()` appends to the end of the file
+   - `Write()` overwrites an existing regular file but rejects a final symlink
+   - `Append()` appends to the end of the file but rejects a final symlink
 
 ## Dependencies
 
 ```bash
-# Zero external dependencies, uses only standard library
+# Internally uses the standard library and golang.org/x/sys
 import (
     "io"
     "os"

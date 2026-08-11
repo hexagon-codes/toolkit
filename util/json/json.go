@@ -4,7 +4,24 @@ package json
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"reflect"
+)
+
+const (
+	// DefaultMaxDocumentBytes 是便捷解码 API 接受的最大 JSON 文档大小。
+	DefaultMaxDocumentBytes = 8 << 20
+	// DefaultMaxNestingDepth 是便捷解码 API 接受的最大嵌套深度。
+	DefaultMaxNestingDepth = 100
+)
+
+var (
+	// ErrDocumentTooLarge 表示 JSON 文档超过安全上限。
+	ErrDocumentTooLarge = errors.New("json: document too large")
+	// ErrNestingTooDeep 表示 JSON 文档嵌套过深。
+	ErrNestingTooDeep = errors.New("json: nesting too deep")
 )
 
 // Marshal JSON序列化（忽略错误）
@@ -64,7 +81,7 @@ func MustMarshalIndent(v any) string {
 
 // Unmarshal JSON反序列化
 func Unmarshal(data string, v any) error {
-	return json.Unmarshal([]byte(data), v)
+	return decodeJSONBytes([]byte(data), v)
 }
 
 // MustUnmarshal JSON反序列化，失败时panic
@@ -72,14 +89,14 @@ func Unmarshal(data string, v any) error {
 // 警告：仅用于已验证的内部数据，不要用于处理不可信的外部输入
 // 处理外部 JSON 请使用 Unmarshal 并检查返回的 error
 func MustUnmarshal(data string, v any) {
-	if err := json.Unmarshal([]byte(data), v); err != nil {
+	if err := decodeJSONBytes([]byte(data), v); err != nil {
 		panic(fmt.Sprintf("json unmarshal failed: %v", err))
 	}
 }
 
 // UnmarshalBytes JSON反序列化（字节数组）
 func UnmarshalBytes(data []byte, v any) error {
-	return json.Unmarshal(data, v)
+	return decodeJSONBytes(data, v)
 }
 
 // Valid 验证JSON是否合法
@@ -131,7 +148,7 @@ func CompactBytes(data []byte) []byte {
 // ToMap JSON字符串转Map
 func ToMap(data string) (map[string]any, error) {
 	var m map[string]any
-	err := json.Unmarshal([]byte(data), &m)
+	err := decodeJSONBytes([]byte(data), &m)
 	return m, err
 }
 
@@ -149,7 +166,7 @@ func MustToMap(data string) map[string]any {
 // ToSlice JSON字符串转Slice
 func ToSlice(data string) ([]any, error) {
 	var s []any
-	err := json.Unmarshal([]byte(data), &s)
+	err := decodeJSONBytes([]byte(data), &s)
 	return s, err
 }
 
@@ -167,4 +184,83 @@ func MustToSlice(data string) []any {
 // Print 打印JSON（美化输出）
 func Print(v any) {
 	fmt.Println(MarshalIndent(v))
+}
+
+// decodeJSONBytes 严格解码单个 JSON 文档，并在成功后一次性提交目标值。
+func decodeJSONBytes(data []byte, v any) error {
+	if len(data) > DefaultMaxDocumentBytes {
+		return fmt.Errorf("%w: got %d bytes, limit is %d", ErrDocumentTooLarge, len(data), DefaultMaxDocumentBytes)
+	}
+	if err := validateNestingDepth(data, DefaultMaxNestingDepth); err != nil {
+		return err
+	}
+
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Pointer || rv.IsNil() {
+		err := json.Unmarshal([]byte("null"), v)
+		return classifyDecodeError(err)
+	}
+	temporary := reflect.New(rv.Elem().Type())
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(temporary.Interface()); err != nil {
+		return classifyDecodeError(err)
+	}
+
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("%w: trailing data", ErrInvalidJSON)
+		}
+		return classifyDecodeError(err)
+	}
+	rv.Elem().Set(temporary.Elem())
+	return nil
+}
+
+// classifyDecodeError 保留底层错误链并提供稳定的错误分类。
+func classifyDecodeError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, ErrDocumentTooLarge) || errors.Is(err, ErrNestingTooDeep) || errors.Is(err, ErrInvalidJSON) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", ErrInvalidJSON, err)
+}
+
+// validateNestingDepth 在分配解码目标前限制对象和数组嵌套深度。
+func validateNestingDepth(data []byte, maximum int) error {
+	depth := 0
+	inString := false
+	escaped := false
+	for _, current := range data {
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if current == '\\' {
+				escaped = true
+				continue
+			}
+			if current == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch current {
+		case '"':
+			inString = true
+		case '{', '[':
+			depth++
+			if depth > maximum {
+				return fmt.Errorf("%w: limit is %d", ErrNestingTooDeep, maximum)
+			}
+		case '}', ']':
+			depth--
+		}
+	}
+	return nil
 }

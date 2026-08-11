@@ -3,6 +3,19 @@ package slice
 
 import "math/rand/v2"
 
+type integer interface {
+	~int | ~int8 | ~int16 | ~int32 | ~int64 |
+		~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64 | ~uintptr
+}
+
+type floating interface {
+	~float32 | ~float64
+}
+
+type number interface {
+	integer | floating
+}
+
 // Unique 去重（保持顺序）
 func Unique[T comparable](slice []T) []T {
 	seen := make(map[T]struct{}, len(slice))
@@ -15,7 +28,7 @@ func Unique[T comparable](slice []T) []T {
 		}
 	}
 
-	return result
+	return compact(result)
 }
 
 // Contains 判断切片是否包含元素
@@ -58,7 +71,7 @@ func Remove[T comparable](slice []T, item T) []T {
 			return result
 		}
 	}
-	return slice
+	return clone(slice)
 }
 
 // RemoveAll 移除所有匹配的元素
@@ -69,13 +82,13 @@ func RemoveAll[T comparable](slice []T, item T) []T {
 			result = append(result, v)
 		}
 	}
-	return result
+	return compact(result)
 }
 
 // RemoveAt 移除指定索引的元素（不修改原始切片）
 func RemoveAt[T any](slice []T, index int) []T {
 	if index < 0 || index >= len(slice) {
-		return slice
+		return clone(slice)
 	}
 	result := make([]T, 0, len(slice)-1)
 	result = append(result, slice[:index]...)
@@ -97,7 +110,7 @@ func Shuffle[T any](slice []T) []T {
 	result := make([]T, len(slice))
 	copy(result, slice)
 
-	// 使用 math/rand/v2（Go 1.22+），自动使用加密安全的随机种子
+	// 使用全局伪随机源；该随机性不适用于密钥、令牌等安全场景。
 	for i := len(result) - 1; i > 0; i-- {
 		j := rand.IntN(i + 1) // #nosec G404 -- 洗牌随机性不用于密钥、令牌或其他安全用途。
 		result[i], result[j] = result[j], result[i]
@@ -108,17 +121,22 @@ func Shuffle[T any](slice []T) []T {
 
 // Chunk 将切片分成多个子切片
 func Chunk[T any](slice []T, size int) [][]T {
+	if len(slice) == 0 {
+		return nil
+	}
 	if size <= 0 {
-		return [][]T{slice}
+		size = len(slice)
 	}
 
-	var chunks [][]T
+	chunks := make([][]T, 0, (len(slice)-1)/size+1)
 	for i := 0; i < len(slice); i += size {
 		end := i + size
 		if end > len(slice) {
 			end = len(slice)
 		}
-		chunks = append(chunks, slice[i:end])
+		chunk := make([]T, end-i)
+		copy(chunk, slice[i:end])
+		chunks = append(chunks, chunk)
 	}
 
 	return chunks
@@ -130,7 +148,7 @@ func Flatten[T any](slices [][]T) []T {
 	for _, s := range slices {
 		result = append(result, s...)
 	}
-	return result
+	return compact(result)
 }
 
 // Union 并集
@@ -152,7 +170,7 @@ func Union[T comparable](slice1, slice2 []T) []T {
 		}
 	}
 
-	return result
+	return compact(result)
 }
 
 // Intersect 交集
@@ -210,7 +228,7 @@ func Equal[T comparable](slice1, slice2 []T) bool {
 }
 
 // Sum 求和（整数）
-func Sum[T int | int64 | int32](slice []T) T {
+func Sum[T integer](slice []T) T {
 	var sum T
 	for _, v := range slice {
 		sum += v
@@ -219,7 +237,7 @@ func Sum[T int | int64 | int32](slice []T) T {
 }
 
 // SumFloat 求和（浮点数）
-func SumFloat[T float32 | float64](slice []T) T {
+func SumFloat[T floating](slice []T) T {
 	var sum T
 	for _, v := range slice {
 		sum += v
@@ -228,7 +246,7 @@ func SumFloat[T float32 | float64](slice []T) T {
 }
 
 // Max 获取最大值
-func Max[T int | int64 | int32 | float32 | float64](slice []T) T {
+func Max[T number](slice []T) T {
 	if len(slice) == 0 {
 		var zero T
 		return zero
@@ -244,7 +262,7 @@ func Max[T int | int64 | int32 | float32 | float64](slice []T) T {
 }
 
 // Min 获取最小值
-func Min[T int | int64 | int32 | float32 | float64](slice []T) T {
+func Min[T number](slice []T) T {
 	if len(slice) == 0 {
 		var zero T
 		return zero
@@ -315,4 +333,20 @@ func Last[T any](slice []T) (T, bool) {
 		return zero, false
 	}
 	return slice[len(slice)-1], true
+}
+
+func clone[T any](slice []T) []T {
+	if slice == nil {
+		return nil
+	}
+	result := make([]T, len(slice))
+	copy(result, slice)
+	return result
+}
+
+func compact[T any](slice []T) []T {
+	if cap(slice) == len(slice) {
+		return slice
+	}
+	return clone(slice)
 }

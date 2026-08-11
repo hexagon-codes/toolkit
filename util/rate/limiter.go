@@ -1,6 +1,7 @@
 package rate
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"sync"
@@ -57,8 +58,11 @@ func MustNewTokenBucket(capacity int, rate float64) *TokenBucket {
 func (tb *TokenBucket) Allow() bool {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
+	if !tb.validLocked() {
+		return false
+	}
 
-	tb.refill()
+	tb.refillAt(time.Now())
 
 	if tb.tokens >= 1 {
 		tb.tokens--
@@ -71,34 +75,50 @@ func (tb *TokenBucket) Allow() bool {
 // Wait 等待直到允许通过，返回等待时间
 // 注意：在高并发场景下，实际等待时间可能超过返回值
 func (tb *TokenBucket) Wait() time.Duration {
-	var totalWait time.Duration
+	waited, err := tb.WaitContext(context.Background())
+	if err != nil {
+		panic(err)
+	}
+	return waited
+}
+
+// WaitContext 等待直到允许通过，并在 context 取消时停止等待。
+func (tb *TokenBucket) WaitContext(ctx context.Context) (time.Duration, error) {
+	if err := validateWaitContext(ctx); err != nil {
+		return 0, err
+	}
+	started := time.Now()
+	waited := false
 
 	for {
 		tb.mu.Lock()
-		tb.refill()
+		if !tb.validLocked() {
+			tb.mu.Unlock()
+			return elapsedWait(started, waited), ErrUninitializedLimiter
+		}
+		tb.refillAt(time.Now())
 
 		if tb.tokens >= 1 {
 			tb.tokens--
 			tb.mu.Unlock()
-			return totalWait
+			return elapsedWait(started, waited), nil
 		}
 
-		// 计算需要等待的时间
-		waitTime := time.Duration((1-tb.tokens)/tb.rate*1000) * time.Millisecond
-		if waitTime < time.Millisecond {
-			waitTime = time.Millisecond // 最小等待 1ms
-		}
+		waitTime := tokenWaitDuration(1-tb.tokens, tb.rate)
 		tb.mu.Unlock()
 
-		// 在锁外等待
-		time.Sleep(waitTime)
-		totalWait += waitTime
+		waited = true
+		if err := waitForContext(ctx, waitTime); err != nil {
+			return elapsedWait(started, waited), err
+		}
 	}
 }
 
-// refill 补充令牌
-func (tb *TokenBucket) refill() {
-	now := time.Now()
+// refillAt 补充令牌；时钟未前进时保持原状态，避免回拨产生负令牌。
+func (tb *TokenBucket) refillAt(now time.Time) {
+	if !now.After(tb.lastTime) {
+		return
+	}
 	elapsed := now.Sub(tb.lastTime).Seconds()
 
 	// 计算新增的令牌数
@@ -111,6 +131,10 @@ func (tb *TokenBucket) refill() {
 	}
 
 	tb.lastTime = now
+}
+
+func (tb *TokenBucket) validLocked() bool {
+	return tb.capacity > 0 && tb.rate > 0 && !math.IsNaN(tb.rate) && !math.IsInf(tb.rate, 0)
 }
 
 // LeakyBucket 漏桶限流器
@@ -155,8 +179,11 @@ func MustNewLeakyBucket(capacity int, rate time.Duration) *LeakyBucket {
 func (lb *LeakyBucket) Allow() bool {
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
+	if !lb.validLocked() {
+		return false
+	}
 
-	lb.leak()
+	lb.leakAt(time.Now())
 
 	if lb.water < lb.capacity {
 		lb.water++
@@ -169,44 +196,79 @@ func (lb *LeakyBucket) Allow() bool {
 // Wait 等待直到允许通过
 // 注意：在高并发场景下，实际等待时间可能超过返回值
 func (lb *LeakyBucket) Wait() time.Duration {
-	var totalWait time.Duration
+	waited, err := lb.WaitContext(context.Background())
+	if err != nil {
+		panic(err)
+	}
+	return waited
+}
+
+// WaitContext 等待直到允许通过，并在 context 取消时停止等待。
+func (lb *LeakyBucket) WaitContext(ctx context.Context) (time.Duration, error) {
+	if err := validateWaitContext(ctx); err != nil {
+		return 0, err
+	}
+	started := time.Now()
+	waited := false
 
 	for {
 		lb.mu.Lock()
-		lb.leak()
+		if !lb.validLocked() {
+			lb.mu.Unlock()
+			return elapsedWait(started, waited), ErrUninitializedLimiter
+		}
+		now := time.Now()
+		lb.leakAt(now)
 
 		if lb.water < lb.capacity {
 			lb.water++
 			lb.mu.Unlock()
-			return totalWait
+			return elapsedWait(started, waited), nil
 		}
 
-		// 需要等待
-		waitTime := lb.rate
+		waitTime := lb.nextLeakWaitLocked(now)
 		lb.mu.Unlock()
 
-		// 在锁外等待
-		time.Sleep(waitTime)
-		totalWait += waitTime
+		waited = true
+		if err := waitForContext(ctx, waitTime); err != nil {
+			return elapsedWait(started, waited), err
+		}
 	}
 }
 
-// leak 漏水
-func (lb *LeakyBucket) leak() {
-	now := time.Now()
-
+// leakAt 按给定时刻漏水；时钟回拨时保持原状态。
+func (lb *LeakyBucket) leakAt(now time.Time) {
+	if !now.After(lb.lastLeakTime) {
+		return
+	}
 	elapsed := now.Sub(lb.lastLeakTime)
 
 	// 计算漏出的水量
-	leaked := int(elapsed / lb.rate)
+	leaked := elapsed / lb.rate
 	if leaked > 0 {
-		lb.water -= leaked
-		if lb.water < 0 {
+		if leaked >= time.Duration(lb.water) {
 			lb.water = 0
+		} else {
+			lb.water -= int(leaked)
 		}
 		// 只推进已消耗的时间，保留余量避免精度丢失
-		lb.lastLeakTime = lb.lastLeakTime.Add(time.Duration(leaked) * lb.rate)
+		lb.lastLeakTime = lb.lastLeakTime.Add(leaked * lb.rate)
 	}
+}
+
+func (lb *LeakyBucket) nextLeakWaitLocked(now time.Time) time.Duration {
+	if !now.After(lb.lastLeakTime) {
+		return lb.rate
+	}
+	remaining := lb.rate - now.Sub(lb.lastLeakTime)
+	if remaining < time.Nanosecond {
+		return time.Nanosecond
+	}
+	return remaining
+}
+
+func (lb *LeakyBucket) validLocked() bool {
+	return lb.capacity > 0 && lb.rate > 0
 }
 
 // SlidingWindow 滑动窗口限流器
@@ -249,6 +311,9 @@ func MustNewSlidingWindow(capacity int, window time.Duration) *SlidingWindow {
 func (sw *SlidingWindow) Allow() bool {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
+	if !sw.validLocked() {
+		return false
+	}
 
 	now := time.Now()
 	sw.cleanup(now)
@@ -264,10 +329,27 @@ func (sw *SlidingWindow) Allow() bool {
 // Wait 等待直到允许通过
 // 注意：在高并发场景下，实际等待时间可能超过返回值
 func (sw *SlidingWindow) Wait() time.Duration {
-	var totalWait time.Duration
+	waited, err := sw.WaitContext(context.Background())
+	if err != nil {
+		panic(err)
+	}
+	return waited
+}
+
+// WaitContext 等待直到允许通过，并在 context 取消时停止等待。
+func (sw *SlidingWindow) WaitContext(ctx context.Context) (time.Duration, error) {
+	if err := validateWaitContext(ctx); err != nil {
+		return 0, err
+	}
+	started := time.Now()
+	waited := false
 
 	for {
 		sw.mu.Lock()
+		if !sw.validLocked() {
+			sw.mu.Unlock()
+			return elapsedWait(started, waited), ErrUninitializedLimiter
+		}
 
 		now := time.Now()
 		sw.cleanup(now)
@@ -275,7 +357,7 @@ func (sw *SlidingWindow) Wait() time.Duration {
 		if len(sw.requests) < sw.capacity {
 			sw.requests = append(sw.requests, now)
 			sw.mu.Unlock()
-			return totalWait
+			return elapsedWait(started, waited), nil
 		}
 
 		// 计算需要等待的时间（等待最早的请求过期）
@@ -284,7 +366,9 @@ func (sw *SlidingWindow) Wait() time.Duration {
 		if len(sw.requests) > 0 {
 			oldestRequest := sw.requests[0]
 			elapsed := now.Sub(oldestRequest)
-			if elapsed < sw.window {
+			if elapsed < 0 {
+				waitTime = sw.window
+			} else if elapsed < sw.window {
 				waitTime = sw.window - elapsed
 			}
 		}
@@ -294,9 +378,10 @@ func (sw *SlidingWindow) Wait() time.Duration {
 		}
 		sw.mu.Unlock()
 
-		// 在锁外等待
-		time.Sleep(waitTime)
-		totalWait += waitTime
+		waited = true
+		if err := waitForContext(ctx, waitTime); err != nil {
+			return elapsedWait(started, waited), err
+		}
 	}
 }
 
@@ -329,33 +414,25 @@ func (sw *SlidingWindow) Count() int {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 
+	if !sw.validLocked() {
+		return 0
+	}
 	sw.cleanup(time.Now())
 	return len(sw.requests)
 }
 
 // Record 记录一次请求，不检查是否超限
 // 适用于只需要追踪请求数量而不需要限流的场景
-// 注意：为防止内存无限增长，当记录数超过容量的 2 倍时会自动清理最旧的记录
+// 为保证 Count 精确，当前窗口内的全部记录都会保留，内存占用与窗口内记录数成正比。
 func (sw *SlidingWindow) Record() {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 
+	if !sw.validLocked() {
+		return
+	}
 	now := time.Now()
 	sw.cleanup(now)
-
-	// 防止内存无限增长：如果超过容量的 2 倍，移除最旧的记录
-	maxSize := sw.capacity * 2
-	if maxSize < 100 {
-		maxSize = 100 // 最小保留 100 条
-	}
-	if len(sw.requests) >= maxSize {
-		// 移除最旧的一半记录
-		removeCount := len(sw.requests) / 2
-		keep := len(sw.requests) - removeCount
-		newRequests := make([]time.Time, keep, max(keep, sw.capacity))
-		copy(newRequests, sw.requests[removeCount:])
-		sw.requests = newRequests
-	}
 
 	sw.requests = append(sw.requests, now)
 }
@@ -366,6 +443,9 @@ func (sw *SlidingWindow) TryAllow() (allowed bool, count int) {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 
+	if !sw.validLocked() {
+		return false, 0
+	}
 	now := time.Now()
 	sw.cleanup(now)
 
@@ -393,4 +473,33 @@ func (sw *SlidingWindow) Capacity() int {
 // Window 返回窗口大小
 func (sw *SlidingWindow) Window() time.Duration {
 	return sw.window
+}
+
+func (sw *SlidingWindow) validLocked() bool {
+	return sw.capacity > 0 && sw.window > 0
+}
+
+func validateWaitContext(ctx context.Context) error {
+	if ctx == nil {
+		return ErrNilContext
+	}
+	return ctx.Err()
+}
+
+func waitForContext(ctx context.Context, duration time.Duration) error {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func elapsedWait(started time.Time, waited bool) time.Duration {
+	if !waited {
+		return 0
+	}
+	return time.Since(started)
 }

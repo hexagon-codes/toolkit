@@ -56,10 +56,13 @@ type Config struct {
 	// SuccessThreshold 是半开状态恢复关闭所需的连续成功次数。
 	SuccessThreshold int
 	// IsFailure 判断一次执行结果是否应计为失败。
+	// 回调在状态锁外执行，可能被并发调用；panic 按失败处理。
 	IsFailure func(error) bool
-	// OnStateChange 在状态变化后执行。
+	// OnStateChange 在状态变化后于状态锁外执行。
+	// 并发状态变化的回调可能重叠，监听器必须保证自身并发安全；panic 会被隔离。
 	OnStateChange func(from, to State)
 	// Now 提供当前时间，主要用于确定性测试。
+	// 回调在状态锁外执行且可能并发调用；panic 会传播给当前调用方。
 	Now func() time.Time
 }
 
@@ -158,11 +161,17 @@ type Breaker struct {
 
 // Permit 表示一次已获准执行的请求。
 // 每个许可必须且只能调用一次 Complete。
+// 值复制不会创建新许可，所有副本共享同一个完成状态。
 type Permit struct {
 	breaker    *Breaker
 	generation uint64
 	state      State
-	completed  atomic.Bool
+	completion *permitCompletion
+}
+
+// permitCompletion 在 Permit 被值复制后仍共享同一个完成状态。
+type permitCompletion struct {
+	completed atomic.Bool
 }
 
 type stateChangeEvent struct {
@@ -196,42 +205,71 @@ func (b *Breaker) State() State {
 
 // Acquire 获取一次请求许可。
 func (b *Breaker) Acquire() (*Permit, error) {
-	if b.closed.Load() {
-		return nil, ErrBreakerClosed
-	}
+	for {
+		if b.closed.Load() {
+			return nil, ErrBreakerClosed
+		}
 
-	var event *stateChangeEvent
-	b.mu.Lock()
-	if b.closed.Load() {
+		b.mu.Lock()
+		if b.closed.Load() {
+			b.mu.Unlock()
+			return nil, ErrBreakerClosed
+		}
+		if b.state != StateOpen {
+			permit, err := b.acquireLocked()
+			b.mu.Unlock()
+			return permit, err
+		}
+		generation := b.generation
+		openedAt := b.openedAt
 		b.mu.Unlock()
-		return nil, ErrBreakerClosed
-	}
-	if b.state == StateOpen {
-		if b.config.Now().Sub(b.openedAt) < b.config.Timeout {
+
+		now := b.config.Now()
+
+		var event *stateChangeEvent
+		b.mu.Lock()
+		if b.closed.Load() {
+			b.mu.Unlock()
+			return nil, ErrBreakerClosed
+		}
+		if b.state != StateOpen || b.generation != generation || !b.openedAt.Equal(openedAt) {
+			b.mu.Unlock()
+			continue
+		}
+		if now.Sub(b.openedAt) < b.config.Timeout {
 			b.mu.Unlock()
 			return nil, ErrCircuitOpen
 		}
-		event = b.transitionLocked(StateHalfOpen)
+		event = b.transitionLocked(StateHalfOpen, time.Time{})
+		permit, err := b.acquireLocked()
+		b.mu.Unlock()
+		invokeStateChange(event)
+		return permit, err
 	}
+}
+
+func (b *Breaker) acquireLocked() (*Permit, error) {
 	if b.state == StateHalfOpen {
 		if b.halfOpenCount >= b.config.HalfOpenMaxRequests {
-			b.mu.Unlock()
 			return nil, ErrTooManyRequests
 		}
 		b.halfOpenCount++
 	}
-	permit := &Permit{breaker: b, generation: b.generation, state: b.state}
-	b.mu.Unlock()
-	invokeStateChange(event)
+	permit := &Permit{
+		breaker:    b,
+		generation: b.generation,
+		state:      b.state,
+		completion: &permitCompletion{},
+	}
 	return permit, nil
 }
 
 // Complete 提交本次请求结果。
 func (p *Permit) Complete(resultErr error) error {
-	if p == nil || p.breaker == nil {
+	if p == nil || p.breaker == nil || p.completion == nil {
 		return errors.New("circuit: permit must not be nil")
 	}
-	if !p.completed.CompareAndSwap(false, true) {
+	if !p.completion.completed.CompareAndSwap(false, true) {
 		return ErrPermitCompleted
 	}
 	return p.breaker.complete(p, resultErr)
@@ -241,7 +279,25 @@ func (b *Breaker) complete(permit *Permit, resultErr error) error {
 	if b.closed.Load() {
 		return ErrBreakerClosed
 	}
+	current, err := b.permitCurrent(permit)
+	if err != nil {
+		return err
+	}
+	if !current {
+		return nil
+	}
 	isFailure := classifyFailure(b.config.IsFailure, resultErr)
+	var failureAt time.Time
+	if isFailure {
+		current, err = b.permitCurrent(permit)
+		if err != nil {
+			return err
+		}
+		if !current {
+			return nil
+		}
+		failureAt = b.config.Now()
+	}
 
 	var event *stateChangeEvent
 	b.mu.Lock()
@@ -258,9 +314,9 @@ func (b *Breaker) complete(permit *Permit, resultErr error) error {
 	case StateClosed:
 		if isFailure {
 			b.failures++
-			b.lastFailureAt = b.config.Now()
+			b.recordFailureLocked(failureAt)
 			if b.failures >= b.config.Threshold {
-				event = b.transitionLocked(StateOpen)
+				event = b.transitionLocked(StateOpen, b.lastFailureAt)
 			}
 		} else {
 			b.failures = 0
@@ -268,18 +324,33 @@ func (b *Breaker) complete(permit *Permit, resultErr error) error {
 	case StateHalfOpen:
 		b.halfOpenCount--
 		if isFailure {
-			b.lastFailureAt = b.config.Now()
-			event = b.transitionLocked(StateOpen)
+			b.recordFailureLocked(failureAt)
+			event = b.transitionLocked(StateOpen, b.lastFailureAt)
 		} else {
 			b.successes++
 			if b.successes >= b.config.SuccessThreshold {
-				event = b.transitionLocked(StateClosed)
+				event = b.transitionLocked(StateClosed, time.Time{})
 			}
 		}
 	}
 	b.mu.Unlock()
 	invokeStateChange(event)
 	return nil
+}
+
+func (b *Breaker) permitCurrent(permit *Permit) (bool, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed.Load() {
+		return false, ErrBreakerClosed
+	}
+	return permit.generation == b.generation && permit.state == b.state, nil
+}
+
+func (b *Breaker) recordFailureLocked(failureAt time.Time) {
+	if b.lastFailureAt.IsZero() || failureAt.After(b.lastFailureAt) {
+		b.lastFailureAt = failureAt
+	}
 }
 
 func classifyFailure(classify func(error) bool, resultErr error) (failure bool) {
@@ -322,9 +393,18 @@ func (b *Breaker) ExecuteContext(
 	if run == nil {
 		return nil, errors.New("circuit: execute function must not be nil")
 	}
+	if contextErr := ctx.Err(); contextErr != nil {
+		return nil, contextErr
+	}
 	permit, err := b.Acquire()
 	if err != nil {
 		return nil, err
+	}
+	if contextErr := ctx.Err(); contextErr != nil {
+		if completeErr := permit.Complete(contextErr); completeErr != nil {
+			return nil, errors.Join(contextErr, completeErr)
+		}
+		return nil, contextErr
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -336,7 +416,7 @@ func (b *Breaker) ExecuteContext(
 	return run(ctx)
 }
 
-func (b *Breaker) transitionLocked(to State) *stateChangeEvent {
+func (b *Breaker) transitionLocked(to State, openedAt time.Time) *stateChangeEvent {
 	from := b.state
 	if from == to {
 		return nil
@@ -352,7 +432,7 @@ func (b *Breaker) transitionLocked(to State) *stateChangeEvent {
 	case StateOpen:
 		b.successes = 0
 		b.halfOpenCount = 0
-		b.openedAt = b.config.Now()
+		b.openedAt = openedAt
 	case StateHalfOpen:
 		b.successes = 0
 		b.halfOpenCount = 0
@@ -387,15 +467,15 @@ func (b *Breaker) Reset() error {
 		b.mu.Unlock()
 		return ErrBreakerClosed
 	}
-	event := b.transitionLocked(StateClosed)
+	event := b.transitionLocked(StateClosed, time.Time{})
 	if event == nil {
 		b.generation++
 		b.failures = 0
 		b.successes = 0
 		b.halfOpenCount = 0
-		b.lastFailureAt = time.Time{}
-		b.openedAt = time.Time{}
 	}
+	b.lastFailureAt = time.Time{}
+	b.openedAt = time.Time{}
 	b.mu.Unlock()
 	invokeStateChange(event)
 	return nil
@@ -527,7 +607,7 @@ func IsRateLimitOrServerError(err error) bool {
 	var httpErr HTTPError
 	if errors.As(err, &httpErr) {
 		code := httpErr.StatusCode()
-		return code == 429 || code >= 500
+		return code == 429 || code >= 500 && code < 600
 	}
 	return true
 }
@@ -538,7 +618,11 @@ func IsServerError(err error) bool {
 		return false
 	}
 	var httpErr HTTPError
-	return errors.As(err, &httpErr) && httpErr.StatusCode() >= 500
+	if !errors.As(err, &httpErr) {
+		return false
+	}
+	code := httpErr.StatusCode()
+	return code >= 500 && code < 600
 }
 
 // IsRateLimitError 判断错误是否为限流错误。

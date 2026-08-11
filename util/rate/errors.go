@@ -25,4 +25,6 @@ var (
 	ErrDuplicateLimiter = errors.New("limiter must not be duplicated")
 	// ErrNoLimiters 表示多维限流器没有配置任何维度。
 	ErrNoLimiters = errors.New("at least one limiter is required")
+	// ErrUninitializedLimiter 表示调用方使用了未通过构造器初始化的限流器。
+	ErrUninitializedLimiter = errors.New("limiter is not initialized")
 )

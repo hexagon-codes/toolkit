@@ -33,13 +33,13 @@ func SHA512Bytes(data []byte) string {
 	return hex.EncodeToString(hash[:])
 }
 
-// BcryptHash 使用 bcrypt 加密密码
+// BcryptHash 使用 bcrypt 哈希密码
 // bcrypt 拒绝超过 72 字节的密码，调用方应限制输入长度。
 func BcryptHash(password string) (string, error) {
 	return BcryptHashWithCost(password, bcrypt.DefaultCost)
 }
 
-// BcryptHashWithCost 使用指定 cost 加密密码
+// BcryptHashWithCost 使用指定 cost 哈希密码
 func BcryptHashWithCost(password string, cost int) (string, error) {
 	// 验证 cost 范围 (bcrypt.MinCost=4, bcrypt.MaxCost=31)
 	if cost < bcrypt.MinCost || cost > bcrypt.MaxCost {
@@ -59,7 +59,7 @@ func BcryptCheck(password, hash string) bool {
 	return err == nil
 }
 
-// MustBcryptHash bcrypt 加密，失败时 panic
+// MustBcryptHash 使用 bcrypt 哈希密码，失败时 panic
 func MustBcryptHash(password string) string {
 	hash, err := BcryptHash(password)
 	if err != nil {

@@ -82,6 +82,9 @@ func (l *TokenRateLimiter) AllowN(tokens int) bool {
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if !l.validLocked() {
+		return false
+	}
 	if !l.canAllowNLocked(tokens) {
 		return false
 	}
@@ -106,8 +109,15 @@ func (l *TokenRateLimiter) WaitN(ctx context.Context, tokens int) error {
 	if tokens <= 0 {
 		return ErrInvalidTokenCount
 	}
-	if tokens > l.maxTransactionN() {
-		return fmt.Errorf("%w: requested=%d capacity=%d", ErrInsufficientTokens, tokens, l.maxTransactionN())
+	l.mu.Lock()
+	if !l.validLocked() {
+		l.mu.Unlock()
+		return ErrUninitializedLimiter
+	}
+	capacity := l.maxTransactionN()
+	l.mu.Unlock()
+	if tokens > capacity {
+		return fmt.Errorf("%w: requested=%d capacity=%d", ErrInsufficientTokens, tokens, capacity)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -131,6 +141,9 @@ func (l *TokenRateLimiter) WaitN(ctx context.Context, tokens int) error {
 func (l *TokenRateLimiter) Stats() TokenLimiterStats {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if !l.validLocked() {
+		return TokenLimiterStats{}
+	}
 	return TokenLimiterStats{
 		TokensAvailable:   l.tokenBucket.availableLocked(),
 		RequestsAvailable: l.requestBucket.availableLocked(),
@@ -143,6 +156,9 @@ func (l *TokenRateLimiter) Stats() TokenLimiterStats {
 func (l *TokenRateLimiter) Available() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if !l.validLocked() {
+		return 0
+	}
 	return l.availableLocked()
 }
 
@@ -153,7 +169,7 @@ func (l *TokenRateLimiter) lockTransaction() { l.mu.Lock() }
 func (l *TokenRateLimiter) unlockTransaction() { l.mu.Unlock() }
 
 func (l *TokenRateLimiter) canAllowNLocked(n int) bool {
-	return n > 0 && l.requestBucket.canAllowNLocked(1) && l.tokenBucket.canAllowNLocked(n)
+	return l.validLocked() && n > 0 && l.requestBucket.canAllowNLocked(1) && l.tokenBucket.canAllowNLocked(n)
 }
 
 func (l *TokenRateLimiter) consumeNLocked(n int) {
@@ -162,6 +178,9 @@ func (l *TokenRateLimiter) consumeNLocked(n int) {
 }
 
 func (l *TokenRateLimiter) availableLocked() int {
+	if !l.validLocked() {
+		return 0
+	}
 	tokenAvailable := l.tokenBucket.availableLocked()
 	requestAvailable := l.requestBucket.availableLocked()
 	if tokenAvailable < requestAvailable {
@@ -171,7 +190,16 @@ func (l *TokenRateLimiter) availableLocked() int {
 }
 
 func (l *TokenRateLimiter) maxTransactionN() int {
+	if l.tokenBucket == nil {
+		return 0
+	}
 	return l.tokenBucket.capacity
+}
+
+func (l *TokenRateLimiter) validLocked() bool {
+	return l.tokenBucket != nil && l.requestBucket != nil &&
+		l.tokensPerMinute > 0 && l.requestsPerMinute > 0 &&
+		l.tokenBucket.validLocked() && l.requestBucket.validLocked()
 }
 
 // TokenLimiterStats 是 Token 限流器的统计快照。
@@ -226,6 +254,9 @@ func (tb *TokenBucketV2) AllowN(n int) bool {
 
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
+	if !tb.validLocked() {
+		return false
+	}
 	if !tb.canAllowNLocked(n) {
 		return false
 	}
@@ -250,8 +281,15 @@ func (tb *TokenBucketV2) WaitN(ctx context.Context, n int) error {
 	if n <= 0 {
 		return ErrInvalidTokenCount
 	}
-	if n > tb.capacity {
-		return fmt.Errorf("%w: requested=%d capacity=%d", ErrInsufficientTokens, n, tb.capacity)
+	tb.mu.Lock()
+	if !tb.validLocked() {
+		tb.mu.Unlock()
+		return ErrUninitializedLimiter
+	}
+	capacity := tb.capacity
+	tb.mu.Unlock()
+	if n > capacity {
+		return fmt.Errorf("%w: requested=%d capacity=%d", ErrInsufficientTokens, n, capacity)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -267,14 +305,8 @@ func (tb *TokenBucketV2) WaitN(ctx context.Context, n int) error {
 		waitTime := tokenWaitDuration(float64(n)-tb.tokens, tb.rate)
 		tb.mu.Unlock()
 
-		timer := time.NewTimer(waitTime)
-		select {
-		case <-ctx.Done():
-			if !timer.Stop() {
-				<-timer.C
-			}
-			return ctx.Err()
-		case <-timer.C:
+		if err := waitForContext(ctx, waitTime); err != nil {
+			return err
 		}
 	}
 }
@@ -283,6 +315,9 @@ func (tb *TokenBucketV2) WaitN(ctx context.Context, n int) error {
 func (tb *TokenBucketV2) Available() int {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
+	if !tb.validLocked() {
+		return 0
+	}
 	return tb.availableLocked()
 }
 
@@ -293,6 +328,9 @@ func (tb *TokenBucketV2) lockTransaction() { tb.mu.Lock() }
 func (tb *TokenBucketV2) unlockTransaction() { tb.mu.Unlock() }
 
 func (tb *TokenBucketV2) canAllowNLocked(n int) bool {
+	if !tb.validLocked() {
+		return false
+	}
 	tb.refillLocked()
 	return n > 0 && tb.tokens >= float64(n)
 }
@@ -302,6 +340,9 @@ func (tb *TokenBucketV2) consumeNLocked(n int) {
 }
 
 func (tb *TokenBucketV2) availableLocked() int {
+	if !tb.validLocked() {
+		return 0
+	}
 	tb.refillLocked()
 	return int(tb.tokens)
 }
@@ -311,14 +352,19 @@ func (tb *TokenBucketV2) maxTransactionN() int { return tb.capacity }
 // refillLocked 根据经过时间补充令牌，调用方必须持有事务锁。
 func (tb *TokenBucketV2) refillLocked() {
 	now := time.Now()
+	if !now.After(tb.lastTime) {
+		return
+	}
 	elapsed := now.Sub(tb.lastTime).Seconds()
-	if elapsed > 0 {
-		tb.tokens += elapsed * tb.rate
-		if tb.tokens > float64(tb.capacity) {
-			tb.tokens = float64(tb.capacity)
-		}
+	tb.tokens += elapsed * tb.rate
+	if tb.tokens > float64(tb.capacity) {
+		tb.tokens = float64(tb.capacity)
 	}
 	tb.lastTime = now
+}
+
+func (tb *TokenBucketV2) validLocked() bool {
+	return tb.capacity > 0 && tb.rate > 0 && !math.IsNaN(tb.rate) && !math.IsInf(tb.rate, 0)
 }
 
 func tokenWaitDuration(needed, rate float64) time.Duration {
@@ -375,6 +421,9 @@ func NewMultiDimensionLimiter(limiters ...LimiterV2) (*MultiDimensionLimiter, er
 		if !ok {
 			return nil, fmt.Errorf("%w: index=%d type=%T", ErrUnsupportedLimiter, index, limiter)
 		}
+		if atomicLimiter.maxTransactionN() <= 0 {
+			return nil, fmt.Errorf("%w: index=%d", ErrUninitializedLimiter, index)
+		}
 		key := atomicLimiter.transactionKey()
 		if _, ok := seen[key]; ok {
 			return nil, fmt.Errorf("%w: index=%d", ErrDuplicateLimiter, index)
@@ -409,7 +458,7 @@ func (m *MultiDimensionLimiter) Allow() bool {
 
 // AllowN 在同一个临界区内检查并消费所有维度。
 func (m *MultiDimensionLimiter) AllowN(n int) bool {
-	if n <= 0 {
+	if n <= 0 || len(m.limiters) == 0 {
 		return false
 	}
 	m.lockAll()
@@ -442,6 +491,9 @@ func (m *MultiDimensionLimiter) WaitN(ctx context.Context, n int) error {
 	if n <= 0 {
 		return ErrInvalidTokenCount
 	}
+	if len(m.limiters) == 0 {
+		return ErrUninitializedLimiter
+	}
 	for _, limiter := range m.limiters {
 		if n > limiter.maxTransactionN() {
 			return fmt.Errorf("%w: requested=%d capacity=%d", ErrInsufficientTokens, n, limiter.maxTransactionN())
@@ -467,6 +519,9 @@ func (m *MultiDimensionLimiter) WaitN(ctx context.Context, n int) error {
 
 // Available 返回事务快照中最紧维度的可用令牌数。
 func (m *MultiDimensionLimiter) Available() int {
+	if len(m.limiters) == 0 {
+		return 0
+	}
 	m.lockAll()
 	defer m.unlockAll()
 	available := math.MaxInt

@@ -1,36 +1,22 @@
-// Package logger 提供结构化日志工具
+// Package logger 提供并发安全的结构化日志工具。
 //
-// 支持分级日志、结构化字段和多种输出格式。
+// 包内置 JSON、文本和文件输出，支持动态日志级别、上下文字段与多个输出目标。
+// password、secret、token、authorization、cookie 等敏感属性键会在写出前统一脱敏。
 //
-// 基本用法:
+// 基本用法：
 //
-//	log := logger.New()
+//	log, err := logger.New(nil)
+//	if err != nil {
+//		return err
+//	}
+//	defer log.Close()
 //	log.Info("message", "key", "value")
-//	log.Error("error occurred", "error", err)
 //
-// 带配置:
+// 使用配置：
 //
-//	log := logger.New(
-//	    logger.WithLevel(logger.InfoLevel),
-//	    logger.WithFormat(logger.JSONFormat),
-//	)
-//
-// --- English ---
-//
-// Package logger provides structured logging utilities.
-//
-// Features leveled logging, structured fields, and multiple output formats.
-//
-// Basic usage:
-//
-//	log := logger.New()
-//	log.Info("message", "key", "value")
-//	log.Error("error occurred", "error", err)
-//
-// With configuration:
-//
-//	log := logger.New(
-//	    logger.WithLevel(logger.InfoLevel),
-//	    logger.WithFormat(logger.JSONFormat),
-//	)
+//	log, err := logger.New(&logger.Config{
+//		Level:  "info",
+//		Format: "json",
+//		Output: "/var/log/app.log",
+//	})
 package logger

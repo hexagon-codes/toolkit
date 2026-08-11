@@ -272,7 +272,10 @@ func TestJoinURL(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		result := JoinURL(tt.base, tt.paths...)
+		result, err := JoinURL(tt.base, tt.paths...)
+		if err != nil {
+			t.Fatalf("JoinURL(%s, %v) error: %v", tt.base, tt.paths, err)
+		}
 		if result != tt.expected {
 			t.Errorf("JoinURL(%s, %v) = %s, want %s", tt.base, tt.paths, result, tt.expected)
 		}

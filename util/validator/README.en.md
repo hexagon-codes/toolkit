@@ -13,7 +13,12 @@ Provides comprehensive data validation functionality supporting common format va
 - ✅ Range validation (integers, floats)
 - ✅ Generic support (In/NotIn)
 - ✅ Regular expression matching
+- ✅ Concurrent-safe custom rule registration and validation
+- ✅ Checkable errors for unknown rules and rule panics
 - ✅ Zero external dependencies
+
+String and password lengths are counted in Unicode code points. In struct tags, `oneof=a,b,c` uses commas for its values and therefore must be the final rule for that field. Unknown rules fail closed instead of being silently ignored.
+`FieldError` retains only the field name, rule, message, and error classification. Rejected raw values are not retained, preventing passwords and tokens from lingering in error objects.
 
 ## Quick Start
 

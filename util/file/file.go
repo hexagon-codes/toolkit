@@ -87,10 +87,10 @@ func ReadString(path string) (string, error) {
 
 // Write 原子替换文件内容
 //
-// 默认权限为 0600，仅文件所有者可读写。Darwin/Linux 会依次完成临时文件
-// 写入、权限设置、文件 Sync、关闭、同目录 rename 和父目录 Sync。Windows 会在
-// rename 前完成文件 Sync，但标准库不保证 rename 原子性，也不提供可移植的目录同步。
-// 如果父目录 Sync 失败，函数会返回错误，但目标文件此时已经完成替换。
+// 默认权限为 0600，仅文件所有者可读写。协议开始时固定父目录 Root，临时文件创建、
+// 清理、同目录替换和目录同步都基于该 Root；发布前后会校验调用路径仍指向同一目录，
+// 并拒绝最终路径的符号链接。Darwin/Linux 同步父目录，Windows 不声明可移植的目录
+// 同步保证。如果发布后的目录同步或身份复核失败，函数返回错误，但文件可能已经替换。
 func Write(path string, data []byte) error {
 	return WriteWithPerm(path, data, 0o600)
 }
@@ -120,27 +120,28 @@ func WriteStringWithPerm(path, content string, perm os.FileMode) error {
 
 // Append 直接追加内容到文件，不提供原子替换或崩溃持久性保证
 //
-// 默认权限为 0600，仅文件所有者可读写。
+// 默认权限为 0600，仅文件所有者可读写。最终路径为符号链接时拒绝追加。
 func Append(path string, data []byte) error {
 	return AppendWithPerm(path, data, 0o600)
 }
 
-// AppendWithPerm 追加内容到文件（自定义权限）
+// AppendWithPerm 以自定义权限追加内容，且不跟随最终路径的符号链接
 func AppendWithPerm(path string, data []byte, perm os.FileMode) error {
-	if path == "" {
-		return errors.New("file path must not be empty")
-	}
-	if err := validateFilePermission(perm); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, perm) // #nosec G304 -- 路径是通用文件 API 的显式调用参数。
+	_, dir, base, err := atomicDestination(path)
 	if err != nil {
 		return err
+	}
+	if permissionErr := validateFilePermission(perm); permissionErr != nil {
+		return permissionErr
+	}
+	f, err := openAppendFileNoFollow(dir, base, perm)
+	if err != nil {
+		return fmt.Errorf("open append destination without following symbolic links: %w", err)
 	}
 	if chmodErr := f.Chmod(perm); chmodErr != nil {
 		return errors.Join(chmodErr, f.Close())
 	}
-	_, writeErr := f.Write(data)
+	writeErr := writeAll(f, data)
 	return errors.Join(writeErr, f.Close())
 }
 
@@ -151,8 +152,8 @@ func AppendString(path, content string) error {
 
 // Copy 原子复制普通文件
 //
-// 源符号链接按 os.Stat 语义解析；目标符号链接会被替换而不会被跟随。目标默认仅向
-// 所有者开放，并保留源文件的所有者执行位。持久化与平台边界和 Write 相同。
+// 源符号链接按 os.Stat 语义解析；目标符号链接会被拒绝。目标默认仅向所有者开放，
+// 并保留源文件的所有者执行位。持久化与平台边界和 Write 相同。
 func Copy(src, dst string) (err error) {
 	if src == "" {
 		return errors.New("source path must not be empty")

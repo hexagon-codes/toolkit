@@ -15,15 +15,16 @@ var (
 	ErrInvalidConfig = errors.New("invalid retry config")
 )
 
-// Config 重试配置
+// Config 保存一次重试调用的独立配置快照，也供 DelayTypeFunc 读取退避参数。
+// Do 和 DoWithContext 应通过 Option 配置；重试条件只能通过 If 设置。
 type Config struct {
 	MaxAttempts int                                       // 最大尝试次数
 	Delay       time.Duration                             // 重试延迟
 	MaxDelay    time.Duration                             // 最大延迟（用于退避算法）
 	Multiplier  float64                                   // 延迟倍数（指数退避）
 	OnRetry     func(n int, err error)                    // 重试回调
-	RetryIf     func(err error) bool                      // 重试条件判断
 	DelayFunc   func(n int, config *Config) time.Duration // 自定义延迟函数
+	predicate   func(err error) bool
 
 	// 抖动配置
 	JitterFactor float64    // 抖动因子 (0.0-1.0)，例如 0.3 表示 ±30%
@@ -38,14 +39,16 @@ type Config struct {
 // Option 配置选项
 type Option func(*Config)
 
-// DefaultConfig 默认配置
+// DefaultConfig 返回独立的默认配置快照。
+// 调用方可修改公开字段后传给 FixedDelay、LinearBackoff 或 ExponentialBackoff
+// 做独立退避计算；Do 和 DoWithContext 仍通过 Option 接收配置。
 func DefaultConfig() *Config {
 	return &Config{
 		MaxAttempts: 3,
 		Delay:       time.Second,
 		MaxDelay:    30 * time.Second,
 		Multiplier:  2.0,
-		RetryIf:     func(err error) bool { return err != nil },
+		predicate:   func(err error) bool { return err != nil },
 	}
 }
 
@@ -70,7 +73,7 @@ func MaxDelay(d time.Duration) Option {
 	}
 }
 
-// Multiplier 设置延迟倍数
+// Multiplier 设置指数退避使用的延迟倍数，但不选择退避策略。
 func Multiplier(m float64) Option {
 	return func(c *Config) {
 		c.Multiplier = m
@@ -87,11 +90,11 @@ func OnRetry(fn func(n int, err error)) Option {
 // If 设置重试条件
 func If(fn func(err error) bool) Option {
 	return func(c *Config) {
-		c.RetryIf = fn
+		c.predicate = fn
 	}
 }
 
-// DelayType 延迟类型
+// DelayType 显式选择延迟策略。
 func DelayType(delayType DelayTypeFunc) Option {
 	return func(c *Config) {
 		c.DelayFunc = delayType
@@ -119,7 +122,7 @@ func Do(fn func() error, opts ...Option) error {
 		config.LastError = runErr
 
 		// 判断是否需要重试
-		if !config.RetryIf(runErr) {
+		if !config.predicate(runErr) {
 			return runErr
 		}
 
@@ -158,14 +161,14 @@ func newConfig(options ...Option) (*Config, error) {
 		return nil, fmt.Errorf("%w: max delay must be positive", ErrInvalidConfig)
 	case config.Multiplier <= 0 || math.IsNaN(config.Multiplier) || math.IsInf(config.Multiplier, 0):
 		return nil, fmt.Errorf("%w: multiplier must be finite and positive", ErrInvalidConfig)
-	case config.RetryIf == nil:
+	case config.predicate == nil:
 		return nil, fmt.Errorf("%w: retry predicate must not be nil", ErrInvalidConfig)
 	case config.JitterFactor < 0 || config.JitterFactor > 1 || math.IsNaN(config.JitterFactor):
 		return nil, fmt.Errorf("%w: jitter factor must be between zero and one", ErrInvalidConfig)
 	case config.JitterType < NoJitter || config.JitterType > DecorrelatedJitter:
 		return nil, fmt.Errorf("%w: jitter type is unknown", ErrInvalidConfig)
 	}
-	applyDefaultBackoff(config)
+	applyDefaultDelay(config)
 	return config, nil
 }
 
@@ -201,7 +204,9 @@ func calculateDelay(attempt int, config *Config) time.Duration {
 	return delay
 }
 
-// DoWithContext 带上下文的重试
+// DoWithContext 在尝试与等待边界响应上下文取消。
+// fn 不接收上下文，因此本函数不会分离执行或强制中断正在运行的 fn；
+// 需要取消单次操作时，调用方应在闭包中向下传递 ctx。
 func DoWithContext(ctx context.Context, fn func() error, opts ...Option) error {
 	if ctx == nil {
 		return fmt.Errorf("%w: context must not be nil", ErrInvalidConfig)
@@ -216,11 +221,8 @@ func DoWithContext(ctx context.Context, fn func() error, opts ...Option) error {
 
 	var lastErr error
 	for attempt := 1; attempt <= config.MaxAttempts; attempt++ {
-		// 检查上下文
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+		if contextErr := ctx.Err(); contextErr != nil {
+			return combineContextError(contextErr, lastErr)
 		}
 
 		runErr := fn()
@@ -230,9 +232,16 @@ func DoWithContext(ctx context.Context, fn func() error, opts ...Option) error {
 
 		lastErr = runErr
 		config.LastError = runErr
+		if contextErr := ctx.Err(); contextErr != nil {
+			return combineContextError(contextErr, lastErr)
+		}
 
 		// 判断是否需要重试
-		if !config.RetryIf(runErr) {
+		retryable := config.predicate(runErr)
+		if contextErr := ctx.Err(); contextErr != nil {
+			return combineContextError(contextErr, lastErr)
+		}
+		if !retryable {
 			return runErr
 		}
 
@@ -244,31 +253,65 @@ func DoWithContext(ctx context.Context, fn func() error, opts ...Option) error {
 		if config.OnRetry != nil {
 			config.OnRetry(attempt, runErr)
 		}
+		if contextErr := ctx.Err(); contextErr != nil {
+			return combineContextError(contextErr, lastErr)
+		}
 
 		// 计算延迟
 		delay := calculateDelay(attempt, config)
 
-		// 使用上下文控制延迟
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
+		if contextErr := waitForRetry(ctx, delay); contextErr != nil {
+			return combineContextError(contextErr, lastErr)
 		}
 	}
 
+	if contextErr := ctx.Err(); contextErr != nil {
+		return combineContextError(contextErr, lastErr)
+	}
 	return fmt.Errorf("%w: %w", ErrMaxAttemptsReached, lastErr)
 }
 
-// applyDefaultBackoff 当用户设置了 Multiplier 但没有显式设置 DelayFunc 时，自动使用指数退避
-func applyDefaultBackoff(config *Config) {
-	if config.Multiplier > 0 && config.DelayFunc == nil {
-		config.DelayFunc = ExponentialBackoff
+func combineContextError(contextErr, lastErr error) error {
+	if lastErr == nil {
+		return contextErr
+	}
+	if errors.Is(lastErr, contextErr) {
+		return lastErr
+	}
+	return fmt.Errorf("%w: %w", contextErr, lastErr)
+}
+
+func waitForRetry(ctx context.Context, delay time.Duration) error {
+	if contextErr := ctx.Err(); contextErr != nil {
+		return contextErr
+	}
+	if delay <= 0 {
+		return nil
+	}
+
+	timer := time.NewTimer(delay)
+	select {
+	case <-ctx.Done():
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 
-// DelayTypeFunc 延迟函数类型
+// applyDefaultDelay 未指定延迟策略时使用固定延迟。
+func applyDefaultDelay(config *Config) {
+	if config.DelayFunc == nil {
+		config.DelayFunc = FixedDelay
+	}
+}
+
+// DelayTypeFunc 延迟函数类型；n 使用一基重试序号，首次重试为 1。
 type DelayTypeFunc func(n int, config *Config) time.Duration
 
 // FixedDelay 固定延迟
@@ -276,7 +319,7 @@ func FixedDelay(n int, config *Config) time.Duration {
 	return config.Delay
 }
 
-// LinearBackoff 线性退避
+// LinearBackoff 按一基重试序号计算线性退避，非正序号返回 0。
 func LinearBackoff(n int, config *Config) time.Duration {
 	if n <= 0 || config.Delay <= 0 || config.MaxDelay <= 0 {
 		return 0
@@ -288,20 +331,23 @@ func LinearBackoff(n int, config *Config) time.Duration {
 	return config.Delay * time.Duration(n)
 }
 
-// ExponentialBackoff 指数退避
+// ExponentialBackoff 按一基重试序号计算指数退避，非正序号返回 0。
 func ExponentialBackoff(n int, config *Config) time.Duration {
-	if config.Delay == 0 {
+	if n <= 0 || config.Delay <= 0 || config.MaxDelay <= 0 || config.Multiplier <= 0 ||
+		math.IsNaN(config.Multiplier) || math.IsInf(config.Multiplier, 0) {
 		return 0
 	}
 	multiplier := math.Pow(config.Multiplier, float64(n-1))
-	// 检查溢出：如果乘数过大或无穷大，直接返回最大延迟
-	if math.IsInf(multiplier, 0) || math.IsNaN(multiplier) ||
-		multiplier > float64(config.MaxDelay)/float64(config.Delay) {
+	if math.IsNaN(multiplier) || multiplier <= 0 {
+		return 0
+	}
+	// 指数增长超过上限时直接封顶，避免浮点数转 duration 时溢出。
+	if math.IsInf(multiplier, 1) ||
+		multiplier >= float64(config.MaxDelay)/float64(config.Delay) {
 		return config.MaxDelay
 	}
-	delay := time.Duration(float64(config.Delay) * multiplier)
-	// 检查是否溢出为负数或超过最大延迟
-	if delay <= 0 || delay > config.MaxDelay {
+	delay := durationFromFloat(float64(config.Delay) * multiplier)
+	if delay > config.MaxDelay {
 		return config.MaxDelay
 	}
 	return delay

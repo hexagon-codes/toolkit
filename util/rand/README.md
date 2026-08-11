@@ -133,15 +133,15 @@ Token(length int) string
 
 ### 错误返回安全变体（Try*）
 
-上述函数在底层熵源（`crypto/rand`）失败时会 **panic**，适合"随机数失败即视为致命错误"的场景。在 OAuth state、CSRF token、一次性凭据等生成路径上，若希望以 error 形式优雅传播而非 panic，可使用对应的 `Try*` 变体。
+上述普通函数在输入无效或底层熵源（`crypto/rand`）失败时会 **panic**，适合参数由可信常量提供且随机数失败即为致命错误的场景。在 OAuth state、CSRF token、一次性凭据等请求链路上，应使用对应的 `Try*` 变体。
 
-每个 `Try*` 函数行为与对应原函数完全一致，唯一区别是熵源失败时返回 error 而非 panic。可通过 `errors.Is(err, rand.ErrInsufficientEntropy)` 判定是否为熵源故障。
+`Try*` 会返回 `ErrInvalidLength`、`ErrInvalidCharset`、`ErrInvalidRange` 或 `ErrInsufficientEntropy`，调用方可通过 `errors.Is` 分类处理。长度为 0 返回空值；其他长度必须不超过 `MaxGeneratedLength`（1048576）。自定义字符集至少包含两个互不重复的 Unicode 字符。
 
 ```go
 s, err := rand.TryToken(32)
 if err != nil {
     // 例如返回 5xx 或重试，而非击穿协程
-    return fmt.Errorf("生成 token 失败: %w", err)
+    return fmt.Errorf("failed to generate token: %w", err)
 }
 ```
 
@@ -299,26 +299,18 @@ num := rand.Int(1, 10)  // 可能返回 1-9，不包含 10
 num := rand.Int(1, 11)  // 可能返回 1-10
 ```
 
-### ✅ 唯一性保证
+### 碰撞特性
 
-虽然理论上可能重复，但实际上极难发生：
+随机 Token 不提供绝对唯一保证。空间大小为 `字符集大小^长度`，实际碰撞概率还取决于生成总量；需要业务唯一性时仍应使用数据库唯一约束并处理冲突。
 
 ```go
 // 32位字母数字 Token 的可能组合数：62^32 ≈ 2^190
-// 碰撞概率：< 10^-50（几乎不可能）
 token := rand.Token(32)
 ```
 
 ## 性能
 
-```
-BenchmarkString          500000       3000 ns/op
-BenchmarkNumericString  1000000       2000 ns/op
-BenchmarkInt            2000000        800 ns/op
-BenchmarkBytes           500000       3500 ns/op
-```
-
-相比 `math/rand`，`crypto/rand` 略慢但更安全。
+性能取决于操作系统熵源、字符集和长度；请在目标环境运行包内 benchmark，不使用固定历史数字作为容量依据。
 
 ## 注意事项
 
@@ -327,20 +319,20 @@ BenchmarkBytes           500000       3500 ns/op
    - ✅ 不使用伪随机数生成器（PRNG）
 
 2. **性能**：
-   - 相比 `math/rand` 稍慢（约3-5倍）
-   - 对于大多数应用场景性能足够
+   - 安全场景优先正确性；批量容量应以目标环境 benchmark 为准
 
 3. **范围**：
    - `Int(min, max)` 返回 **[min, max)** 左闭右开区间
+   - `min >= max` 属于无效输入：`TryInt*` 返回 `ErrInvalidRange`，普通版本 panic
    - 如需包含上界，使用 `Int(min, max+1)`
 
 4. **错误处理**：
-   - 普通函数（`String`/`Int`/`Bytes` 等）在 `crypto/rand` 失败时会 **panic**（极少发生，通常表示系统熵源问题）
-   - 若需以 error 形式优雅传播而非 panic，请使用对应的 `Try*` 安全变体，并以 `errors.Is(err, rand.ErrInsufficientEntropy)` 判定熵源故障
+   - 普通函数（`String`/`Int`/`Bytes` 等）在输入无效或熵源失败时会 **panic**
+   - 请求链路使用对应的 `Try*` 变体，并以 `errors.Is` 区分输入与熵源错误
 
 5. **长度限制**：
-   - 生成长字符串时（> 1MB）可能较慢
-   - 建议单次生成长度 < 10000
+   - 字符串和字节 API 单次最多生成 `MaxGeneratedLength`（1048576）个元素
+   - 负长度无效，零长度返回空值
 
 ## 依赖
 
@@ -359,7 +351,7 @@ import (
 | 安全性 | 加密安全 | 不安全（可预测） |
 | 性能 | 较慢 | 快 |
 | 用途 | 密钥、Token、密码 | 游戏、模拟、测试 |
-| 随机性 | 真随机 | 伪随机 |
+| 随机源 | 操作系统 CSPRNG | 进程内 PRNG |
 
 **推荐**：
 - ✅ 安全场景（Token、密码、密钥）使用本包

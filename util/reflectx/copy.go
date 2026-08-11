@@ -12,9 +12,9 @@ import (
 // 返回:
 //   - T: 拷贝后的值
 //
-// 注意: 支持基本类型、结构体、切片、map、指针
-// 对于不支持的类型（如 chan、func）返回零值
-// 自动检测并处理循环引用，避免无限递归
+// 注意: 支持基本类型、结构体、切片、map、指针，并自动保留循环引用关系。
+// 未导出字段按值保留，其内部引用不会通过 unsafe 强行递归复制；chan、func 等
+// 无法安全复制的引用类型保持原值。
 //
 // 示例:
 //
@@ -33,7 +33,7 @@ func DeepCopy[T any](src T) T {
 		var zero T
 		return zero
 	}
-	visited := make(map[uintptr]reflect.Value)
+	visited := make(map[copyIdentity]reflect.Value)
 	result := deepCopyValue(v, visited)
 	if !result.IsValid() {
 		var zero T
@@ -49,7 +49,7 @@ func DeepCopy[T any](src T) T {
 
 // deepCopyValue 递归深拷贝 reflect.Value
 // visited 用于记录已访问的指针地址，防止循环引用导致无限递归
-func deepCopyValue(src reflect.Value, visited map[uintptr]reflect.Value) reflect.Value {
+func deepCopyValue(src reflect.Value, visited map[copyIdentity]reflect.Value) reflect.Value {
 	if !src.IsValid() {
 		return src
 	}
@@ -76,20 +76,20 @@ func deepCopyValue(src reflect.Value, visited map[uintptr]reflect.Value) reflect
 }
 
 // deepCopyPtr 深拷贝指针
-func deepCopyPtr(src reflect.Value, visited map[uintptr]reflect.Value) reflect.Value {
+func deepCopyPtr(src reflect.Value, visited map[copyIdentity]reflect.Value) reflect.Value {
 	if src.IsNil() {
 		return reflect.Zero(src.Type())
 	}
 
 	// 检测循环引用：如果指针地址已访问过，返回之前创建的副本
-	ptr := src.Pointer()
-	if existing, ok := visited[ptr]; ok {
+	identity := identityOf(src)
+	if existing, ok := visited[identity]; ok {
 		return existing
 	}
 
 	// 先创建目标指针并记录，防止循环引用时无限递归
 	dst := reflect.New(src.Type().Elem())
-	visited[ptr] = dst
+	visited[identity] = dst
 
 	// 递归拷贝指针指向的值
 	dst.Elem().Set(deepCopyValue(src.Elem(), visited))
@@ -97,7 +97,7 @@ func deepCopyPtr(src reflect.Value, visited map[uintptr]reflect.Value) reflect.V
 }
 
 // deepCopyInterface 深拷贝接口
-func deepCopyInterface(src reflect.Value, visited map[uintptr]reflect.Value) reflect.Value {
+func deepCopyInterface(src reflect.Value, visited map[copyIdentity]reflect.Value) reflect.Value {
 	if src.IsNil() {
 		return reflect.Zero(src.Type())
 	}
@@ -105,12 +105,14 @@ func deepCopyInterface(src reflect.Value, visited map[uintptr]reflect.Value) ref
 }
 
 // deepCopyStruct 深拷贝结构体
-func deepCopyStruct(src reflect.Value, visited map[uintptr]reflect.Value) reflect.Value {
+func deepCopyStruct(src reflect.Value, visited map[copyIdentity]reflect.Value) reflect.Value {
 	dst := reflect.New(src.Type()).Elem()
+	// 先保留完整值，再递归替换可安全访问的导出字段。
+	dst.Set(src)
 	for i := range src.NumField() {
 		srcField := src.Field(i)
 		dstField := dst.Field(i)
-		if dstField.CanSet() {
+		if srcField.CanInterface() && dstField.CanSet() {
 			dstField.Set(deepCopyValue(srcField, visited))
 		}
 	}
@@ -118,19 +120,19 @@ func deepCopyStruct(src reflect.Value, visited map[uintptr]reflect.Value) reflec
 }
 
 // deepCopySlice 深拷贝切片
-func deepCopySlice(src reflect.Value, visited map[uintptr]reflect.Value) reflect.Value {
+func deepCopySlice(src reflect.Value, visited map[copyIdentity]reflect.Value) reflect.Value {
 	if src.IsNil() {
 		return reflect.Zero(src.Type())
 	}
 
 	// 检测循环引用：切片底层数组可能被多次引用
-	ptr := src.Pointer()
-	if existing, ok := visited[ptr]; ok {
+	identity := identityOf(src)
+	if existing, ok := visited[identity]; ok {
 		return existing
 	}
 
-	dst := reflect.MakeSlice(src.Type(), src.Len(), src.Cap())
-	visited[ptr] = dst
+	dst := reflect.MakeSlice(src.Type(), src.Len(), src.Len())
+	visited[identity] = dst
 
 	for i := range src.Len() {
 		dst.Index(i).Set(deepCopyValue(src.Index(i), visited))
@@ -139,19 +141,19 @@ func deepCopySlice(src reflect.Value, visited map[uintptr]reflect.Value) reflect
 }
 
 // deepCopyMap 深拷贝 map
-func deepCopyMap(src reflect.Value, visited map[uintptr]reflect.Value) reflect.Value {
+func deepCopyMap(src reflect.Value, visited map[copyIdentity]reflect.Value) reflect.Value {
 	if src.IsNil() {
 		return reflect.Zero(src.Type())
 	}
 
 	// 检测循环引用
-	ptr := src.Pointer()
-	if existing, ok := visited[ptr]; ok {
+	identity := identityOf(src)
+	if existing, ok := visited[identity]; ok {
 		return existing
 	}
 
 	dst := reflect.MakeMap(src.Type())
-	visited[ptr] = dst
+	visited[identity] = dst
 
 	for _, key := range src.MapKeys() {
 		dst.SetMapIndex(deepCopyValue(key, visited), deepCopyValue(src.MapIndex(key), visited))
@@ -160,12 +162,33 @@ func deepCopyMap(src reflect.Value, visited map[uintptr]reflect.Value) reflect.V
 }
 
 // deepCopyArray 深拷贝数组
-func deepCopyArray(src reflect.Value, visited map[uintptr]reflect.Value) reflect.Value {
+func deepCopyArray(src reflect.Value, visited map[copyIdentity]reflect.Value) reflect.Value {
 	dst := reflect.New(src.Type()).Elem()
 	for i := range src.Len() {
 		dst.Index(i).Set(deepCopyValue(src.Index(i), visited))
 	}
 	return dst
+}
+
+type copyIdentity struct {
+	kind     reflect.Kind
+	typeOf   reflect.Type
+	pointer  uintptr
+	length   int
+	capacity int
+}
+
+func identityOf(value reflect.Value) copyIdentity {
+	identity := copyIdentity{
+		kind:    value.Kind(),
+		typeOf:  value.Type(),
+		pointer: value.Pointer(),
+	}
+	if value.Kind() == reflect.Slice {
+		identity.length = value.Len()
+		identity.capacity = value.Cap()
+	}
+	return identity
 }
 
 // Clone 浅拷贝值（仅拷贝顶层）

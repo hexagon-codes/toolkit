@@ -53,18 +53,14 @@ func TestSlidingWindow_AccessorsAndRecord(t *testing.T) {
 	}
 }
 
-// Record 的有界增长路径：容量不小于 50 时，裁剪分支创建的切片长度不会超过容量。
-func TestSlidingWindow_RecordBoundsMemory(t *testing.T) {
-	sw := mustSlidingWindow(t, 60, time.Hour) // 容量不小于 50 时裁剪长度不会超过容量。
+// Record 必须保留窗口内的全部记录，不能通过静默裁剪破坏精确计数。
+func TestSlidingWindow_RecordPreservesExactCount(t *testing.T) {
+	sw := mustSlidingWindow(t, 60, time.Hour)
 	for i := 0; i < 250; i++ {
 		sw.Record()
 	}
-	// 最大长度为 120；达到上限后先删除最旧的一半再追加。
-	if sw.Count() > 200 {
-		t.Errorf("Count = %d, expected bounded well under 250 (memory cap)", sw.Count())
-	}
-	if sw.Count() == 0 {
-		t.Errorf("Count = 0, expected some records retained")
+	if got := sw.Count(); got != 250 {
+		t.Errorf("Count = %d, want 250", got)
 	}
 }
 

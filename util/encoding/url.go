@@ -1,10 +1,15 @@
 package encoding
 
 import (
+	"errors"
+	"fmt"
 	"net/url"
 	"sort"
 	"strings"
 )
+
+// ErrUnsafeURLPath 表示待连接路径包含目录跳转片段。
+var ErrUnsafeURLPath = errors.New("encoding: unsafe URL path")
 
 // URLEncode URL 编码
 func URLEncode(s string) string {
@@ -73,22 +78,38 @@ func ParseQueryValues(query string) (map[string][]string, error) {
 	return values, nil
 }
 
-// JoinURL 安全地连接 URL 路径
-func JoinURL(base string, paths ...string) string {
-	if len(paths) == 0 {
-		return base
+// JoinURL 解析并连接 URL 路径，同时保留查询参数和片段。
+func JoinURL(base string, paths ...string) (string, error) {
+	if _, err := url.Parse(base); err != nil {
+		return "", fmt.Errorf("join URL: %w", err)
 	}
-
-	// 移除 base 末尾的斜杠
-	base = strings.TrimRight(base, "/")
-
-	for _, p := range paths {
-		// 移除路径两端的斜杠
-		p = strings.Trim(p, "/")
-		if p != "" {
-			base = base + "/" + p
+	if len(paths) == 0 {
+		return base, nil
+	}
+	cleaned := make([]string, 0, len(paths))
+	for _, element := range paths {
+		element = strings.Trim(element, "/")
+		if element != "" {
+			for _, encodedSegment := range strings.Split(element, "/") {
+				decodedSegment, err := url.PathUnescape(encodedSegment)
+				if err != nil {
+					return "", fmt.Errorf("join URL: %w", err)
+				}
+				for _, segment := range strings.Split(decodedSegment, "/") {
+					if segment == "." || segment == ".." {
+						return "", fmt.Errorf("%w: dot segment", ErrUnsafeURLPath)
+					}
+				}
+			}
+			cleaned = append(cleaned, element)
 		}
 	}
-
-	return base
+	if len(cleaned) == 0 {
+		return base, nil
+	}
+	joined, err := url.JoinPath(base, cleaned...)
+	if err != nil {
+		return "", fmt.Errorf("join URL: %w", err)
+	}
+	return joined, nil
 }

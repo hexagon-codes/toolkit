@@ -63,6 +63,8 @@ data := []byte(jsonStr)
 err = json.UnmarshalBytes(data, &user)
 ```
 
+`Unmarshal` 和 `UnmarshalBytes` 默认执行严格解码：拒绝未知字段、尾随 JSON、超过 8 MiB 的文档和超过 100 层的嵌套；解码失败时不会部分覆盖目标值。解码到 `any`、Map 或 Slice 时，数字使用标准库 `json.Number` 保留整数精度。
+
 ### JSON 验证
 
 ```go
@@ -102,7 +104,7 @@ compact := json.Compact(pretty)
 // JSON 转 Map
 jsonStr := `{"name":"Alice","age":30}`
 m, err := json.ToMap(jsonStr)
-// m = map[string]any{"name": "Alice", "age": 30}
+// m = map[string]any{"name": "Alice", "age": stdjson.Number("30")}
 
 // JSON 转 Map（失败时 panic）
 m := json.MustToMap(jsonStr)
@@ -110,7 +112,7 @@ m := json.MustToMap(jsonStr)
 // JSON 转 Slice
 jsonStr := `[1, 2, 3, 4, 5]`
 s, err := json.ToSlice(jsonStr)
-// s = []any{1, 2, 3, 4, 5}
+// s 中的数字元素类型为 json.Number
 
 // JSON 转 Slice（失败时 panic）
 s := json.MustToSlice(jsonStr)
@@ -339,7 +341,11 @@ m := json.MustToMap(jsonStr)
 
 // 动态访问字段
 name := m["name"].(string)
-age := int(m["age"].(float64))
+// 另需 import stdjson "encoding/json"
+age, err := strconv.ParseInt(m["age"].(stdjson.Number).String(), 10, 64)
+if err != nil {
+    return err
+}
 
 // 修改字段
 m["age"] = 31
@@ -457,12 +463,14 @@ Compact():         1500 ns/op
 
 2. **类型转换**：
    - `ToMap()` 返回 `map[string]any`
-   - 数字会被解析为 `float64`
-   - 需要手动类型断言
+   - 数字会被解析为标准库 `json.Number`，不会先转换成 `float64`
+   - 使用 `Int64()`、`Float64()` 或 `strconv` 显式完成目标类型转换
 
 3. **内存占用**：
    - `Marshal()` 会创建新的字符串
    - 大对象序列化会消耗较多内存
+   - 便捷解码 API 默认限制单文档为 8 MiB、嵌套为 100 层
+   - NDJSON/SSE 默认限制单条记录为 1 MiB；`WithSize` 参数表示最大输入或记录字节数，不是预分配缓冲区
 
 4. **并发安全**：
    - 所有函数都是无状态的

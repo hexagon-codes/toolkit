@@ -12,7 +12,8 @@ import (
 
 func TestAtomicReplaceOrdersDurabilitySteps(t *testing.T) {
 	path := filepath.Join("parent", "state.json")
-	events := make([]string, 0, 8)
+	dir := filepath.Dir(path)
+	events := make([]string, 0, 12)
 	ops := recordingAtomicWriteOps(&events, nil)
 
 	err := atomicReplaceWithOps(path, 0o640, func(w io.Writer) error {
@@ -24,13 +25,18 @@ func TestAtomicReplaceOrdersDurabilitySteps(t *testing.T) {
 	}
 
 	want := []string{
-		"create:parent:.state.json.tmp-*",
+		"open-parent:" + dir,
+		"create:.state.json.tmp-",
 		"write",
 		"chmod:0640",
 		"sync-file",
 		"close-file",
-		"rename:parent/.state.json.tmp-fixed->parent/state.json",
-		"sync-dir:parent",
+		"verify-parent-before",
+		"lstat:state.json",
+		"rename:.state.json.tmp-fixed->state.json",
+		"sync-dir",
+		"verify-parent-after",
+		"close-parent",
 	}
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("events = %#v, want %#v", events, want)
@@ -48,8 +54,11 @@ func TestAtomicReplaceFailureCleanupBoundary(t *testing.T) {
 		{name: "chmod", failure: "chmod", wantRemove: true},
 		{name: "file sync", failure: "sync-file", wantRemove: true},
 		{name: "file close", failure: "close-file", wantRemove: true},
+		{name: "parent identity", failure: "verify-parent-before", wantRemove: true},
+		{name: "destination lstat", failure: "lstat", wantRemove: true},
 		{name: "rename", failure: "rename", wantRename: true, wantRemove: true},
 		{name: "directory sync", failure: "sync-dir", wantRename: true},
+		{name: "parent identity after publish", failure: "verify-parent-after", wantRename: true},
 	}
 
 	for _, test := range tests {
@@ -112,7 +121,6 @@ func TestAtomicReplaceRejectsNilPopulate(t *testing.T) {
 
 type recordingAtomicFile struct {
 	events   *[]string
-	name     string
 	failures map[string]error
 }
 
@@ -139,36 +147,70 @@ func (f *recordingAtomicFile) Close() error {
 	return f.failures["close-file"]
 }
 
-func (f *recordingAtomicFile) Name() string {
-	return f.name
+type recordingAtomicDirectory struct {
+	events      *[]string
+	failures    map[string]error
+	verifyCalls int
+}
+
+func (d *recordingAtomicDirectory) CreateTemp(prefix string) (atomicWriteFile, string, error) {
+	*d.events = append(*d.events, "create:"+prefix)
+	if err := d.failures["create"]; err != nil {
+		return nil, "", err
+	}
+	return &recordingAtomicFile{events: d.events, failures: d.failures}, ".state.json.tmp-fixed", nil
+}
+
+func (d *recordingAtomicDirectory) Lstat(name string) (os.FileInfo, error) {
+	*d.events = append(*d.events, "lstat:"+name)
+	if err := d.failures["lstat"]; err != nil {
+		return nil, err
+	}
+	return nil, os.ErrNotExist
+}
+
+func (d *recordingAtomicDirectory) Rename(oldName, newName string) error {
+	*d.events = append(*d.events, "rename:"+oldName+"->"+newName)
+	return d.failures["rename"]
+}
+
+func (d *recordingAtomicDirectory) Remove(name string) error {
+	*d.events = append(*d.events, "remove:"+name)
+	return d.failures["remove"]
+}
+
+func (d *recordingAtomicDirectory) VerifyBound() error {
+	d.verifyCalls++
+	stage := "before"
+	if d.verifyCalls > 1 {
+		stage = "after"
+	}
+	key := "verify-parent-" + stage
+	*d.events = append(*d.events, key)
+	return d.failures[key]
+}
+
+func (d *recordingAtomicDirectory) Sync() error {
+	*d.events = append(*d.events, "sync-dir")
+	return d.failures["sync-dir"]
+}
+
+func (d *recordingAtomicDirectory) Close() error {
+	*d.events = append(*d.events, "close-parent")
+	return d.failures["close-parent"]
 }
 
 func recordingAtomicWriteOps(events *[]string, failures map[string]error) atomicWriteOps {
 	if failures == nil {
 		failures = make(map[string]error)
 	}
-	tempName := filepath.Join("parent", ".state.json.tmp-fixed")
-	return atomicWriteOps{
-		createTemp: func(dir, pattern string) (atomicWriteFile, error) {
-			*events = append(*events, "create:"+dir+":"+pattern)
-			if err := failures["create"]; err != nil {
-				return nil, err
-			}
-			return &recordingAtomicFile{events: events, name: tempName, failures: failures}, nil
-		},
-		rename: func(oldPath, newPath string) error {
-			*events = append(*events, "rename:"+oldPath+"->"+newPath)
-			return failures["rename"]
-		},
-		remove: func(path string) error {
-			*events = append(*events, "remove:"+path)
-			return failures["remove"]
-		},
-		syncDir: func(path string) error {
-			*events = append(*events, "sync-dir:"+path)
-			return failures["sync-dir"]
-		},
-	}
+	return atomicWriteOps{openParent: func(path string) (atomicWriteDirectory, error) {
+		*events = append(*events, "open-parent:"+path)
+		if err := failures["open-parent"]; err != nil {
+			return nil, err
+		}
+		return &recordingAtomicDirectory{events: events, failures: failures}, nil
+	}}
 }
 
 func hasEventPrefix(events []string, prefix string) bool {

@@ -293,6 +293,11 @@ func TestFileWriter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
+	defer func() {
+		if closeErr := logger.Close(); closeErr != nil {
+			t.Errorf("close logger: %v", closeErr)
+		}
+	}()
 
 	logger.Info("test file log", "key", "value")
 

@@ -2,23 +2,41 @@
 package validator
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
+)
+
+var (
+	// ErrInvalidObject 表示传入对象无法作为结构体验证。
+	ErrInvalidObject = errors.New("validator: invalid object")
+	// ErrUnknownRule 表示验证标签引用了未注册规则。
+	ErrUnknownRule = errors.New("validator: unknown rule")
+	// ErrInvalidRule 表示已注册规则无效。
+	ErrInvalidRule = errors.New("validator: invalid rule")
+	// ErrRulePanic 表示自定义规则执行时发生 panic。
+	ErrRulePanic = errors.New("validator: rule panic")
 )
 
 // FieldError 表示字段验证错误
 type FieldError struct {
 	Field   string // 字段名
 	Tag     string // 验证标签
-	Value   any    // 字段值
 	Message string // 错误消息
+	Cause   error  // 错误原因
 }
 
 // Error 实现 error 接口
 func (e FieldError) Error() string {
 	return e.Message
+}
+
+// Unwrap 返回字段错误的稳定分类。
+func (e FieldError) Unwrap() error {
+	return e.Cause
 }
 
 // ValidationErrors 表示多个验证错误
@@ -44,6 +62,15 @@ func (e ValidationErrors) HasErrors() bool {
 	return len(e) > 0
 }
 
+// Unwrap 返回所有字段错误，支持 errors.Is 和 errors.As 聚合检查。
+func (e ValidationErrors) Unwrap() []error {
+	errors := make([]error, len(e))
+	for index := range e {
+		errors[index] = e[index]
+	}
+	return errors
+}
+
 // RuleFunc 验证规则函数类型
 // 参数: value-字段值, param-规则参数
 // 返回: 验证是否通过
@@ -51,9 +78,16 @@ type RuleFunc func(value any, param string) bool
 
 // Validator 结构体验证器
 type Validator struct {
+	mu      sync.RWMutex
 	tagName string              // 验证标签名，默认 "validate"
 	rules   map[string]RuleFunc // 注册的验证规则
 	msgs    map[string]string   // 错误消息模板
+}
+
+type validatorSnapshot struct {
+	tagName string
+	rules   map[string]RuleFunc
+	msgs    map[string]string
 }
 
 // NewValidator 创建验证器
@@ -296,6 +330,11 @@ func (v *Validator) registerDefaultMessages() {
 //	    return false
 //	})
 func (v *Validator) RegisterRule(name string, fn RuleFunc) *Validator {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.rules == nil {
+		v.rules = make(map[string]RuleFunc)
+	}
 	v.rules[name] = fn
 	return v
 }
@@ -309,6 +348,11 @@ func (v *Validator) RegisterRule(name string, fn RuleFunc) *Validator {
 // 返回:
 //   - *Validator: 返回自身以支持链式调用
 func (v *Validator) RegisterMessage(rule, msg string) *Validator {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.msgs == nil {
+		v.msgs = make(map[string]string)
+	}
 	v.msgs[rule] = msg
 	return v
 }
@@ -321,6 +365,8 @@ func (v *Validator) RegisterMessage(rule, msg string) *Validator {
 // 返回:
 //   - *Validator: 返回自身以支持链式调用
 func (v *Validator) SetTagName(tagName string) *Validator {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	v.tagName = tagName
 	return v
 }
@@ -348,14 +394,18 @@ func (v *Validator) SetTagName(tagName string) *Validator {
 //	}
 func (v *Validator) Struct(obj any) error {
 	rv := reflect.ValueOf(obj)
-	if rv.Kind() == reflect.Pointer {
+	for rv.IsValid() && rv.Kind() == reflect.Pointer {
+		if rv.IsNil() {
+			return fmt.Errorf("%w: expected a non-nil struct", ErrInvalidObject)
+		}
 		rv = rv.Elem()
 	}
 	if rv.Kind() != reflect.Struct {
-		return fmt.Errorf("obj must be a struct or pointer to struct")
+		return fmt.Errorf("%w: expected a struct or pointer to struct", ErrInvalidObject)
 	}
 
-	var errors ValidationErrors
+	snapshot := v.snapshot()
+	var validationErrors ValidationErrors
 	rt := rv.Type()
 
 	for i := range rv.NumField() {
@@ -364,7 +414,7 @@ func (v *Validator) Struct(obj any) error {
 			continue
 		}
 
-		tag := field.Tag.Get(v.tagName)
+		tag := field.Tag.Get(snapshot.tagName)
 		if tag == "" || tag == "-" {
 			continue
 		}
@@ -372,41 +422,51 @@ func (v *Validator) Struct(obj any) error {
 		fieldValue := rv.Field(i).Interface()
 		fieldName := getFieldName(field)
 
-		fieldErrors := v.validateField(fieldName, fieldValue, tag)
-		errors = append(errors, fieldErrors...)
+		fieldErrors := validateField(snapshot, fieldName, fieldValue, tag)
+		validationErrors = append(validationErrors, fieldErrors...)
 	}
 
-	if len(errors) > 0 {
-		return errors
+	if len(validationErrors) > 0 {
+		return validationErrors
 	}
 	return nil
 }
 
 // validateField 验证单个字段
-func (v *Validator) validateField(fieldName string, value any, tag string) []FieldError {
+func validateField(snapshot validatorSnapshot, fieldName string, value any, tag string) []FieldError {
 	var errors []FieldError
 	rules := parseTag(tag)
 
 	for _, rule := range rules {
 		ruleName, param := parseRule(rule)
 
-		// 跳过非必填且为空的字段
+		fn, ok := snapshot.rules[ruleName]
+		if !ok {
+			errors = append(errors, FieldError{
+				Field:   fieldName,
+				Tag:     ruleName,
+				Message: fmt.Sprintf("%s validation failed: unknown rule %s", fieldName, ruleName),
+				Cause:   ErrUnknownRule,
+			})
+			continue
+		}
+
+		// 只有已注册的非必填规则才能跳过空值。
 		if ruleName != "required" && isEmpty(value) {
 			continue
 		}
 
-		fn, ok := v.rules[ruleName]
-		if !ok {
-			continue
-		}
-
-		if !fn(value, param) {
-			msg := v.formatMessage(ruleName, fieldName, param)
+		valid, cause := executeRule(fn, value, param)
+		if !valid {
+			msg := formatMessage(snapshot, ruleName, fieldName, param)
+			if cause != nil {
+				msg = fmt.Sprintf("%s validation failed for rule %s", fieldName, ruleName)
+			}
 			errors = append(errors, FieldError{
 				Field:   fieldName,
 				Tag:     ruleName,
-				Value:   value,
 				Message: msg,
+				Cause:   cause,
 			})
 		}
 	}
@@ -415,8 +475,8 @@ func (v *Validator) validateField(fieldName string, value any, tag string) []Fie
 }
 
 // formatMessage 格式化错误消息
-func (v *Validator) formatMessage(rule, field, param string) string {
-	msg, ok := v.msgs[rule]
+func formatMessage(snapshot validatorSnapshot, rule, field, param string) string {
+	msg, ok := snapshot.msgs[rule]
 	if !ok {
 		return fmt.Sprintf("%s 验证失败: %s", field, rule)
 	}
@@ -424,6 +484,33 @@ func (v *Validator) formatMessage(rule, field, param string) string {
 		return fmt.Sprintf(msg, field, param)
 	}
 	return fmt.Sprintf(msg, field)
+}
+
+func executeRule(fn RuleFunc, value any, param string) (valid bool, cause error) {
+	if fn == nil {
+		return false, ErrInvalidRule
+	}
+	defer func() {
+		if recover() != nil {
+			valid = false
+			cause = ErrRulePanic
+		}
+	}()
+	return fn(value, param), nil
+}
+
+func (v *Validator) snapshot() validatorSnapshot {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	rules := make(map[string]RuleFunc, len(v.rules))
+	for name, rule := range v.rules {
+		rules[name] = rule
+	}
+	messages := make(map[string]string, len(v.msgs))
+	for name, message := range v.msgs {
+		messages[name] = message
+	}
+	return validatorSnapshot{tagName: v.tagName, rules: rules, msgs: messages}
 }
 
 // parseTag 解析验证标签
@@ -434,58 +521,28 @@ func (v *Validator) formatMessage(rule, field, param string) string {
 //   - "required,range=0,150" -> ["required", "range=0,150"]
 //   - "min=2,max=10" -> ["min=2", "max=10"]
 func parseTag(tag string) []string {
-	var rules []string
-	i := 0
-	for i < len(tag) {
-		// 找下一个规则的起始位置
-		start := i
-
-		// 跳过可能的空格
-		for start < len(tag) && tag[start] == ' ' {
-			start++
+	parts := strings.Split(tag, ",")
+	rules := make([]string, 0, len(parts))
+	for index := 0; index < len(parts); index++ {
+		current := strings.TrimSpace(parts[index])
+		if current == "" {
+			continue
 		}
-		if start >= len(tag) {
-			break
-		}
-
-		// 找规则结束位置
-		end := start
-		for end < len(tag) {
-			if tag[end] == '=' {
-				// 进入参数部分，需要判断后面有几个逗号分隔的参数
-				end++
-				// 检查是否是 range 规则（参数内有逗号）
-				// 找到下一个真正的规则分隔符：规则名=值 后的逗号
-				for end < len(tag) && tag[end] != ',' {
-					end++
-				}
-				// 检查下一个逗号后面是否是新规则（包含 = 或是已知规则名）
-				if end < len(tag) && tag[end] == ',' {
-					// 看看逗号后面是数字还是规则名
-					next := end + 1
-					for next < len(tag) && tag[next] == ' ' {
-						next++
-					}
-					// 如果后面是数字，说明这个逗号属于参数
-					if next < len(tag) && (tag[next] >= '0' && tag[next] <= '9' || tag[next] == '-') {
-						// 继续找到真正的规则分隔符
-						end = next
-						for end < len(tag) && tag[end] != ',' {
-							end++
-						}
-					}
-				}
-				break
-			} else if tag[end] == ',' {
-				break
+		name, _ := parseRule(current)
+		switch name {
+		case "range":
+			if index+1 < len(parts) {
+				current += "," + strings.TrimSpace(parts[index+1])
+				index++
 			}
-			end++
+		case "oneof":
+			// oneof 的枚举值使用逗号分隔，因此该规则必须位于标签末尾。
+			for index+1 < len(parts) {
+				current += "," + strings.TrimSpace(parts[index+1])
+				index++
+			}
 		}
-
-		if end > start {
-			rules = append(rules, strings.TrimSpace(tag[start:end]))
-		}
-		i = end + 1
+		rules = append(rules, current)
 	}
 	return rules
 }
@@ -530,7 +587,7 @@ func isEmpty(value any) bool {
 		return strings.TrimSpace(rv.String()) == ""
 	case reflect.Slice, reflect.Map, reflect.Array:
 		return rv.Len() == 0
-	case reflect.Pointer, reflect.Interface:
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Pointer, reflect.UnsafePointer:
 		return rv.IsNil()
 		// 数字类型零值不算空，应该正常验证
 	}
@@ -542,8 +599,14 @@ func checkMin(value any, minimum int) bool {
 	rv := reflect.ValueOf(value)
 	switch rv.Kind() {
 	case reflect.String:
+		if minimum < 0 {
+			return false
+		}
 		return len([]rune(rv.String())) >= minimum
 	case reflect.Slice, reflect.Map, reflect.Array:
+		if minimum < 0 {
+			return false
+		}
 		return rv.Len() >= minimum
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		return rv.Int() >= int64(minimum)
@@ -581,6 +644,9 @@ func checkMax(value any, maximum int) bool {
 
 // checkLen 检查精确长度
 func checkLen(value any, length int) bool {
+	if length < 0 {
+		return false
+	}
 	rv := reflect.ValueOf(value)
 	switch rv.Kind() {
 	case reflect.String:
@@ -593,12 +659,21 @@ func checkLen(value any, length int) bool {
 
 // checkRange 检查值是否在范围内
 func checkRange(value any, minimum, maximum int) bool {
+	if minimum > maximum {
+		return false
+	}
 	rv := reflect.ValueOf(value)
 	switch rv.Kind() {
 	case reflect.String:
+		if minimum < 0 {
+			return false
+		}
 		length := len([]rune(rv.String()))
 		return length >= minimum && length <= maximum
 	case reflect.Slice, reflect.Map, reflect.Array:
+		if minimum < 0 {
+			return false
+		}
 		return rv.Len() >= minimum && rv.Len() <= maximum
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		v := rv.Int()
@@ -632,9 +707,9 @@ func checkRange(value any, minimum, maximum int) bool {
 //
 //	err := v.Var("test@example.com", "required,email")
 func (v *Validator) Var(value any, tag string) error {
-	errors := v.validateField("value", value, tag)
-	if len(errors) > 0 {
-		return ValidationErrors(errors)
+	validationErrors := validateField(v.snapshot(), "value", value, tag)
+	if len(validationErrors) > 0 {
+		return ValidationErrors(validationErrors)
 	}
 	return nil
 }

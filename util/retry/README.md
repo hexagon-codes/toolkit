@@ -98,7 +98,7 @@ defer cancel()
 
 err := retry.DoWithContext(ctx,
     func() error {
-        return apiCall()
+        return apiCall(ctx)
     },
     retry.Attempts(10),
     retry.Delay(time.Second),
@@ -141,13 +141,25 @@ retry.DelayType(retry.ExponentialBackoff)
 | `Attempts(n)` | 最大尝试次数 | 3 |
 | `Delay(d)` | 重试延迟 | 1s |
 | `MaxDelay(d)` | 最大延迟 | 30s |
-| `Multiplier(m)` | 延迟倍数（指数退避） | 2.0 |
+| `Multiplier(m)` | 指数退避的延迟倍数；不选择策略 | 2.0 |
 | `OnRetry(fn)` | 重试回调函数 | nil |
 | `If(fn)` | 重试条件判断 | 任何错误都重试 |
 | `DelayType(fn)` | 延迟策略 | 固定延迟 |
 
+`Multiplier` 只配置参数，不会隐式切换延迟策略。使用指数退避时必须显式组合
+`DelayType(ExponentialBackoff)`；Option 的先后顺序不会改变已选择的策略。
+
+直接调用 `FixedDelay`、`LinearBackoff` 或 `ExponentialBackoff` 时，可通过
+`DefaultConfig()` 获取独立参数快照并修改公开退避字段。该配置不是 `Do` 的输入；
+执行重试时仍应通过 Option 配置，重试条件仅通过 `If` 设置。
+
 重试耗尽时，最终错误会同时包装 `ErrMaxAttemptsReached` 和最后一次执行错误；
-可分别使用 `errors.Is` 或 `errors.As` 判断。`OnRetry` 使用一基计数，首次重试为 1。
+可分别使用 `errors.Is` 或 `errors.As` 判断。`OnRetry` 与 `DelayType` 使用一基计数，
+首次重试为 1；直接调用线性或指数退避函数时也应从 1 开始，非正序号返回 0。
+上下文取消或超时时，错误链会同时保留 `ctx.Err()` 与已经发生的最后一次执行错误；
+取消后不会继续调用重试条件、`OnRetry` 或延迟函数。
+`DoWithContext` 在尝试前后和等待期间观察取消，但不会启动后台 goroutine 去强制中断
+正在执行的 `fn`。需要取消单次操作时，应像上例一样在闭包中捕获并向下传递 `ctx`。
 
 ## 使用场景
 

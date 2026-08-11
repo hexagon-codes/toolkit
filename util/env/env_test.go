@@ -257,8 +257,8 @@ func TestGetSliceDefault(t *testing.T) {
 	os.Setenv("TEST_EMPTY", ",  ,")
 	defer os.Unsetenv("TEST_EMPTY")
 
-	if len(GetSliceDefault("TEST_EMPTY", defaultVal)) != 1 {
-		t.Error("GetSliceDefault should return default for empty")
+	if len(GetSliceDefault("TEST_EMPTY", defaultVal)) != 0 {
+		t.Error("GetSliceDefault should preserve an explicitly empty slice")
 	}
 }
 

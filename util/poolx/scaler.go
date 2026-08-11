@@ -161,7 +161,11 @@ func (s *AutoScaler) checkAndScale() {
 	}
 
 	// Calculate current load
-	currentLoad := s.calculateLoad()
+	generation := s.pool.loadRunningGeneration()
+	if generation == nil {
+		return
+	}
+	currentLoad := s.calculateLoad(generation)
 
 	// Update EMA
 	if !s.initialized {
@@ -172,27 +176,27 @@ func (s *AutoScaler) checkAndScale() {
 	}
 
 	// Determine scaling action
-	currentWorkers := s.pool.workerCount.Load()
+	currentWorkers := generation.workerCount.Load()
 
-	if s.emaLoad > s.config.ScaleUpThreshold && currentWorkers < s.config.MaxWorkers {
-		s.scaleUp(currentWorkers)
+	if s.emaLoad > s.config.ScaleUpThreshold && currentWorkers < s.pool.maxWorkers.Load() {
+		s.scaleUp(generation, currentWorkers)
 	} else if s.emaLoad < s.config.ScaleDownThreshold && currentWorkers > s.config.MinWorkers {
-		s.scaleDown(currentWorkers)
+		s.scaleDown(generation, currentWorkers)
 	}
 }
 
 // calculateLoad returns the current load factor (0.0-1.0)
-func (s *AutoScaler) calculateLoad() float64 {
-	running := s.pool.workerCount.Load()
+func (s *AutoScaler) calculateLoad(generation *poolGeneration) float64 {
+	running := generation.workerCount.Load()
 	if running == 0 {
 		return 0
 	}
 
 	// Load = (active workers + queued tasks) / max workers
 	// This gives us a sense of how busy the pool is
-	idle := int32(s.pool.workers.size())
+	idle := int32(generation.workers.size())
 	active := running - idle
-	queued := s.pool.metrics.BlockingTasks.Load()
+	queued := generation.metrics.BlockingTasks.Load()
 
 	// Use atomic maxWorkers for thread-safe access
 	maxWorkers := s.pool.maxWorkers.Load()
@@ -208,10 +212,11 @@ func (s *AutoScaler) calculateLoad() float64 {
 }
 
 // scaleUp increases the number of workers
-func (s *AutoScaler) scaleUp(currentWorkers int32) {
+func (s *AutoScaler) scaleUp(generation *poolGeneration, currentWorkers int32) {
 	newWorkers := currentWorkers + s.config.ScaleUpStep
-	if newWorkers > s.config.MaxWorkers {
-		newWorkers = s.config.MaxWorkers
+	maxWorkers := s.pool.maxWorkers.Load()
+	if newWorkers > maxWorkers {
+		newWorkers = maxWorkers
 	}
 
 	if newWorkers <= currentWorkers {
@@ -220,16 +225,24 @@ func (s *AutoScaler) scaleUp(currentWorkers int32) {
 
 	// Create additional workers
 	added := int32(0)
+	s.pool.lock.Lock()
 	for i := currentWorkers; i < newWorkers; i++ {
-		w := s.pool.createWorkerInternal()
+		w := s.pool.createWorkerLocked(generation)
 		if w == nil {
 			break
 		}
 		w.run()
-		s.pool.workers.push(w)
-		s.pool.metrics.IdleWorkers.Add(1)
+		if !generation.workers.push(w) {
+			w.finish()
+			break
+		}
+		generation.metrics.IdleWorkers.Add(1)
 		added++
 	}
+	if added > 0 {
+		s.pool.waiters.broadcastLocked()
+	}
+	s.pool.lock.Unlock()
 
 	if added > 0 {
 		s.lastScale = time.Now()
@@ -250,7 +263,7 @@ func (s *AutoScaler) scaleUp(currentWorkers int32) {
 }
 
 // scaleDown decreases the number of workers
-func (s *AutoScaler) scaleDown(currentWorkers int32) {
+func (s *AutoScaler) scaleDown(generation *poolGeneration, currentWorkers int32) {
 	targetWorkers := currentWorkers - s.config.ScaleDownStep
 	if targetWorkers < s.config.MinWorkers {
 		targetWorkers = s.config.MinWorkers
@@ -264,16 +277,21 @@ func (s *AutoScaler) scaleDown(currentWorkers int32) {
 	removed := int32(0)
 	toRemove := currentWorkers - targetWorkers
 
+	s.pool.lock.Lock()
 	for i := int32(0); i < toRemove; i++ {
-		w := s.pool.workers.pop()
+		if !s.pool.generationRunningLocked(generation) {
+			break
+		}
+		w := generation.workers.pop()
 		if w == nil {
 			break
 		}
-		s.pool.metrics.IdleWorkers.Add(-1)
+		generation.metrics.IdleWorkers.Add(-1)
 		// Signal worker to stop
 		w.finish()
 		removed++
 	}
+	s.pool.lock.Unlock()
 
 	if removed > 0 {
 		s.lastScale = time.Now()

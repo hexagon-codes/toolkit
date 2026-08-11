@@ -19,8 +19,11 @@ Provides multiple ID generation schemes: UUID, Snowflake, and NanoID.
 ```go
 import "github.com/hexagon-codes/toolkit/util/idgen"
 
-// Generate UUID
-id := idgen.UUID()
+// Use TryUUID when entropy-source errors must be propagated
+id, err := idgen.TryUUID()
+if err != nil {
+    return err
+}
 // Output: "550e8400-e29b-41d4-a716-446655440000"
 
 // UUID without hyphens
@@ -32,7 +35,9 @@ id := idgen.UUIDWithoutHyphen()
 
 ```go
 // Initialize (call once in main function)
-idgen.InitSnowflake(1) // worker ID: 1
+if err := idgen.InitSnowflake(1); err != nil { // worker ID: 1
+    return err
+}
 
 // Generate Snowflake ID
 id := idgen.SnowflakeID()
@@ -49,6 +54,9 @@ id := idgen.NanoID()
 // Specified length
 id := idgen.NanoIDSize(10)
 // Output: "4f90d13a42"
+
+// Use a Try variant for untrusted input or entropy-error propagation
+id, err := idgen.TryNanoIDSize(10)
 
 // Short ID (8 characters)
 id := idgen.ShortID()
@@ -141,7 +149,8 @@ idgen.InitSnowflake(3)
 ### Characteristics
 - Shorter than UUID (default 21 characters)
 - URL-safe characters
-- Customizable character set and length
+- Custom alphabets must contain 2-256 distinct characters
+- Length must be in the range 1-1048576
 - Extremely low collision probability
 
 ### Custom Character Set
@@ -171,14 +180,11 @@ code := idgen.NanoIDCustom("0123456789", 6)
 filename := idgen.MediumID() + ".pdf"
 ```
 
-## Performance Comparison
+## Error Handling
 
-```go
-// Benchmark results
-BenchmarkUUID           10000000    120 ns/op
-BenchmarkSnowflake      50000000     25 ns/op
-BenchmarkNanoID         5000000     280 ns/op
-```
+`UUID`, `NanoID`, and their convenience variants panic on invalid input or entropy-source failure. Request paths should prefer
+`TryUUID`, `TryUUIDWithoutHyphen`, `TryNanoID`, `TryNanoIDSize`, and `TryNanoIDCustom`, and propagate the returned error.
+`GenerateSafe` reports Snowflake clock skew, sequence exhaustion, and timestamp-range failures; `Generate` panics on them.
 
 ## Best Practices
 
@@ -235,5 +241,6 @@ go get -u github.com/google/uuid
 1. **UUID**: No initialization needed, use directly
 2. **Snowflake**: Must initialize first; workerID range 0-1023
 3. **NanoID**: Ensure no duplicate characters in custom character set
-4. **Clock Skew**: Snowflake panics when clock rollback is detected
-5. **Concurrency Safety**: All methods are concurrency-safe
+4. **Clock and Range**: Snowflake waits at most 100ms by default; its 41-bit timestamp spans about 69 years from 2020-01-01
+5. **Collision Risk**: Random IDs are not an absolute uniqueness guarantee; size short-ID spaces using birthday-bound analysis
+6. **Concurrency Safety**: All generation entry points are concurrency-safe

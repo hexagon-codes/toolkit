@@ -8,7 +8,9 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 // 预编译正则表达式（避免每次调用重新编译）
@@ -31,8 +33,8 @@ const maxRegexpCacheSize = 1024
 
 // Email 验证邮箱格式
 func Email(email string) bool {
-	_, err := mail.ParseAddress(email)
-	return err == nil
+	address, err := mail.ParseAddress(email)
+	return err == nil && address.Address == email
 }
 
 // Phone 验证手机号（中国大陆）
@@ -80,6 +82,9 @@ func IDCard(id string) bool {
 	if !idCardRegex.MatchString(id) {
 		return false
 	}
+	if _, err := time.Parse("20060102", id[6:14]); err != nil {
+		return false
+	}
 
 	// 校验位验证
 	// 权重因子
@@ -105,28 +110,28 @@ func IDCard(id string) bool {
 
 // InRange 验证数字是否在范围内 [min, max]
 func InRange(value, minimum, maximum int) bool {
-	return value >= minimum && value <= maximum
+	return minimum <= maximum && value >= minimum && value <= maximum
 }
 
 // InRangeFloat 验证浮点数是否在范围内 [min, max]
 func InRangeFloat(value, minimum, maximum float64) bool {
-	return value >= minimum && value <= maximum
+	return minimum <= maximum && value >= minimum && value <= maximum
 }
 
 // MinLength 验证字符串最小长度
 func MinLength(str string, minimum int) bool {
-	return len([]rune(str)) >= minimum
+	return minimum >= 0 && utf8.RuneCountInString(str) >= minimum
 }
 
 // MaxLength 验证字符串最大长度
 func MaxLength(str string, maximum int) bool {
-	return len([]rune(str)) <= maximum
+	return maximum >= 0 && utf8.RuneCountInString(str) <= maximum
 }
 
 // LengthBetween 验证字符串长度在范围内 [min, max]
 func LengthBetween(str string, minimum, maximum int) bool {
-	length := len([]rune(str))
-	return length >= minimum && length <= maximum
+	length := utf8.RuneCountInString(str)
+	return minimum >= 0 && minimum <= maximum && length >= minimum && length <= maximum
 }
 
 // IsNumeric 验证是否为数字
@@ -240,7 +245,7 @@ func NotEmpty(str string) bool {
 
 // Password 验证密码强度（至少8位，包含大小写字母和数字）
 func Password(password string) bool {
-	if len(password) < 8 {
+	if utf8.RuneCountInString(password) < 8 {
 		return false
 	}
 

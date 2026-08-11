@@ -1,6 +1,7 @@
 package rand
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -124,18 +125,16 @@ func TestInt(t *testing.T) {
 }
 
 func TestInt_SameMinMax(t *testing.T) {
-	num := Int(5, 5)
-
-	if num != 5 {
-		t.Errorf("Int(5, 5) = %d, expected 5", num)
+	num, err := TryInt(5, 5)
+	if num != 5 || !errors.Is(err, ErrInvalidRange) {
+		t.Fatalf("TryInt(5, 5) = (%d, %v), want 5 ErrInvalidRange", num, err)
 	}
 }
 
 func TestInt_MinGreaterThanMax(t *testing.T) {
-	num := Int(10, 5)
-
-	if num != 10 {
-		t.Errorf("Int(10, 5) = %d, expected 10", num)
+	num, err := TryInt(10, 5)
+	if num != 10 || !errors.Is(err, ErrInvalidRange) {
+		t.Fatalf("TryInt(10, 5) = (%d, %v), want 10 ErrInvalidRange", num, err)
 	}
 }
 

@@ -1,6 +1,7 @@
 package retry
 
 import (
+	"math"
 	"math/rand/v2"
 	"time"
 )
@@ -59,16 +60,16 @@ func addJitter(delay time.Duration, config *Config) time.Duration {
 	switch config.JitterType {
 	case FullJitter:
 		// 全抖动: [0, delay]
-		return time.Duration(rand.Float64() * float64(delay)) // #nosec G404 -- 退避抖动不用于安全随机数。
+		return durationFromFloat(rand.Float64() * float64(delay)) // #nosec G404 -- 退避抖动不用于安全随机数。
 
 	case EqualJitter:
 		// 均等抖动: [delay/2, delay]
 		half := float64(delay) / 2
-		return time.Duration(half + rand.Float64()*half) // #nosec G404 -- 退避抖动不用于安全随机数。
+		return durationFromFloat(half + rand.Float64()*half) // #nosec G404 -- 退避抖动不用于安全随机数。
 
 	case DecorrelatedJitter:
 		// 去相关抖动: [delay, delay * 3]
-		return time.Duration(float64(delay) + rand.Float64()*float64(delay)*2) // #nosec G404 -- 退避抖动不用于安全随机数。
+		return durationFromFloat(float64(delay) + rand.Float64()*float64(delay)*2) // #nosec G404 -- 退避抖动不用于安全随机数。
 
 	default:
 		// 使用 factor 的比例抖动: delay * (1 ± factor)
@@ -78,8 +79,20 @@ func addJitter(delay time.Duration, config *Config) time.Duration {
 			if result < 0 {
 				return 0
 			}
-			return time.Duration(result)
+			return durationFromFloat(result)
 		}
 		return delay
+	}
+}
+
+func durationFromFloat(value float64) time.Duration {
+	const maximumDuration = time.Duration(1<<63 - 1)
+	switch {
+	case math.IsNaN(value) || value <= 0:
+		return 0
+	case value >= float64(maximumDuration):
+		return maximumDuration
+	default:
+		return time.Duration(value)
 	}
 }

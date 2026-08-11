@@ -103,8 +103,8 @@ func isNetworkError(err error) bool {
 
 	// 检查网络操作错误
 	var netErr net.Error
-	if errors.As(err, &netErr) {
-		return netErr.Timeout()
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
 	}
 
 	// 检查 DNS 错误

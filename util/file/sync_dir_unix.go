@@ -8,8 +8,9 @@ import (
 	"os"
 )
 
-func syncParentDirectory(path string) error {
-	dir, err := os.Open(path) // #nosec G304 -- 路径来自调用者明确指定的目标文件父目录。
+func syncRootDirectory(root *os.Root) error {
+	// 目录文件从已固定的 Root 打开，不再解析调用者提供的父目录路径。
+	dir, err := root.Open(".")
 	if err != nil {
 		return fmt.Errorf("open parent directory for sync: %w", err)
 	}

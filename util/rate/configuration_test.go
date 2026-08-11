@@ -78,6 +78,11 @@ func TestMultiDimensionLimiterRejectsNonAtomicConfiguration(t *testing.T) {
 	if limiter, err := NewMultiDimensionLimiter(bucket, bucket); limiter != nil || !errors.Is(err, ErrDuplicateLimiter) {
 		t.Fatalf("duplicate constructor = (%v, %v), want nil ErrDuplicateLimiter", limiter, err)
 	}
+
+	var zeroBucket TokenBucketV2
+	if limiter, err := NewMultiDimensionLimiter(&zeroBucket); limiter != nil || !errors.Is(err, ErrUninitializedLimiter) {
+		t.Fatalf("zero-value constructor = (%v, %v), want nil ErrUninitializedLimiter", limiter, err)
+	}
 }
 
 func TestMultiDimensionLimiterUsesStableLockOrdering(t *testing.T) {

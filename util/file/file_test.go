@@ -185,11 +185,12 @@ func TestNameWithoutExt(t *testing.T) {
 }
 
 func TestDir(t *testing.T) {
+	root := string(os.PathSeparator)
 	tests := []struct {
 		path string
 		want string
 	}{
-		{"/path/to/file.txt", "/path/to"},
+		{filepath.Join(root, "path", "to", "file.txt"), filepath.Join(root, "path", "to")},
 		{"file.txt", "."},
 	}
 

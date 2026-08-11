@@ -46,11 +46,8 @@ func StructToMap(v any) map[string]any {
 //	m := reflectx.StructToMapWithTag(User{Name: "Alice", Age: 20}, "json")
 //	// map[string]any{"name": "Alice", "age": 20}
 func StructToMapWithTag(v any, tagName string) map[string]any {
-	rv := reflect.ValueOf(v)
-	if rv.Kind() == reflect.Pointer {
-		rv = rv.Elem()
-	}
-	if rv.Kind() != reflect.Struct {
+	rv, ok := readableStructValue(v)
+	if !ok {
 		return nil
 	}
 
@@ -175,7 +172,13 @@ func MapToStructWithTag(m map[string]any, v any, tagName string) error {
 // setFieldValue 设置字段值
 func setFieldValue(field reflect.Value, value any) error {
 	if value == nil {
-		return nil
+		switch field.Kind() {
+		case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+			field.SetZero()
+			return nil
+		default:
+			return fmt.Errorf("cannot assign nil to %v", field.Type())
+		}
 	}
 
 	rv := reflect.ValueOf(value)
@@ -208,16 +211,13 @@ func setFieldValue(field reflect.Value, value any) error {
 //	name, ok := reflectx.GetField(user, "Name")
 //	// "Alice", true
 func GetField(v any, name string) (any, bool) {
-	rv := reflect.ValueOf(v)
-	if rv.Kind() == reflect.Pointer {
-		rv = rv.Elem()
-	}
-	if rv.Kind() != reflect.Struct {
+	rv, ok := readableStructValue(v)
+	if !ok {
 		return nil, false
 	}
 
 	field := rv.FieldByName(name)
-	if !field.IsValid() {
+	if !field.IsValid() || !field.CanInterface() {
 		return nil, false
 	}
 	return field.Interface(), true
@@ -291,14 +291,12 @@ func SetField(v any, name string, value any) error {
 // 返回:
 //   - bool: 是否有该字段
 func HasField(v any, name string) bool {
-	rv := reflect.ValueOf(v)
-	if rv.Kind() == reflect.Pointer {
-		rv = rv.Elem()
-	}
-	if rv.Kind() != reflect.Struct {
+	rv, ok := readableStructValue(v)
+	if !ok {
 		return false
 	}
-	return rv.FieldByName(name).IsValid()
+	field := rv.FieldByName(name)
+	return field.IsValid() && field.CanInterface()
 }
 
 // FieldNames 返回结构体所有导出字段名
@@ -309,11 +307,8 @@ func HasField(v any, name string) bool {
 // 返回:
 //   - []string: 字段名列表
 func FieldNames(v any) []string {
-	rv := reflect.ValueOf(v)
-	if rv.Kind() == reflect.Pointer {
-		rv = rv.Elem()
-	}
-	if rv.Kind() != reflect.Struct {
+	rv, ok := readableStructValue(v)
+	if !ok {
 		return nil
 	}
 
@@ -337,11 +332,8 @@ func FieldNames(v any) []string {
 // 返回:
 //   - map[string]string: 字段名到 tag 值的映射
 func FieldTags(v any, tagName string) map[string]string {
-	rv := reflect.ValueOf(v)
-	if rv.Kind() == reflect.Pointer {
-		rv = rv.Elem()
-	}
-	if rv.Kind() != reflect.Struct {
+	rv, ok := readableStructValue(v)
+	if !ok {
 		return nil
 	}
 
@@ -357,4 +349,38 @@ func FieldTags(v any, tagName string) map[string]string {
 		}
 	}
 	return result
+}
+
+type pointerIdentity struct {
+	typeOf  reflect.Type
+	pointer uintptr
+}
+
+func readableStructValue(v any) (reflect.Value, bool) {
+	if v == nil {
+		return reflect.Value{}, false
+	}
+	rv := reflect.ValueOf(v)
+	visited := make(map[pointerIdentity]struct{})
+	for {
+		switch rv.Kind() {
+		case reflect.Interface:
+			if rv.IsNil() {
+				return reflect.Value{}, false
+			}
+			rv = rv.Elem()
+		case reflect.Pointer:
+			if rv.IsNil() {
+				return reflect.Value{}, false
+			}
+			identity := pointerIdentity{typeOf: rv.Type(), pointer: rv.Pointer()}
+			if _, exists := visited[identity]; exists {
+				return reflect.Value{}, false
+			}
+			visited[identity] = struct{}{}
+			rv = rv.Elem()
+		default:
+			return rv, rv.Kind() == reflect.Struct
+		}
+	}
 }

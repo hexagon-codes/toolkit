@@ -7,14 +7,14 @@
 ## 特性
 
 - ✅ 文件/目录判断和属性获取
-- ✅ 原子文件替换（文件 Sync、同目录 rename、父目录 Sync）
+- ✅ 固定父目录 Root 的原子文件替换（拒绝目录换绑和目标符号链接）
 - ✅ 默认私有权限（文件 `0600`、目录 `0750`）
 - ✅ 文件读写（支持字符串和字节）
-- ✅ 文件追加操作
+- ✅ 不跟随最终符号链接的文件追加操作
 - ✅ 文件复制和移动
 - ✅ 目录创建和遍历
 - ✅ 路径操作（连接、绝对路径）
-- ✅ 零外部依赖
+- ✅ 仅依赖 Go 标准库与 `golang.org/x/sys`
 
 ## 快速开始
 
@@ -61,7 +61,7 @@ err = file.WriteString("/path/to/output.txt", "Hello, World!")
 // 以 0600 权限原子写入字节
 err = file.Write("/path/to/output.bin", []byte{0x01, 0x02})
 
-// 直接追加内容（不提供原子替换或崩溃持久性保证）
+// 直接追加内容（拒绝最终符号链接，不提供崩溃持久性保证）
 err = file.AppendString("/path/to/log.txt", "New log entry\n")
 ```
 
@@ -87,7 +87,7 @@ dir := file.Dir("/path/to/file.txt")  // "/path/to"
 ### 文件操作
 
 ```go
-// 原子复制普通文件，不跟随目标符号链接
+// 原子复制普通文件，目标为符号链接时返回错误
 err := file.Copy("/path/to/source.txt", "/path/to/dest.txt")
 
 // 移动文件
@@ -165,13 +165,13 @@ ReadString(path string) (string, error)
 ### 写入函数
 
 ```go
-// Write 以 0600 权限原子替换文件内容（字节数组）
+// Write 以 0600 权限原子替换文件内容，并拒绝父目录换绑和目标符号链接
 Write(path string, data []byte) error
 
 // WriteString 以 0600 权限原子替换字符串内容
 WriteString(path, content string) error
 
-// Append 以 0600 默认权限直接追加内容（字节数组）
+// Append 以 0600 默认权限直接追加内容，并拒绝最终符号链接
 Append(path string, data []byte) error
 
 // AppendString 追加字符串到文件
@@ -203,7 +203,7 @@ Dir(path string) string
 ### 操作函数
 
 ```go
-// Copy 原子复制普通文件并替换目标符号链接
+// Copy 原子复制普通文件，目标为符号链接时返回错误
 Copy(src, dst string) error
 
 // Move 移动文件
@@ -498,12 +498,12 @@ Walk():         根据文件数量（1000个文件约 100ms）
    - 使用 `filepath` 包保证跨平台兼容
 
 2. **文件权限**：
-   - 默认权限：文件 0644，目录 0755
-   - 如需自定义权限，使用 `os` 包
+   - 默认权限：文件 0600，目录 0750
+   - 写入和追加可通过 `WriteWithPerm`、`AppendWithPerm` 指定权限
 
 3. **并发安全**：
    - 函数本身无状态，可并发调用
-   - 但文件 I/O 本身不保证原子性
+   - `Write()`/`Copy()` 以同目录 rename 发布完整文件；多个写入者仍采用最后一次成功发布生效
 
 4. **大文件处理**：
    - `Read()` 会将整个文件读入内存
@@ -514,13 +514,13 @@ Walk():         根据文件数量（1000个文件约 100ms）
    - 始终检查返回的 `error`
 
 6. **文件覆盖**：
-   - `Write()` 会覆盖现有文件
-   - `Append()` 会追加到文件末尾
+   - `Write()` 会覆盖现有普通文件，但拒绝最终符号链接
+   - `Append()` 会追加到文件末尾，但拒绝最终符号链接
 
 ## 依赖
 
 ```bash
-# 零外部依赖，仅使用标准库
+# 包内部仅使用标准库与 golang.org/x/sys
 import (
     "io"
     "os"

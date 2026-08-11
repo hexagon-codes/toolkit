@@ -4,27 +4,14 @@
 //
 // 雪花算法用法:
 //
-//	gen := idgen.NewSnowflake(1)  // 节点 ID
-//	id := gen.Generate()
+//	gen, err := idgen.NewSnowflake(1) // 节点 ID
+//	if err != nil {
+//	    return err
+//	}
+//	id, err := gen.GenerateSafe()
 //
 // UUID 用法:
 //
-//	uuid := idgen.NewUUID()        // v4 UUID
-//	uuid := idgen.NewUUIDString()  // 字符串形式
-//
-// --- English ---
-//
-// Package idgen provides ID generation utilities.
-//
-// Includes Snowflake ID generator and UUID utilities.
-//
-// Snowflake usage:
-//
-//	gen := idgen.NewSnowflake(1)  // node ID
-//	id := gen.Generate()
-//
-// UUID usage:
-//
-//	uuid := idgen.NewUUID()        // v4 UUID
-//	uuid := idgen.NewUUIDString()  // string representation
+//	uuid, err := idgen.TryUUID()                  // v4 UUID
+//	compact, err := idgen.TryUUIDWithoutHyphen() // 无连字符形式
 package idgen

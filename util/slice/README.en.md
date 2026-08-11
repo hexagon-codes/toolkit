@@ -49,7 +49,7 @@ result := slice.RemoveAll([]int{1, 2, 2, 3}, 2)  // [1, 3]
 nums := []int{1, 2, 3, 4, 5}
 reversed := slice.Reverse(nums)  // [5, 4, 3, 2, 1]
 
-// Shuffle (simplified randomization)
+// Shuffle with the Fisher-Yates algorithm
 shuffled := slice.Shuffle(nums)  // [3, 1, 5, 2, 4]
 
 // Chunk
@@ -218,16 +218,16 @@ Equal[T comparable](slice1, slice2 []T) bool
 
 ```go
 // Sum calculates the sum (integers)
-Sum[T int | int64 | int32](slice []T) T
+Sum[T integer](slice []T) T
 
 // SumFloat calculates the sum (floats)
-SumFloat[T float32 | float64](slice []T) T
+SumFloat[T floating](slice []T) T
 
 // Max gets the maximum value
-Max[T int | int64 | int32 | float32 | float64](slice []T) T
+Max[T number](slice []T) T
 
 // Min gets the minimum value
-Min[T int | int64 | int32 | float32 | float64](slice []T) T
+Min[T number](slice []T) T
 ```
 
 ### Higher-Order Functions
@@ -469,7 +469,7 @@ Remove():       O(n)
 Reverse():      O(n)
 Chunk():        O(n)
 Union():        O(n+m)
-Intersect():    O(n*m)
+Intersect():    O(n+m)
 Sum():          O(n)
 GroupBy():      O(n)
 ```
@@ -481,9 +481,8 @@ GroupBy():      O(n)
    - Original slice remains unchanged
 
 2. **Shuffle Implementation**:
-   - Current implementation is a simplified version
-   - Does not use true random numbers
-   - Not suitable for security-sensitive scenarios
+	- Uses Fisher-Yates with the global `math/rand/v2` pseudorandom source
+	- Not suitable for security-sensitive scenarios
 
 3. **Empty Slice Handling**:
    - `Max/Min` returns zero value

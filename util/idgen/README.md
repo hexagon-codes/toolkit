@@ -19,8 +19,11 @@
 ```go
 import "github.com/hexagon-codes/toolkit/util/idgen"
 
-// 生成 UUID
-id := idgen.UUID()
+// 需要传播熵源错误时使用 TryUUID
+id, err := idgen.TryUUID()
+if err != nil {
+    return err
+}
 // 输出: "550e8400-e29b-41d4-a716-446655440000"
 
 // 不带连字符的 UUID
@@ -32,7 +35,9 @@ id := idgen.UUIDWithoutHyphen()
 
 ```go
 // 初始化（在 main 函数中执行一次）
-idgen.InitSnowflake(1) // worker ID: 1
+if err := idgen.InitSnowflake(1); err != nil { // worker ID: 1
+    return err
+}
 
 // 生成 Snowflake ID
 id := idgen.SnowflakeID()
@@ -49,6 +54,9 @@ id := idgen.NanoID()
 // 指定长度
 id := idgen.NanoIDSize(10)
 // 输出: "4f90d13a42"
+
+// 输入来自外部或需要传播熵源错误时使用 Try 版本
+id, err := idgen.TryNanoIDSize(10)
 
 // 短 ID（8 位）
 id := idgen.ShortID()
@@ -141,7 +149,8 @@ idgen.InitSnowflake(3)
 ### 特点
 - 比 UUID 更短（默认21位）
 - URL 安全字符
-- 可自定义字符集和长度
+- 可自定义字符集和长度；字符集必须包含 2-256 个互不重复的字符
+- 长度必须为 1-1048576
 - 碰撞概率极低
 
 ### 自定义字符集
@@ -171,14 +180,11 @@ code := idgen.NanoIDCustom("0123456789", 6)
 filename := idgen.MediumID() + ".pdf"
 ```
 
-## 性能对比
+## 错误处理
 
-```go
-// Benchmark 结果
-BenchmarkUUID           10000000    120 ns/op
-BenchmarkSnowflake      50000000     25 ns/op
-BenchmarkNanoID         5000000     280 ns/op
-```
+`UUID`、`NanoID` 及其便捷变体在输入无效或系统熵源失败时 panic。服务请求链路应优先使用
+`TryUUID`、`TryUUIDWithoutHyphen`、`TryNanoID`、`TryNanoIDSize` 和 `TryNanoIDCustom`，并传播错误。
+`GenerateSafe` 返回 Snowflake 的时钟回拨、序列耗尽和时间戳越界错误；`Generate` 在这些错误上 panic。
 
 ## 最佳实践
 
@@ -235,5 +241,6 @@ go get -u github.com/google/uuid
 1. **UUID**: 无需初始化，直接使用
 2. **Snowflake**: 必须先初始化，workerID 范围 0-1023
 3. **NanoID**: 自定义字符集时注意字符不重复
-4. **时钟回拨**: Snowflake 检测到时钟回拨会 panic
-5. **并发安全**: 所有方法都是并发安全的
+4. **时钟与范围**: Snowflake 默认最多等待 100ms；41 位时间字段约覆盖 2020-01-01 起 69 年
+5. **碰撞风险**: 随机 ID 不提供绝对唯一保证，短 ID 的容量规划必须考虑生日碰撞
+6. **并发安全**: 所有生成入口都可并发调用

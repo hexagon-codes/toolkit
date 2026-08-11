@@ -147,8 +147,12 @@ func TestAutoScalerStopJoinsBeforeRestart(t *testing.T) {
 	scaler.Start()
 	scaler.Stop()
 	scaler.Start()
-	runtime.Gosched()
 	loopsAfterRestart := autoScalerLoopCount() - baseline
+	restartDeadline := time.Now().Add(time.Second)
+	for loopsAfterRestart == 0 && time.Now().Before(restartDeadline) {
+		runtime.Gosched()
+		loopsAfterRestart = autoScalerLoopCount() - baseline
+	}
 
 	scaler.Stop()
 	loopsAfterStop := autoScalerLoopCount() - baseline
