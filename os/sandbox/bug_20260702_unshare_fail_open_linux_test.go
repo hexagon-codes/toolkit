@@ -33,6 +33,7 @@ func TestLinuxRunnerReportsEnforcedWithBubblewrap(t *testing.T) {
 	if err != nil || !linuxBwrapBackendUsable(bwrap, false) {
 		t.Skip("usable bubblewrap is unavailable")
 	}
+	// 未配置 MaxProcesses 时进程预算未请求，必须如实报告 not_requested，不得虚报 unsupported。
 	sandboxInstance := &linuxSandbox{cfg: Config{Workspace: t.TempDir()}}
 
 	env, err := cleanLinuxEnv(sandboxInstance.cfg.Workspace, nil)
@@ -53,7 +54,7 @@ func TestLinuxRunnerReportsEnforcedWithBubblewrap(t *testing.T) {
 	if execution.capabilities.Filesystem != LimitStatusEnforced || execution.capabilities.ProcessContainment != LimitStatusEnforced {
 		t.Fatalf("planLinuxSandboxExecution() capabilities = %+v, want enforced", execution.capabilities)
 	}
-	if execution.capabilities.Processes != LimitStatusUnsupported {
-		t.Fatalf("planLinuxSandboxExecution() Processes = %q, want unsupported tree budget", execution.capabilities.Processes)
+	if execution.capabilities.Processes != LimitStatusNotRequested {
+		t.Fatalf("planLinuxSandboxExecution() Processes = %q, want not_requested for unconfigured budget", execution.capabilities.Processes)
 	}
 }

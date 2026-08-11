@@ -16,6 +16,9 @@ import (
 
 const linuxBoundaryProbeResultPrefix = "TOOLKIT_LINUX_BOUNDARY"
 
+// linuxNamespaceRoot 是 Linux 进程命名空间符号链接目录。
+const linuxNamespaceRoot = "/proc/self/ns"
+
 type linuxObjectIdentity struct {
 	device uint64
 	inode  uint64
@@ -254,7 +257,7 @@ func auditLinuxWorkspaceContext(ctx context.Context, workspace string) error {
 	return nil
 }
 
-func copyLinuxBoundaryProbeExecutable(workspace string) (string, error) {
+func copyLinuxBoundaryProbeExecutable(workspace string) (resultPath string, resultErr error) {
 	sourcePath, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("resolve Linux boundary probe executable: %w", err)
@@ -263,7 +266,9 @@ func copyLinuxBoundaryProbeExecutable(workspace string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("open Linux boundary probe executable: %w", err)
 	}
-	defer source.Close()
+	defer func() {
+		resultErr = errors.Join(resultErr, fmt.Errorf("close Linux boundary probe executable source: %w", source.Close()))
+	}()
 
 	destinationPath := filepath.Join(workspace, ".toolkit-linux-boundary-probe")
 	destination, err := os.OpenFile(destinationPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o500)
@@ -306,7 +311,11 @@ func linuxCapabilitiesAreEmpty() bool {
 	if err != nil {
 		return false
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "sandbox: close Linux capability probe status file: %v\n", closeErr)
+		}
+	}()
 	wanted := map[string]bool{"CapInh:": false, "CapPrm:": false, "CapEff:": false, "CapBnd:": false, "CapAmb:": false}
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
@@ -331,7 +340,7 @@ func linuxCapabilitiesAreEmpty() bool {
 
 func linuxNamespaceDiffersFromParent(namespace string) bool {
 	parent := os.Getenv("TOOLKIT_LINUX_PARENT_NS_" + strings.ToUpper(namespace))
-	current, err := os.Readlink(filepath.Join("/proc/self/ns", namespace))
+	current, err := os.Readlink(filepath.Join(linuxNamespaceRoot, namespace))
 	return err == nil && parent != "" && current != parent
 }
 
@@ -361,7 +370,7 @@ func parseLinuxBoundaryProbeResult(output string) linuxBwrapProbeResult {
 func appendLinuxParentNamespaceEnvironment(env []string) ([]string, error) {
 	result := append([]string(nil), env...)
 	for _, namespace := range []string{"user", "mnt", "pid", "ipc", "uts", "net"} {
-		identity, err := os.Readlink(filepath.Join("/proc/self/ns", namespace))
+		identity, err := os.Readlink(filepath.Join(linuxNamespaceRoot, namespace))
 		if err != nil {
 			return nil, fmt.Errorf("inspect parent Linux %s namespace: %w", namespace, err)
 		}

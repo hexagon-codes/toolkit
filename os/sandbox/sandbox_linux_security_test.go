@@ -292,7 +292,7 @@ func TestLinuxRootBwrapHidesHostUnixSocket(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("root Linux Unix socket boundary only")
 	}
-	requireUsableLinuxBwrapWithoutSkip(t)
+	requireUsableLinuxBwrap(t)
 	runRoot, err := os.MkdirTemp("/run", "toolkit-bwrap-socket-")
 	if err != nil {
 		t.Fatalf("create controlled /run fixture: %v", err)

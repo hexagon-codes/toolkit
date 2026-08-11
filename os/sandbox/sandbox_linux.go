@@ -22,6 +22,9 @@ const (
 	linuxBoundaryProbeMark     = "1"
 )
 
+// linuxLocalLibRoot 是 Debian/Ubuntu 上常见 Python 标准库安装根，用于只读运行时路径计算。
+const linuxLocalLibRoot = "/usr/local/lib"
+
 type linuxBwrapProbeResult struct {
 	Isolation LimitStatus
 }
@@ -95,8 +98,8 @@ func (s *linuxSandbox) Exec(ctx context.Context, requested Command) (*ExecResult
 	if err != nil {
 		return nil, err
 	}
-	if err := checkPOSIXPreparationContext(ctx, "prepare Linux execution"); err != nil {
-		return nil, err
+	if prepErr := checkPOSIXPreparationContext(ctx, "prepare Linux execution"); prepErr != nil {
+		return nil, prepErr
 	}
 	execution, err := s.planLinuxSandboxExecutionContext(ctx, command)
 	if err != nil {
@@ -144,8 +147,8 @@ func (s *linuxSandbox) planLinuxSandboxExecutionContext(ctx context.Context, com
 	if s.cfg.MaxProcesses > 0 && resourceBackend.Processes != LimitStatusEnforced {
 		return linuxSandboxExecution{}, fmt.Errorf("%w: Linux exact process-tree budget is unavailable", ErrRequiredCapabilitiesUnavailable)
 	}
-	if err := checkPOSIXPreparationContext(ctx, "plan Linux execution"); err != nil {
-		return linuxSandboxExecution{}, err
+	if prepErr := checkPOSIXPreparationContext(ctx, "plan Linux execution"); prepErr != nil {
+		return linuxSandboxExecution{}, prepErr
 	}
 	guard, err := newLinuxExecutionGuardContext(ctx, s.cfg, plan.command)
 	if err != nil {
@@ -380,9 +383,15 @@ func linuxBwrapBackendCapabilities(bwrap string, network bool) linuxBwrapProbeRe
 }
 
 func runLinuxBwrapProbe(bwrap string, network bool) linuxBwrapProbeResult {
+	// 探测失败原因写入 stderr，便于在无 bwrap/unshare 的托管环境定位具体失败点。
+	probeFailed := func(stage string, err error) linuxBwrapProbeResult {
+		fmt.Fprintf(os.Stderr, "sandbox: bubblewrap probe failed at %s: %v\n", stage, err)
+		return linuxBwrapProbeResult{}
+	}
+
 	ws, err := os.MkdirTemp("", "toolkit-bwrap-probe-*")
 	if err != nil {
-		return linuxBwrapProbeResult{}
+		return probeFailed("create workspace", err)
 	}
 	defer func() {
 		if removeErr := os.RemoveAll(ws); removeErr != nil {
@@ -393,21 +402,21 @@ func runLinuxBwrapProbe(bwrap string, network bool) linuxBwrapProbeResult {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if err := initializePOSIXRuntimeDirectories(ws); err != nil {
-		return linuxBwrapProbeResult{}
+	if err = initializePOSIXRuntimeDirectories(ws); err != nil {
+		return probeFailed("initialize runtime directories", err)
 	}
 	probeExecutable, err := copyLinuxBoundaryProbeExecutable(ws)
 	if err != nil {
-		return linuxBwrapProbeResult{}
+		return probeFailed("copy probe executable", err)
 	}
 	s := &linuxSandbox{cfg: Config{Workspace: ws, Network: NetworkMode(network)}}
 	env, err := cleanLinuxEnv(ws, os.Environ())
 	if err != nil {
-		return linuxBwrapProbeResult{}
+		return probeFailed("build sandbox environment", err)
 	}
 	env, err = appendLinuxParentNamespaceEnvironment(env)
 	if err != nil {
-		return linuxBwrapProbeResult{}
+		return probeFailed("append parent namespace environment", err)
 	}
 	env = append(env, linuxBoundaryProbeEnv+"="+linuxBoundaryProbeMark)
 	args, err := s.bwrapArgs(Command{
@@ -417,14 +426,14 @@ func runLinuxBwrapProbe(bwrap string, network bool) linuxBwrapProbeResult {
 		Env:  env,
 	})
 	if err != nil {
-		return linuxBwrapProbeResult{}
+		return probeFailed("build bubblewrap arguments", err)
 	}
 	// bwrap 已由可信系统候选冻结为绝对路径，探测参数由本包固定生成且不经过命令行解释器。
 	cmd := exec.CommandContext(ctx, bwrap, args...) // #nosec G204 -- 动态程序路径来自受控的后端能力探测。
 	cmd.Env = trustedPOSIXLauncherEnvironment()
 	output, err := cmd.Output()
 	if err != nil {
-		return linuxBwrapProbeResult{}
+		return probeFailed("run bubblewrap probe payload", err)
 	}
 	return parseLinuxBoundaryProbeResult(string(output))
 }
@@ -476,18 +485,17 @@ func (s *linuxSandbox) bwrapArgs(command Command) ([]string, error) {
 	for _, mount := range mounts {
 		out = append(out, "--ro-bind", mount.source, mount.target)
 	}
-	out = append(out, "--bind", privateTemporary, "/tmp")
 	// Workspace 可能自身位于 /tmp；私有临时目录挂载后必须恢复这个精确子挂载。
-	out = append(out, "--bind", s.cfg.Workspace, s.cfg.Workspace)
+	out = append(out, "--bind", privateTemporary, "/tmp", "--bind", s.cfg.Workspace, s.cfg.Workspace)
 	for _, p := range s.cfg.ReadablePaths {
 		p = cleanLinuxMountPath(p)
 		if p == "" {
 			continue
 		}
-		if _, err := os.Stat(p); err == nil {
+		if _, statErr := os.Stat(p); statErr == nil {
 			out = append(out, "--ro-bind", p, p)
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("inspect sandbox readable path %q: %w", p, err)
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return nil, fmt.Errorf("inspect sandbox readable path %q: %w", p, statErr)
 		}
 	}
 	for _, p := range s.cfg.DeniedPaths {
@@ -495,16 +503,16 @@ func (s *linuxSandbox) bwrapArgs(command Command) ([]string, error) {
 		if p == "" || p == "/" {
 			return nil, fmt.Errorf("sandbox denied path is invalid")
 		}
-		info, err := os.Lstat(p)
+		info, statErr := os.Lstat(p)
 		switch {
-		case err == nil && info.IsDir():
+		case statErr == nil && info.IsDir():
 			out = append(out, "--tmpfs", p, "--chmod", "000", p, "--remount-ro", p)
-		case err == nil:
+		case statErr == nil:
 			out = append(out, "--ro-bind", "/dev/null", p)
-		case errors.Is(err, os.ErrNotExist):
+		case errors.Is(statErr, os.ErrNotExist):
 			return nil, fmt.Errorf("sandbox denied path must exist before launch: %q", p)
 		default:
-			return nil, fmt.Errorf("inspect sandbox denied path %q: %w", p, err)
+			return nil, fmt.Errorf("inspect sandbox denied path %q: %w", p, statErr)
 		}
 	}
 	payloadPath, payloadArgs, err := s.linuxResourceLimitedPayload(plan.command)
@@ -516,7 +524,7 @@ func (s *linuxSandbox) bwrapArgs(command Command) ([]string, error) {
 	return out, nil
 }
 
-func (s *linuxSandbox) linuxResourceLimitedPayload(command Command) (string, []string, error) {
+func (s *linuxSandbox) linuxResourceLimitedPayload(command Command) (payloadPath string, payloadArguments []string, resultErr error) {
 	if s.cfg.MaxMemoryBytes <= 0 {
 		return command.Path, command.Args, nil
 	}
@@ -525,8 +533,7 @@ func (s *linuxSandbox) linuxResourceLimitedPayload(command Command) (string, []s
 		return "", nil, fmt.Errorf("resolve Linux resource limit launcher: %w", resourceBackend.memoryErr)
 	}
 	arguments := make([]string, 0, len(command.Args)+3)
-	arguments = append(arguments, fmt.Sprintf("--as=%d", s.cfg.MaxMemoryBytes))
-	arguments = append(arguments, "--", command.Path)
+	arguments = append(arguments, fmt.Sprintf("--as=%d", s.cfg.MaxMemoryBytes), "--", command.Path)
 	arguments = append(arguments, command.Args...)
 	return resourceBackend.prlimitPath, arguments, nil
 }
@@ -729,7 +736,7 @@ func linuxInstalledRuntimePaths(executable string) (paths []string, runtimeOnly 
 	}
 	if filepath.Dir(cleaned) == "/usr/local/bin" && strings.HasPrefix(strings.ToLower(filepath.Base(cleaned)), "python") {
 		version := strings.TrimPrefix(strings.ToLower(filepath.Base(cleaned)), "python")
-		stdlib := filepath.Join("/usr/local/lib", "python"+version)
+		stdlib := filepath.Join(linuxLocalLibRoot, "python"+version)
 		if dirExists(stdlib) {
 			return []string{cleaned, stdlib}, true
 		}
@@ -767,7 +774,7 @@ func linuxSystemReadOnlyMounts() []linuxReadOnlyMount {
 	for _, path := range []string{
 		"/bin", "/sbin", "/lib", "/lib64", "/usr/bin", "/usr/sbin", "/usr/lib", "/usr/lib64", "/usr/libexec",
 		"/nix/store", "/usr/share/zoneinfo", "/usr/share/locale", "/usr/share/ca-certificates",
-		"/etc/ssl/certs", "/etc/pki/tls/certs", "/etc/ca-certificates",
+		"/etc/ssl/certs", "/etc/pki/tls/certs", "/etc/ca-certificates", "/etc/alternatives",
 	} {
 		if mount, ok := linuxResolvedReadOnlyMount(path, true); ok {
 			mounts = append(mounts, mount)

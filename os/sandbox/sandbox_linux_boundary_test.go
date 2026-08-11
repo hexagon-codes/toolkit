@@ -23,6 +23,7 @@ func TestLinuxBoundaryProbeRootDropsCapabilitiesButRejectsIneffectiveProcessLimi
 	if os.Geteuid() != 0 {
 		t.Skip("root Linux boundary probe only")
 	}
+	requireUsableLinuxBwrap(t)
 	bwrap, err := linuxBwrapPath()
 	if err != nil {
 		t.Skipf("trusted bubblewrap is unavailable: %v", err)
@@ -51,9 +52,7 @@ func TestLinuxRootExecReportsProcessesNotRequestedWithoutFalseEnforcement(t *tes
 	if os.Geteuid() != 0 {
 		t.Skip("root Linux execution only")
 	}
-	if _, err := linuxBwrapPath(); err != nil {
-		t.Skipf("trusted bubblewrap is unavailable: %v", err)
-	}
+	requireUsableLinuxBwrap(t)
 	workspace := t.TempDir()
 	sandboxInstance, err := New(Config{
 		Workspace: workspace,

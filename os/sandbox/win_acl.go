@@ -227,8 +227,7 @@ func openWindowsWorkspaceRootGuard(path string) (*os.File, windowsFileIdentity, 
 	}
 	file := os.NewFile(uintptr(handle), filepath.Clean(path))
 	if file == nil {
-		_ = windows.CloseHandle(handle)
-		return nil, windowsFileIdentity{}, "", fmt.Errorf("wrap raw Windows workspace root handle")
+		return nil, windowsFileIdentity{}, "", errors.Join(fmt.Errorf("wrap raw Windows workspace root handle"), windows.CloseHandle(handle))
 	}
 	identity, err := inspectWindowsFileHandle(file)
 	if err != nil {
@@ -544,7 +543,7 @@ func windowsSIDAllowed(sid *windows.SID, allowed []*windows.SID) bool {
 	return false
 }
 
-func setPersistentWindowsWorkspaceACL(file *os.File, ownerSID *windows.SID, appContainerSID []byte) error {
+func setPersistentWindowsWorkspaceACL(file *os.File, ownerSID *windows.SID, appContainerSID []byte) (resultErr error) {
 	appSID, err := windowsSIDFromBytes(appContainerSID)
 	if err != nil {
 		return err
@@ -579,7 +578,9 @@ func setPersistentWindowsWorkspaceACL(file *os.File, ownerSID *windows.SID, appC
 	if err != nil {
 		return fmt.Errorf("open workspace object for DACL update: %w", err)
 	}
-	defer windows.CloseHandle(writableHandle)
+	defer func() {
+		resultErr = errors.Join(resultErr, windows.CloseHandle(writableHandle))
+	}()
 
 	if err := windows.SetSecurityInfo(
 		writableHandle,
@@ -607,7 +608,7 @@ func windowsAppContainerWorkspacePermissions() windows.ACCESS_MASK {
 	)
 }
 
-func setPersistentWindowsWorkspaceIntegrity(file *os.File) error {
+func setPersistentWindowsWorkspaceIntegrity(file *os.File) (resultErr error) {
 	descriptor, err := windows.SecurityDescriptorFromString("S:(ML;OICI;NW;;;LW)")
 	if err != nil {
 		return fmt.Errorf("build low-integrity security descriptor: %w", err)
@@ -629,7 +630,9 @@ func setPersistentWindowsWorkspaceIntegrity(file *os.File) error {
 	if err != nil {
 		return fmt.Errorf("open workspace object for integrity update: %w", err)
 	}
-	defer windows.CloseHandle(writableHandle)
+	defer func() {
+		resultErr = errors.Join(resultErr, windows.CloseHandle(writableHandle))
+	}()
 	if err := windows.SetSecurityInfo(
 		writableHandle,
 		windows.SE_FILE_OBJECT,

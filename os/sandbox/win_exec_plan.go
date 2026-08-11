@@ -64,12 +64,10 @@ func resolveWindowsWorkspaceExecutable(workspace *windowsWorkspace, absolutePath
 	}
 	identity, err := inspectWindowsFileHandle(original)
 	if err != nil {
-		_ = original.Close()
-		return nil, fmt.Errorf("inspect workspace executable: %w", err)
+		return nil, errors.Join(fmt.Errorf("inspect workspace executable: %w", err), original.Close())
 	}
 	if identity.attributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
-		_ = original.Close()
-		return nil, fmt.Errorf("workspace executable must be a regular file")
+		return nil, errors.Join(fmt.Errorf("workspace executable must be a regular file"), original.Close())
 	}
 	if identity.attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
 		_ = original.Close()
