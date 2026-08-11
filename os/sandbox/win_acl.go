@@ -106,8 +106,8 @@ func prepareWindowsWorkspace(cfg Config) (_ *windowsWorkspace, resultErr error) 
 	if err != nil {
 		return nil, fmt.Errorf("resolve Windows workspace handle: %w", err)
 	}
-	if err := validateWindowsPath(canonicalPath); err != nil {
-		return nil, fmt.Errorf("Windows sandbox workspace must use a local DOS path: %w", err)
+	if pathErr := validateWindowsPath(canonicalPath); pathErr != nil {
+		return nil, fmt.Errorf("Windows sandbox workspace must use a local DOS path: %w", pathErr)
 	}
 	if !strings.EqualFold(filepath.Clean(guardCanonicalPath), filepath.Clean(canonicalPath)) {
 		return nil, fmt.Errorf("Windows sandbox workspace path changed while opening the root")
@@ -311,8 +311,8 @@ func (w *windowsWorkspace) walk(visit func(string, *os.File, windowsFileIdentity
 		if !isDirectory && identity.links != 1 {
 			return fmt.Errorf("Windows workspace entry %q has %d hard links; exactly one is required", relativePath, identity.links)
 		}
-		if err := visit(relativePath, file, identity); err != nil {
-			return err
+		if visitErr := visit(relativePath, file, identity); visitErr != nil {
+			return visitErr
 		}
 		if !isDirectory {
 			return nil
@@ -760,14 +760,14 @@ func verifyWindowsPathDeniedByAppContainer(path string, appContainerSID []byte, 
 		resultErr = errors.Join(resultErr, windows.CloseHandle(handle))
 	}()
 	var identity windows.ByHandleFileInformation
-	if err := windows.GetFileInformationByHandle(handle, &identity); err != nil {
-		return err
+	if infoErr := windows.GetFileInformationByHandle(handle, &identity); infoErr != nil {
+		return infoErr
 	}
 	if identity.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
 		return fmt.Errorf("denied path boundary is a reparse point")
 	}
-	if err := verifyWindowsHandleDeniedByAppContainer(handle, blockedSIDs); err != nil {
-		return err
+	if verifyErr := verifyWindowsHandleDeniedByAppContainer(handle, blockedSIDs); verifyErr != nil {
+		return verifyErr
 	}
 	if !exactPathExists || identity.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
 		return nil

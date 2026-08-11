@@ -105,8 +105,8 @@ func (s *windowsSandbox) execLocked(
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, true, fmt.Errorf("sandbox exec context is already done: %w", ctxErr)
 	}
-	if err = enforceWindowsWorkspaceLimits(s.workspace, s.cfg); err != nil {
-		return nil, true, err
+	if limitErr := enforceWindowsWorkspaceLimits(s.workspace, s.cfg); limitErr != nil {
+		return nil, true, limitErr
 	}
 
 	executable, err := resolveWindowsExecutable(s.workspace, command.Path)
@@ -124,8 +124,8 @@ func (s *windowsSandbox) execLocked(
 			return nil, true, errors.Join(err, executable.close(), workingDirectory.close())
 		}
 	}
-	if err = validateSandboxEnvironment(env); err != nil {
-		return nil, true, errors.Join(err, executable.close(), workingDirectory.close())
+	if envErr := validateSandboxEnvironment(env); envErr != nil {
+		return nil, true, errors.Join(envErr, executable.close(), workingDirectory.close())
 	}
 	env, err = validateWindowsCommandEnv(s.workspace, env)
 	if err != nil {

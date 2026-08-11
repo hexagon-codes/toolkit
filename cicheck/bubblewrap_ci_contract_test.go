@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -86,12 +87,19 @@ func TestBubblewrapInstallerSecurityContract(t *testing.T) {
 	root := repositoryRoot(t)
 	path := filepath.Join(root, "scripts", "install-bubblewrap-ci.sh")
 	body := readContractFile(t, path)
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat Bubblewrap installer: %v", err)
+	// Windows 工作树不保留 exec 位（core.filemode=false），改查 git index 的
+	// 文件模式（跨平台一致），确认安装器在仓库中登记为可执行。
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat Bubblewrap installer: %v", err)
+		}
+		if info.Mode().Perm()&0o111 == 0 {
+			t.Fatal("Bubblewrap installer must be executable")
+		}
 	}
-	if info.Mode().Perm()&0o111 == 0 {
-		t.Fatal("Bubblewrap installer must be executable")
+	if err := validateInstallerIndexMode(path); err != nil {
+		t.Fatal(err)
 	}
 	if err := validateBubblewrapInstaller(body); err != nil {
 		t.Fatal(err)
@@ -1563,4 +1571,18 @@ func readContractFile(t *testing.T, path string) string {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return string(body)
+}
+
+// validateInstallerIndexMode 校验安装器在 git index 中的可执行位（跨平台权威来源）。
+func validateInstallerIndexMode(path string) error {
+	cmd := exec.Command("git", "ls-files", "--stage", "--", path)
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("query installer index mode: %w", err)
+	}
+	fields := strings.Fields(strings.TrimSpace(string(output)))
+	if len(fields) < 1 || !strings.HasPrefix(fields[0], "1007") {
+		return fmt.Errorf("Bubblewrap installer must be registered executable in the git index")
+	}
+	return nil
 }
