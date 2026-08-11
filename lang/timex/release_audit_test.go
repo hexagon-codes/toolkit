@@ -2,6 +2,7 @@ package timex
 
 import (
 	"math"
+	"sync"
 	"testing"
 	"time"
 )
@@ -33,8 +34,6 @@ func TestDaysBetweenUsesCivilDatesAcrossDST(t *testing.T) {
 }
 
 func TestNowProviderConcurrentAccess(t *testing.T) {
-	original := Now
-	defer func() { Now = original }()
 	first := func() time.Time { return time.Unix(1, 0) }
 	second := func() time.Time { return time.Unix(2, 0) }
 	done := make(chan struct{})
@@ -44,12 +43,65 @@ func TestNowProviderConcurrentAccess(t *testing.T) {
 			_ = IsToday(time.Unix(1, 0))
 		}
 	}()
+	restores := make([]func(), 0, 10_000)
 	for index := range 10_000 {
 		if index%2 == 0 {
-			Now = first
+			restores = append(restores, SetNowProvider(first))
 		} else {
-			Now = second
+			restores = append(restores, SetNowProvider(second))
 		}
 	}
 	<-done
+	for index := len(restores) - 1; index >= 0; index-- {
+		restores[index]()
+	}
+}
+
+func TestNowProviderOutOfOrderRestoreDoesNotOverwriteNewerProvider(t *testing.T) {
+	rootTime := time.Unix(10, 0)
+	firstTime := time.Unix(20, 0)
+	secondTime := time.Unix(30, 0)
+	restoreRoot := SetNowProvider(func() time.Time { return rootTime })
+	defer restoreRoot()
+	restoreFirst := SetNowProvider(func() time.Time { return firstTime })
+	restoreSecond := SetNowProvider(func() time.Time { return secondTime })
+
+	restoreFirst()
+	if got := Now(); !got.Equal(secondTime) {
+		t.Fatalf("Now() after stale restore = %v, want newest provider %v", got, secondTime)
+	}
+	restoreSecond()
+	if got := Now(); !got.Equal(rootTime) {
+		t.Fatalf("Now() after all nested restores = %v, want root provider %v", got, rootTime)
+	}
+}
+
+func TestNowProviderConcurrentRestoreIsIdempotent(t *testing.T) {
+	rootTime := time.Unix(100, 0)
+	restoreRoot := SetNowProvider(func() time.Time { return rootTime })
+	defer restoreRoot()
+
+	const providerCount = 128
+	restores := make([]func(), 0, providerCount)
+	for index := range providerCount {
+		fixed := time.Unix(int64(index+101), 0)
+		restores = append(restores, SetNowProvider(func() time.Time { return fixed }))
+	}
+
+	var wait sync.WaitGroup
+	for _, restore := range restores {
+		wait.Add(2)
+		go func() {
+			defer wait.Done()
+			restore()
+		}()
+		go func() {
+			defer wait.Done()
+			restore()
+		}()
+	}
+	wait.Wait()
+	if got := Now(); !got.Equal(rootTime) {
+		t.Fatalf("Now() after concurrent restores = %v, want root provider %v", got, rootTime)
+	}
 }

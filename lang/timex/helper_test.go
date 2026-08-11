@@ -376,12 +376,11 @@ func TestDaysInYear(t *testing.T) {
 }
 
 func TestAge(t *testing.T) {
-	// Mock current time
-	originalNow := Now
-	Now = func() time.Time {
+	// 设置固定当前时间。
+	restore := SetNowProvider(func() time.Time {
 		return time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC)
-	}
-	defer func() { Now = originalNow }()
+	})
+	defer restore()
 
 	// Birthday already passed this year
 	birthday := time.Date(2000, 3, 15, 0, 0, 0, 0, time.UTC)

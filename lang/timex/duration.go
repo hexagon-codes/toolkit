@@ -181,7 +181,7 @@ func ParseDuration(s string) (time.Duration, error) {
 		}
 
 		negative := matches[1] == "-"
-		limit := uint64(^uint64(0) >> 1)
+		limit := ^uint64(0) >> 1
 		if negative {
 			limit++
 		}
@@ -211,7 +211,7 @@ func ParseDuration(s string) (time.Duration, error) {
 		}
 
 		if negative {
-			if magnitude == uint64(^uint64(0)>>1)+1 {
+			if magnitude == (^uint64(0)>>1)+1 {
 				return time.Duration(-1 << 63), nil
 			}
 			return -time.Duration(magnitude), nil

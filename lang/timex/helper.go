@@ -1,11 +1,61 @@
 package timex
 
 import (
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
-// Now 返回当前时间（方便测试时 mock）
-var Now = time.Now
+type nowProviderSnapshot struct {
+	provider func() time.Time
+	previous *nowProviderSnapshot
+	active   bool
+}
+
+var initialNowProvider = &nowProviderSnapshot{provider: time.Now, active: true}
+var nowProvider atomic.Pointer[nowProviderSnapshot]
+var nowProviderMu sync.Mutex
+
+func init() {
+	nowProvider.Store(initialNowProvider)
+}
+
+// Now 返回当前时间。
+func Now() time.Time {
+	return nowProvider.Load().provider()
+}
+
+// SetNowProvider 原子替换当前时间提供函数，并返回恢复函数。
+func SetNowProvider(provider func() time.Time) (restore func()) {
+	if provider == nil {
+		panic("timex: now provider must not be nil")
+	}
+	snapshot := &nowProviderSnapshot{provider: provider, active: true}
+	nowProviderMu.Lock()
+	snapshot.previous = nowProvider.Load()
+	nowProvider.Store(snapshot)
+	nowProviderMu.Unlock()
+
+	var restoreOnce sync.Once
+	return func() {
+		restoreOnce.Do(func() {
+			nowProviderMu.Lock()
+			defer nowProviderMu.Unlock()
+			snapshot.active = false
+			if nowProvider.Load() != snapshot {
+				return
+			}
+			previous := snapshot.previous
+			for previous != nil && !previous.active {
+				previous = previous.previous
+			}
+			if previous == nil {
+				previous = initialNowProvider
+			}
+			nowProvider.Store(previous)
+		})
+	}
+}
 
 // IsToday 判断是否为今天
 func IsToday(t time.Time) bool {
