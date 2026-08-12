@@ -10,7 +10,7 @@ toolkit 是 Hexagon 生态的**共享底座**，被多个独立产品依赖（to
 
 ## 自动门禁
 1. **API 兼容性检测**：`.github/workflows/api-compat.yml` 用 `gorelease` 对照上一 tag 检测破坏式变更，提示版本号应如何升。
-2. **下游接缝契约**：`.github/workflows/downstream.yml` 在 go.work 下用本仓改动跑全部直接消费者的 build+test —— 下游绿才算接口未破。
+2. **下游接缝契约**：`.github/workflows/downstream.yml` 在 go.work 下对配置的消费者执行 build 和 `go test -run '^$'`，验证编译契约；不运行下游测试，运行行为由各下游仓库的 CI 验证。
 
 ## 弃用流程
 - `v1.0.0` 以后，弃用先标 `// Deprecated: 用 X 替代。将在 vN 移除。`，至少保留一个 minor 周期并记录到 CHANGELOG，到期后只能在下一个 major 移除。
@@ -18,4 +18,4 @@ toolkit 是 Hexagon 生态的**共享底座**，被多个独立产品依赖（to
 
 ## 升级建议（给上游 hexagon / hexclaw）
 - pin 明确版本；`v0.x` 的 patch 可直接升级，minor 必须先检查 `BREAKING` 清单并完成迁移。
-- 下游门禁用于证明当前源码组合能够协同构建和测试，不替代调用方对破坏式 minor 的升级评估。
+- 下游门禁用于证明所配置源码组合能够编译，不证明运行时行为，也不替代调用方对破坏式 minor 的升级评估。

@@ -23,8 +23,10 @@
 ## 快速开始
 
 ```bash
-go get github.com/hexagon-codes/toolkit@v0.3.0
+go get github.com/hexagon-codes/toolkit@v0.3.6
 ```
+
+上述安装命令需在 `v0.3.6` 标签发布后使用。
 
 ### 类型转换
 
@@ -1354,6 +1356,11 @@ filesystem、network、process-containment 和 output 隔离，不声称提供 M
 分别证明同一不变量。任一证明不成立时，必须在任何载荷副作用发生前拒绝。
 
 ## 近期更新
+
+> 以下接口位于当前工作区，计划随 `v0.3.6` 提供；实际可用性以最终发布的源码为准：
+> - `blobstore.Store.SaveStreamAllowEmpty` 允许保存实际存在的零字节文件；`SaveStream` 仍拒绝空内容。该方法不属于 `Blobstore` 接口。
+> - `httpx.NewReplayGuardTransport` 包装标准 HTTP/1.1 和 TLS HTTP/2 传输以阻止内部重放；重定向和应用层重试仍由调用方控制，自定义 HTTP/2 和明文 HTTP/2 不受支持。
+> - `hostprocess.Run` 管理宿主进程生命周期，不提供沙箱隔离。调用方提供并管理标准流文件；取消时终止本次进程组或 Job。
 
 - **infra/redisconn**: 新增 Single / Cluster / Sentinel 统一 Redis 连接工厂，支持 ACL 账号密码、Sentinel 双凭据、TLS、动态凭据与启动探活；项目级策略主动拒绝 password-only
 - **net/httpx**: `RateLimitedPool.Close()` 无返回值，并复用底层连接池的原子关闭保证幂等，多次调用安全

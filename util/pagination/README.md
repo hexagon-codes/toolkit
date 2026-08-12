@@ -37,7 +37,7 @@ fmt.Println(p.HasNext)     // true
 
 ```go
 // 获取分页参数
-page := 2
+page := int64(2)
 pageSize := 20
 total := int64(156)
 
@@ -75,11 +75,11 @@ fmt.Println(p.Page)  // 3 (offset 20 ÷ limit 10 + 1)
 
 ```go
 type Pagination struct {
-    Page       int   // 当前页码（从1开始）
+    Page       int64 // 当前页码（从1开始）
     PageSize   int   // 每页大小
     Total      int64 // 总记录数
-    TotalPages int   // 总页数
-    Offset     int   // 偏移量（用于 SQL OFFSET）
+    TotalPages int64 // 总页数
+    Offset     int64 // 偏移量（用于 SQL OFFSET）
     Limit      int   // 限制数量（用于 SQL LIMIT）
     HasPrev    bool  // 是否有上一页
     HasNext    bool  // 是否有下一页
@@ -90,20 +90,20 @@ type Pagination struct {
 
 ```go
 // New 创建分页信息
-New(page, pageSize int, total int64) *Pagination
+New(page int64, pageSize int, total int64) *Pagination
 
 // NewDefault 创建默认分页（第1页，每页10条）
 NewDefault(total int64) *Pagination
 
 // NewWithOffset 根据 offset 和 limit 创建分页
-NewWithOffset(offset, limit int, total int64) *Pagination
+NewWithOffset(offset int64, limit int, total int64) *Pagination
 ```
 
 ### 方法
 
 ```go
 // GetRange 获取当前页的数据范围 [start, end)
-GetRange() (start, end int)
+GetRange() (start, end int64)
 
 // IsFirstPage 是否第一页
 IsFirstPage() bool
@@ -112,23 +112,25 @@ IsFirstPage() bool
 IsLastPage() bool
 
 // PrevPage 获取上一页页码
-PrevPage() int
+PrevPage() int64
 
 // NextPage 获取下一页页码
-NextPage() int
+NextPage() int64
 
 // GetPageNumbers 获取页码列表（用于分页导航）
-GetPageNumbers(maxDisplay int) []int
+GetPageNumbers(maxDisplay int) []int64
 ```
 
 ## 使用场景
+
+以下 GORM 示例将 `int64` 偏移转换为 `int`；实际使用前应确认偏移量在目标平台的 `int` 范围内。
 
 ### 1. RESTful API 分页
 
 ```go
 func ListUsers(c *gin.Context) {
     // 获取分页参数
-    page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+    page, _ := strconv.ParseInt(c.DefaultQuery("page", "1"), 10, 64)
     pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "10"))
 
     // 查询总数
@@ -140,7 +142,7 @@ func ListUsers(c *gin.Context) {
 
     // 查询数据
     var users []User
-    db.Limit(p.Limit).Offset(p.Offset).Find(&users)
+    db.Limit(p.Limit).Offset(int(p.Offset)).Find(&users)
 
     // 返回响应
     c.JSON(200, gin.H{
@@ -166,7 +168,7 @@ func ListUsers(c *gin.Context) {
 ### 2. 数据库分页查询
 
 ```go
-func GetArticles(page, pageSize int) ([]Article, *pagination.Pagination, error) {
+func GetArticles(page int64, pageSize int) ([]Article, *pagination.Pagination, error) {
     // 查询总数
     var total int64
     if err := db.Model(&Article{}).Count(&total).Error; err != nil {
@@ -178,7 +180,7 @@ func GetArticles(page, pageSize int) ([]Article, *pagination.Pagination, error) 
 
     // 查询数据
     var articles []Article
-    err := db.Limit(p.Limit).Offset(p.Offset).
+    err := db.Limit(p.Limit).Offset(int(p.Offset)).
         Order("created_at DESC").
         Find(&articles).Error
 
@@ -224,6 +226,9 @@ func RenderPagination(w http.ResponseWriter, p *pagination.Pagination) {
 ```go
 func ShowPageInfo(p *pagination.Pagination) string {
     start, end := p.GetRange()
+    if start == end {
+        return fmt.Sprintf("显示 0 条，共 %d 条", p.Total)
+    }
     return fmt.Sprintf("显示 %d-%d 条，共 %d 条", start+1, end, p.Total)
 }
 
@@ -231,10 +236,10 @@ func ShowPageInfo(p *pagination.Pagination) string {
 // "显示 11-20 条，共 95 条"
 ```
 
-### 5. 游标分页（无限滚动）
+### 5. 偏移量分页（无限滚动）
 
 ```go
-func GetArticlesWithCursor(offset, limit int) ([]Article, *pagination.Pagination, error) {
+func GetArticlesWithOffset(offset int64, limit int) ([]Article, *pagination.Pagination, error) {
     // 查询总数
     var total int64
     db.Model(&Article{}).Count(&total)
@@ -244,7 +249,7 @@ func GetArticlesWithCursor(offset, limit int) ([]Article, *pagination.Pagination
 
     // 查询数据
     var articles []Article
-    err := db.Limit(p.Limit).Offset(p.Offset).Find(&articles).Error
+    err := db.Limit(p.Limit).Offset(int(p.Offset)).Find(&articles).Error
 
     return articles, p, err
 }
@@ -258,18 +263,18 @@ func GetArticlesWithCursor(offset, limit int) ([]Article, *pagination.Pagination
 ### 6. 内存数据分页
 
 ```go
-func PaginateSlice[T any](data []T, page, pageSize int) ([]T, *pagination.Pagination) {
+func PaginateSlice[T any](data []T, page int64, pageSize int) ([]T, *pagination.Pagination) {
     total := int64(len(data))
     p := pagination.New(page, pageSize, total)
 
     start, end := p.GetRange()
 
     // 边界检查
-    if start >= len(data) {
+    if start >= int64(len(data)) {
         return []T{}, p
     }
-    if end > len(data) {
-        end = len(data)
+    if end > int64(len(data)) {
+        end = int64(len(data))
     }
 
     return data[start:end], p
@@ -284,7 +289,7 @@ pagedUsers, p := PaginateSlice(users, 2, 10)
 ### 7. 多条件分页查询
 
 ```go
-func SearchProducts(keyword string, page, pageSize int) ([]Product, *pagination.Pagination, error) {
+func SearchProducts(keyword string, page int64, pageSize int) ([]Product, *pagination.Pagination, error) {
     query := db.Model(&Product{})
 
     // 添加搜索条件
@@ -303,7 +308,7 @@ func SearchProducts(keyword string, page, pageSize int) ([]Product, *pagination.
 
     // 查询数据
     var products []Product
-    err := query.Limit(p.Limit).Offset(p.Offset).Find(&products).Error
+    err := query.Limit(p.Limit).Offset(int(p.Offset)).Find(&products).Error
 
     return products, p, err
 }
@@ -378,13 +383,7 @@ start, end := p.GetRange()
 
 ## 性能
 
-```
-New():           < 1μs
-GetRange():      < 1μs
-GetPageNumbers(): < 10μs (取决于页数)
-```
-
-分页计算非常轻量，对性能几乎无影响。
+`New` 和 `GetRange` 执行固定数量的计算；`GetPageNumbers` 根据返回的页码数量分配切片，最多返回 `MaxPageNumbers` 个页码。实际耗时取决于运行环境。
 
 ## 注意事项
 
@@ -397,7 +396,7 @@ GetPageNumbers(): < 10μs (取决于页数)
    - 防止超大查询影响性能
 
 3. **总页数计算**：
-   - 使用向上取整：`(total + pageSize - 1) / pageSize`
+   - 使用商和余数计算向上取整，避免整数溢出
    - 空数据时总页数为 0
 
 4. **JSON 序列化**：

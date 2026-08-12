@@ -447,13 +447,13 @@ func MeasurePerformance(funcName string, fn func()) {
 ```go
 ms := time.Now().UnixMilli()  // millisecond precision
 timestamp := timex.MsecFormat(ms)
-// Output: "2024-01-29 15:04:05.123"
+// Output has second precision; use MsecFormatWithLayout for fractional seconds.
 ```
 
 ### When to Use Seconds
 
 - **Unix timestamp standard**: Classic Unix timestamps are in seconds
-- **Storage optimization**: Second-precision saves storage (4 bytes vs 8 bytes)
+- **Storage convention**: Choose units and integer types to match the target system
 - **System integration**: Interacting with legacy systems
 - **Simplified processing**: Millisecond precision not needed
 
@@ -467,11 +467,11 @@ timestamp := timex.SecFormat(sec)
 
 | Metric | Milliseconds | Seconds |
 |--------|-------------|---------|
-| Precision | 1ms (millionth of a second) | 1s (one second) |
-| Storage size | 8 bytes (int64) | 4 bytes (int32) |
-| Range | ±292M years | ±136 years |
+| Precision | 1ms (thousandth of a second) | 1s (one second) |
+| Storage size | 8 bytes (int64) | 8 bytes (int64) |
+| Parameter type | `int64` milliseconds | `int64` seconds |
 | Typical use | Modern applications | Legacy systems/standards |
-| JavaScript compatible | ✅ Yes | ❌ No |
+| JavaScript compatibility | Values must fit the safe integer range | Values must fit the safe integer range |
 
 ## Relationship with the Standard Library time Package
 
@@ -481,10 +481,10 @@ timex is a **convenience wrapper** around Go's standard `time` package, not a re
 
 | Feature | Standard time | timex |
 |---------|--------------|-------|
-| Get current time | `time.Now()` ✅ | ❌ |
-| Time arithmetic | `time.Add()` ✅ | ❌ |
-| Time parsing | `time.Parse()` ✅ | ❌ |
-| Time formatting | `t.Format()` ✅ | `timex.Format()` simplified ✅ |
+| Get current time | `time.Now()` | `timex.Now()` |
+| Time arithmetic | `time.Time.Add()` | `timex.AddDays()` and others |
+| Time parsing | `time.Parse()` | `timex.ParseInShanghai()` and others |
+| Time formatting | `t.Format()` ✅ | `timex.MsecFormat()` / `timex.SecFormat()` simplified ✅ |
 | Timestamp to string | 2 steps required | 1 step ✅ |
 
 ### Standard Library Way
@@ -605,13 +605,13 @@ result := timex.MsecFormat(ms)
 
 ### 5. Format Validation
 
-An invalid layout will cause a panic (this is the behavior of time.Time.Format()).
+Layouts use Go reference time syntax; unrecognized text is preserved literally and does not cause a panic.
 
 ```go
-// ❌ Wrong format
-timex.MsecFormatWithLayout(ms, "invalid")  // panic
+// Unrecognized text is emitted literally
+timex.MsecFormatWithLayout(ms, "invalid")  // returns "invalid"
 
-// ✅ Correct format
+// Use a reference-time layout
 timex.MsecFormatWithLayout(ms, "2006-01-02")  // works normally
 ```
 

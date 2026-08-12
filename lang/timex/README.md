@@ -447,13 +447,13 @@ func MeasurePerformance(funcName string, fn func()) {
 ```go
 ms := time.Now().UnixMilli()  // 毫秒精度
 timestamp := timex.MsecFormat(ms)
-// Output: "2024-01-29 15:04:05.123"
+// 输出到秒；需要毫秒时使用 MsecFormatWithLayout 和包含小数秒的 layout。
 ```
 
 ### 何时使用秒级
 
 - **Unix 时间戳标准**：经典 Unix 时间戳为秒
-- **存储优化**：秒级可节省存储空间（4 字节 vs 8 字节）
+- **存储约定**：按目标系统的时间单位和整数类型选择
 - **系统集成**：与旧系统交互
 - **简化处理**：不需要毫秒精度
 
@@ -467,11 +467,11 @@ timestamp := timex.SecFormat(sec)
 
 | 指标 | 毫秒 | 秒级 |
 |------|------|------|
-| 精度 | 1ms（百万分之一秒） | 1s（一秒） |
-| 存储大小 | 8 字节（int64） | 4 字节（int32） |
-| 范围 | ±292M 年 | ±136 年 |
+| 精度 | 1ms（千分之一秒） | 1s（一秒） |
+| 存储大小 | 8 字节（int64） | 8 字节（int64） |
+| 参数类型 | `int64` 毫秒 | `int64` 秒 |
 | 典型用途 | 现代应用 | 旧系统/标准 |
-| JavaScript 兼容 | ✅ 是 | ❌ 否 |
+| JavaScript 兼容 | 数值须在安全整数范围内 | 数值须在安全整数范围内 |
 
 ## 与标准库 time 包的关系
 
@@ -481,10 +481,10 @@ timex 是 Go 标准库 `time` 包的**便利包装**，并非替代品。
 
 | 功能 | 标准库 time | timex |
 |------|-----------|-------|
-| 获取当前时间 | `time.Now()` ✅ | ❌ |
-| 时间计算 | `time.Add()` ✅ | ❌ |
-| 时间解析 | `time.Parse()` ✅ | ❌ |
-| 时间格式化 | `t.Format()` ✅ | `timex.Format()` 简化版 ✅ |
+| 获取当前时间 | `time.Now()` | `timex.Now()` |
+| 时间计算 | `time.Time.Add()` | `timex.AddDays()` 等 |
+| 时间解析 | `time.Parse()` | `timex.ParseInShanghai()` 等 |
+| 时间格式化 | `t.Format()` ✅ | `timex.MsecFormat()` / `timex.SecFormat()` 简化版 ✅ |
 | 时间戳转字符串 | 需要 2 步 | 1 步 ✅ |
 
 ### 标准库方式
@@ -605,13 +605,13 @@ result := timex.MsecFormat(ms)
 
 ### 5. 格式验证
 
-无效的 layout 会导致 panic（这是 time.Time.Format() 的行为）。
+layout 使用 Go 的参考时间格式；未识别的文本按字面保留，不会因此 panic。
 
 ```go
-// ❌ 错误的格式
-timex.MsecFormatWithLayout(ms, "invalid")  // panic
+// 未识别的文本按字面输出
+timex.MsecFormatWithLayout(ms, "invalid")  // 输出 "invalid"
 
-// ✅ 正确的格式
+// 使用参考时间布局
 timex.MsecFormatWithLayout(ms, "2006-01-02")  // 正常
 ```
 

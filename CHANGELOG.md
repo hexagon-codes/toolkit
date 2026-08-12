@@ -2,6 +2,18 @@
 
 本文件记录 toolkit 的用户可见变更，遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.3.6] - 2026-11-01
+
+### Added
+
+- `blobstore.Store.SaveStreamAllowEmpty`：保存实际存在的零字节文件；`SaveStream` 仍拒绝空内容，新方法不属于 `Blobstore` 接口。
+- `net/httpx.NewReplayGuardTransport`：包装标准 HTTP/1.1 与 TLS HTTP/2 传输，阻止内部重放；重定向与应用层重试仍由调用方控制，自定义 HTTP/2 和明文 HTTP/2 不在支持范围内。
+- `os/hostprocess`：运行宿主命令并管理进程组或 Windows Job 的生命周期，调用方负责提供和管理标准流文件；该包不提供沙箱隔离。
+
+### Changed
+
+- 更新中英文使用文档，修正分页类型、时间格式化说明以及下游编译合同的描述。
+
 ## [0.3.5] - 2026-10-04
 
 ### Changed
@@ -13,6 +25,24 @@
 - `os/sandbox`：Linux 工作区链接计数将 `syscall.Stat_t.Nlink` 显式转换为 `uint64`，修复 Linux ARM64 上字段类型差异导致的编译失败，保留原有链接计数校验。
 - Windows 测试夹具在 Job 限额查询期间固定输出缓冲区，避免 `uintptr` 包装调用中的 Go 栈地址移动；原限额断言保持不变。
 - Go 源文件明确使用 LF 检出，避免 Windows 自动换行转换影响格式检查。
+
+## [0.3.4] - 2026-08-13
+
+### Changed
+
+- CI 收敛至公共库基线；下游合同改为构建及测试编译检查，完整测试由下游仓库负责。
+
+## [0.3.3] - 2026-08-13
+
+### Fixed
+
+- API 兼容门禁移除具体版本号硬编码，使用标签确定对比基线。
+
+## [0.3.2] - 2026-08-13
+
+### Fixed
+
+- `os/sandbox`：Windows 目录身份检查使用 NTFS 128 位文件 ID。
 
 ## [0.3.1] - 2026-08-12
 

@@ -23,8 +23,10 @@ A production-grade Go general-purpose toolkit with domain-driven design principl
 ## Quick Start
 
 ```bash
-go get github.com/hexagon-codes/toolkit@v0.3.0
+go get github.com/hexagon-codes/toolkit@v0.3.6
 ```
+
+The installation command above requires the `v0.3.6` tag to be published first.
 
 ### Type Conversion
 
@@ -1370,6 +1372,11 @@ strict no-fork, Linux with a PID namespace, and Windows with a Job Object. If an
 proof is unavailable, the backend must reject before any payload side effect.
 
 ## Recent Changes
+
+> The following APIs are present in the current working tree and planned for `v0.3.6`. Their availability depends on the final published source:
+> - `blobstore.Store.SaveStreamAllowEmpty` permits an actual zero-byte file; `SaveStream` still rejects empty content. This method is not part of the `Blobstore` interface.
+> - `httpx.NewReplayGuardTransport` wraps standard HTTP/1.1 and TLS HTTP/2 transports to block internal replay. Redirects and application retries remain the caller's responsibility; custom HTTP/2 handlers and cleartext HTTP/2 are unsupported.
+> - `hostprocess.Run` manages a host process lifecycle; it does not provide sandbox isolation. Callers provide and manage the standard stream files; cancellation terminates the process group or Job.
 
 - **infra/redisconn**: Added one Redis connection factory for Single, Cluster, and Sentinel with ACL username/password, separate Sentinel credentials, TLS, dynamic credentials, and startup probing; project policy intentionally rejects password-only configuration
 - **net/httpx**: `RateLimitedPool.Close()` now has no return value and safely closes the underlying pool on repeated calls

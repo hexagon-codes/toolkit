@@ -37,7 +37,7 @@ fmt.Println(p.HasNext)     // true
 
 ```go
 // Get pagination parameters
-page := 2
+page := int64(2)
 pageSize := 20
 total := int64(156)
 
@@ -75,11 +75,11 @@ fmt.Println(p.Page)  // 3 (offset 20 ÷ limit 10 + 1)
 
 ```go
 type Pagination struct {
-    Page       int   // Current page number (starts at 1)
+    Page       int64 // Current page number (starts at 1)
     PageSize   int   // Page size
     Total      int64 // Total record count
-    TotalPages int   // Total page count
-    Offset     int   // Offset (for SQL OFFSET)
+    TotalPages int64 // Total page count
+    Offset     int64 // Offset (for SQL OFFSET)
     Limit      int   // Limit (for SQL LIMIT)
     HasPrev    bool  // Has previous page
     HasNext    bool  // Has next page
@@ -90,20 +90,20 @@ type Pagination struct {
 
 ```go
 // New creates pagination info
-New(page, pageSize int, total int64) *Pagination
+New(page int64, pageSize int, total int64) *Pagination
 
 // NewDefault creates default pagination (page 1, 10 items per page)
 NewDefault(total int64) *Pagination
 
 // NewWithOffset creates pagination from offset and limit
-NewWithOffset(offset, limit int, total int64) *Pagination
+NewWithOffset(offset int64, limit int, total int64) *Pagination
 ```
 
 ### Methods
 
 ```go
 // GetRange gets the data range for the current page [start, end)
-GetRange() (start, end int)
+GetRange() (start, end int64)
 
 // IsFirstPage checks if it's the first page
 IsFirstPage() bool
@@ -112,23 +112,25 @@ IsFirstPage() bool
 IsLastPage() bool
 
 // PrevPage gets the previous page number
-PrevPage() int
+PrevPage() int64
 
 // NextPage gets the next page number
-NextPage() int
+NextPage() int64
 
 // GetPageNumbers gets the page number list (for pagination navigation)
-GetPageNumbers(maxDisplay int) []int
+GetPageNumbers(maxDisplay int) []int64
 ```
 
 ## Use Cases
+
+The GORM examples convert the `int64` offset to `int`; check that the offset fits the target platform’s `int` range before converting in production.
 
 ### 1. RESTful API Pagination
 
 ```go
 func ListUsers(c *gin.Context) {
     // Get pagination parameters
-    page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+    page, _ := strconv.ParseInt(c.DefaultQuery("page", "1"), 10, 64)
     pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "10"))
 
     // Count total records
@@ -140,7 +142,7 @@ func ListUsers(c *gin.Context) {
 
     // Query data
     var users []User
-    db.Limit(p.Limit).Offset(p.Offset).Find(&users)
+    db.Limit(p.Limit).Offset(int(p.Offset)).Find(&users)
 
     // Return response
     c.JSON(200, gin.H{
@@ -166,7 +168,7 @@ func ListUsers(c *gin.Context) {
 ### 2. Database Paginated Query
 
 ```go
-func GetArticles(page, pageSize int) ([]Article, *pagination.Pagination, error) {
+func GetArticles(page int64, pageSize int) ([]Article, *pagination.Pagination, error) {
     // Count total records
     var total int64
     if err := db.Model(&Article{}).Count(&total).Error; err != nil {
@@ -178,7 +180,7 @@ func GetArticles(page, pageSize int) ([]Article, *pagination.Pagination, error) 
 
     // Query data
     var articles []Article
-    err := db.Limit(p.Limit).Offset(p.Offset).
+    err := db.Limit(p.Limit).Offset(int(p.Offset)).
         Order("created_at DESC").
         Find(&articles).Error
 
@@ -224,6 +226,9 @@ func RenderPagination(w http.ResponseWriter, p *pagination.Pagination) {
 ```go
 func ShowPageInfo(p *pagination.Pagination) string {
     start, end := p.GetRange()
+    if start == end {
+        return fmt.Sprintf("Showing 0 of %d", p.Total)
+    }
     return fmt.Sprintf("Showing %d-%d of %d", start+1, end, p.Total)
 }
 
@@ -231,10 +236,10 @@ func ShowPageInfo(p *pagination.Pagination) string {
 // "Showing 11-20 of 95"
 ```
 
-### 5. Cursor Pagination (Infinite Scroll)
+### 5. Offset Pagination (Infinite Scroll)
 
 ```go
-func GetArticlesWithCursor(offset, limit int) ([]Article, *pagination.Pagination, error) {
+func GetArticlesWithOffset(offset int64, limit int) ([]Article, *pagination.Pagination, error) {
     // Count total records
     var total int64
     db.Model(&Article{}).Count(&total)
@@ -244,7 +249,7 @@ func GetArticlesWithCursor(offset, limit int) ([]Article, *pagination.Pagination
 
     // Query data
     var articles []Article
-    err := db.Limit(p.Limit).Offset(p.Offset).Find(&articles).Error
+    err := db.Limit(p.Limit).Offset(int(p.Offset)).Find(&articles).Error
 
     return articles, p, err
 }
@@ -258,18 +263,18 @@ func GetArticlesWithCursor(offset, limit int) ([]Article, *pagination.Pagination
 ### 6. In-Memory Data Pagination
 
 ```go
-func PaginateSlice[T any](data []T, page, pageSize int) ([]T, *pagination.Pagination) {
+func PaginateSlice[T any](data []T, page int64, pageSize int) ([]T, *pagination.Pagination) {
     total := int64(len(data))
     p := pagination.New(page, pageSize, total)
 
     start, end := p.GetRange()
 
     // Boundary check
-    if start >= len(data) {
+    if start >= int64(len(data)) {
         return []T{}, p
     }
-    if end > len(data) {
-        end = len(data)
+    if end > int64(len(data)) {
+        end = int64(len(data))
     }
 
     return data[start:end], p
@@ -284,7 +289,7 @@ pagedUsers, p := PaginateSlice(users, 2, 10)
 ### 7. Multi-Condition Paginated Query
 
 ```go
-func SearchProducts(keyword string, page, pageSize int) ([]Product, *pagination.Pagination, error) {
+func SearchProducts(keyword string, page int64, pageSize int) ([]Product, *pagination.Pagination, error) {
     query := db.Model(&Product{})
 
     // Add search conditions
@@ -303,7 +308,7 @@ func SearchProducts(keyword string, page, pageSize int) ([]Product, *pagination.
 
     // Query data
     var products []Product
-    err := query.Limit(p.Limit).Offset(p.Offset).Find(&products).Error
+    err := query.Limit(p.Limit).Offset(int(p.Offset)).Find(&products).Error
 
     return products, p, err
 }
@@ -378,13 +383,7 @@ start, end := p.GetRange()
 
 ## Performance
 
-```
-New():           < 1μs
-GetRange():      < 1μs
-GetPageNumbers(): < 10μs (depends on page count)
-```
-
-Pagination calculation is very lightweight with almost no performance impact.
+`New` and `GetRange` perform a fixed amount of work. `GetPageNumbers` allocates a slice for the returned pages, up to `MaxPageNumbers` entries. Actual timings depend on the environment.
 
 ## Notes
 
@@ -397,7 +396,7 @@ Pagination calculation is very lightweight with almost no performance impact.
    - Prevents overly large queries from impacting performance
 
 3. **Total Page Count Calculation**:
-   - Uses ceiling division: `(total + pageSize - 1) / pageSize`
+   - Uses quotient and remainder for ceiling division to avoid integer overflow
    - Total pages is 0 for empty data
 
 4. **JSON Serialization**:
