@@ -5,19 +5,19 @@ package sandbox
 import (
 	"fmt"
 	"os"
-	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-// sandboxCreationTime 返回路径对应目录的创建时间。NTFS 上目录被替换必然产生
-// 新的创建时间，而沙箱对 DACL/integrity 的修改不会改变它，因此可作为
-// "文件索引可能被复用"场景下的可靠身份判据。
-func sandboxCreationTime(path string) time.Time {
+// sandboxCreationTime 返回路径对应目录创建时间的 FILETIME 原始值（1601 年起的
+// 100ns 单位）。直接用原始值比较，避免 Filetime.Nanoseconds 在 2026 年之后
+// 因 int64 溢出损失精度。NTFS 上目录被替换必然产生新的创建时间，而沙箱对
+// DACL/integrity 的修改不会改变它，可作为"文件索引可能被复用"场景下的可靠判据。
+func sandboxCreationTime(path string) uint64 {
 	pathPointer, err := windows.UTF16PtrFromString(path)
 	if err != nil {
-		return time.Time{}
+		return 0
 	}
 	handle, err := windows.CreateFile(
 		pathPointer,
@@ -30,7 +30,7 @@ func sandboxCreationTime(path string) time.Time {
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "sandbox: read creation time for %q: %v\n", path, err)
-		return time.Time{}
+		return 0
 	}
 	defer func() {
 		if closeErr := windows.CloseHandle(handle); closeErr != nil {
@@ -40,23 +40,28 @@ func sandboxCreationTime(path string) time.Time {
 	var info windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
 		fmt.Fprintf(os.Stderr, "sandbox: read creation time info for %q: %v\n", path, err)
-		return time.Time{}
+		return 0
 	}
-	return time.Unix(0, info.CreationTime.Nanoseconds())
+	return uint64(info.CreationTime.HighDateTime)<<32 | uint64(info.CreationTime.LowDateTime)
 }
 
 // sandboxIdentityExtraMatches 对比目录创建时间；任一环节取不到创建时间都按
 // fail-closed 视为身份已变化（无法证明相同即不可信），避免文件索引复用或
 // 创建时间不可读时把替换后的目录误判为原身份。
 func sandboxIdentityExtraMatches(identity sandboxPathIdentity, current os.FileInfo) bool {
-	if identity.creationTime.IsZero() {
+	if identity.creationTime == 0 {
 		return false
 	}
 	currentCreation := sandboxCreationTime(identity.path)
-	if currentCreation.IsZero() {
+	if currentCreation == 0 {
 		return false
 	}
-	return identity.creationTime.Equal(currentCreation)
+	if identity.creationTime != currentCreation {
+		fmt.Fprintf(os.Stderr, "sandbox: directory identity changed: creation time 0x%x != 0x%x (path %s)\n",
+			identity.creationTime, currentCreation, identity.path)
+		return false
+	}
+	return true
 }
 
 // sandboxPathIsReparsePoint 用内核 reparse tag 判定路径是否为 reparse point。

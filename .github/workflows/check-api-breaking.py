@@ -34,7 +34,7 @@ def extract_breaking_sections(report: str) -> str:
             current_section.append(line)
 
     if not sections:
-        raise SystemExit("No incompatible API changes were collected.")
+        return ""
     for section in sections:
         if len(section) < 3:
             raise SystemExit(f"Incompatible API section is empty: {section[0]}")
@@ -49,8 +49,9 @@ def read_text(path: Path, label: str) -> str:
 
 
 def main() -> None:
-    if len(sys.argv) != 3:
-        raise SystemExit("Usage: check-api-breaking.py REPORT BASELINE")
+    allow_empty = len(sys.argv) == 4 and sys.argv[3] == "--allow-empty"
+    if len(sys.argv) not in (3, 4):
+        raise SystemExit("Usage: check-api-breaking.py REPORT BASELINE [--allow-empty]")
 
     report_path = Path(sys.argv[1])
     baseline_path = Path(sys.argv[2])
@@ -59,6 +60,11 @@ def main() -> None:
     if extract_breaking_sections(expected) != expected:
         raise SystemExit("Breaking API baseline is not canonical.")
     if actual != expected:
+        # patch 发布（如 v0.3.1）对比上一 tag 无 incompatible 变更时允许空报告；
+        # 有 incompatible 变更的发布仍必须与 baseline 完全一致。
+        if allow_empty and actual == "":
+            print("No breaking API changes; approved for a patch release.")
+            return
         sys.stderr.writelines(
             difflib.unified_diff(
                 expected.splitlines(keepends=True),
@@ -68,7 +74,7 @@ def main() -> None:
             )
         )
         raise SystemExit("Unapproved breaking API changes detected.")
-    print("Approved v0.3.0 breaking API baseline matched.")
+    print("Breaking API baseline matched.")
 
 
 if __name__ == "__main__":

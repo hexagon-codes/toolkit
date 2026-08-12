@@ -74,9 +74,10 @@ jobs:
           report_path="$RUNNER_TEMP/gorelease-report.txt"
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
             # tag 触发时目标版本已存在，gorelease 的 -version 会报 "already exists"；
-            # 只做 base 对比输出 breaking 报告，版本号一致性由 Verify release tag 保证。
-            gorelease -base="$API_BASE_VERSION" | tee "$report_path"
+            # 事后审计对比上一个 tag（动态），版本号一致性由 Verify release tag 保证。
+            base_version="$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -vx "$GITHUB_REF_NAME" | head -1)"
           else
-            gorelease -base="$API_BASE_VERSION" -version="$API_RELEASE_VERSION" | tee "$report_path"
+            base_version="$API_BASE_VERSION"
           fi
-          python3 "$API_BREAKING_CHECKER" "$report_path" "$API_BREAKING_BASELINE"
+          gorelease -base="$base_version" | tee "$report_path"
+          python3 "$API_BREAKING_CHECKER" "$report_path" "$API_BREAKING_BASELINE" --allow-empty

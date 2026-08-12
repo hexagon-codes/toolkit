@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"time"
 )
 
 // Command 描述一次无需 shell 拼接的结构化进程执行请求。
@@ -29,9 +28,9 @@ type sandboxPathIdentity struct {
 	path      string
 	canonical string
 	info      os.FileInfo
-	// creationTime 是平台额外身份（Windows 目录创建时间），用于识别文件索引
-	// 可能复用的替换场景；非 Windows 平台保持零值。
-	creationTime time.Time
+	// creationTime 是平台额外身份（Windows 目录创建时间的 FILETIME 原始值），
+	// 用于识别文件索引可能复用的替换场景；非 Windows 平台保持零值。
+	creationTime uint64
 }
 
 func snapshotSandboxDirectoryIdentity(field, path string) (sandboxPathIdentity, error) {
