@@ -386,6 +386,9 @@ func runLinuxBwrapProbe(bwrap string, network bool) linuxBwrapProbeResult {
 	// 探测失败原因写入 stderr，便于在无 bwrap/unshare 的托管环境定位具体失败点。
 	probeFailed := func(stage string, err error) linuxBwrapProbeResult {
 		fmt.Fprintf(os.Stderr, "sandbox: bubblewrap probe failed at %s: %v\n", stage, err)
+		if exitErr, ok := err.(*exec.ExitError); ok && len(exitErr.Stderr) != 0 {
+			fmt.Fprintf(os.Stderr, "sandbox: bubblewrap probe stderr: %.4096s\n", exitErr.Stderr)
+		}
 		return linuxBwrapProbeResult{}
 	}
 
