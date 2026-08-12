@@ -312,6 +312,10 @@ func TestWindows_ProcessContainmentRootPayload(t *testing.T) {
 		"-test.run=^TestWindows_ProcessContainmentChildPayload$",
 		"-test.count=1",
 	) // #nosec G204 -- 仅重启工作区内已冻结的测试载荷。
+	// AppContainer 沙箱内 nil stdio 会打开 NUL 设备并被拒绝；显式继承父进程 stdio。
+	child.Stdin = os.Stdin
+	child.Stdout = os.Stdout
+	child.Stderr = os.Stderr
 	if err := child.Start(); err != nil {
 		fmt.Printf("PROCESS_TREE_CHILD_START_FAILED:%v", err)
 		return

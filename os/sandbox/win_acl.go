@@ -348,9 +348,28 @@ func inspectWindowsFileHandle(file *os.File) (windowsFileIdentity, error) {
 	}
 	attributes := info.FileAttributes
 	// FILE_FLAG_OPEN_REPARSE_POINT 打开时 GetFileInformationByHandle 返回的属性
-	// 可能缺失 DIRECTORY/REPARSE_POINT 位；FileAttributeTagInformation 返回的
-	// 属性最完整，以其为准并补齐 reparse tag 检测。
-	// FILE_ATTRIBUTE_TAG_INFO 结构（x/sys/windows 仅有信息类常量，无现成类型）。
+	// 可能缺失 DIRECTORY/REPARSE_POINT 位。权威来源是内核信息类查询：
+	//   - FileStandardInformation.Directory 判定对象是否为目录类
+	//   - FileAttributeTagInformation.ReparseTag 判定是否为 reparse point
+	// 两者对 junction/mount point 均给出可靠结果。
+	// FILE_STANDARD_INFORMATION 结构（x/sys/windows 无现成类型与信息类常量）。
+	const fileStandardInformation = 5
+	var standardInfo struct {
+		allocationSize int64
+		endOfFile      int64
+		numberOfLinks  uint32
+		deletePending  uint8
+		directory      uint8
+	}
+	if err := windows.NtQueryInformationFile(
+		windows.Handle(file.Fd()),
+		&windows.IO_STATUS_BLOCK{},
+		(*byte)(unsafe.Pointer(&standardInfo)),
+		uint32(unsafe.Sizeof(standardInfo)),
+		fileStandardInformation,
+	); err == nil && standardInfo.directory != 0 {
+		attributes |= windows.FILE_ATTRIBUTE_DIRECTORY
+	}
 	var tagInfo struct {
 		fileAttributes uint32
 		reparseTag     uint32
@@ -361,7 +380,9 @@ func inspectWindowsFileHandle(file *os.File) (windowsFileIdentity, error) {
 		(*byte)(unsafe.Pointer(&tagInfo)),
 		uint32(unsafe.Sizeof(tagInfo)),
 	); err == nil {
-		attributes = tagInfo.fileAttributes
+		if tagInfo.fileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+			attributes |= windows.FILE_ATTRIBUTE_REPARSE_POINT
+		}
 		if tagInfo.reparseTag != 0 {
 			attributes |= windows.FILE_ATTRIBUTE_REPARSE_POINT
 		}

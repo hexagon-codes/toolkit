@@ -64,6 +64,12 @@ func TestSandboxExecRejectsNilContextWithoutPanic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Windows 上未关闭的沙箱句柄会占用工作区目录，阻止 t.TempDir 清理。
+	t.Cleanup(func() {
+		if closeErr := sandboxInstance.Close(); closeErr != nil {
+			t.Errorf("Close() error = %v", closeErr)
+		}
+	})
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			t.Fatalf("Exec(nil, ...) panicked: %v", recovered)

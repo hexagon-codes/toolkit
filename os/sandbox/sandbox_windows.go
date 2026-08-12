@@ -259,13 +259,27 @@ func (s *windowsSandbox) prepareCommand(requested Command) (Command, error) {
 	// 与 POSIX 路径一致，先快照 workspace 与 command directory 身份，使
 	// revalidateSandboxExecutionPaths 能在启动前检测目录替换；Windows 专属的
 	// 短名/句柄校验由后续 resolveWindows* 负责。
-	workspacePath := s.workspace.canonicalPath
+	// workspace 未初始化（如纯命令准备测试）时跳过身份快照。
+	var workspacePath string
+	if s.workspace != nil {
+		workspacePath = s.workspace.canonicalPath
+	}
 	if workspacePath == "" {
 		workspacePath = s.cfg.Workspace
 	}
-	command, err := snapshotSandboxCommandPaths(Config{Workspace: workspacePath}, requested)
-	if err != nil {
-		return Command{}, err
+	var command Command
+	if workspacePath != "" {
+		var err error
+		command, err = snapshotSandboxCommandPaths(Config{Workspace: workspacePath}, requested)
+		if err != nil {
+			return Command{}, err
+		}
+	} else {
+		command = Command{
+			Path: requested.Path,
+			Args: append([]string(nil), requested.Args...),
+			Dir:  requested.Dir,
+		}
 	}
 	for index, argument := range command.Args {
 		if strings.IndexByte(argument, 0) >= 0 {

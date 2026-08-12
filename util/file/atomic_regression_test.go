@@ -208,8 +208,11 @@ func TestAppendWithPermRejectsDestinationSymlinkWithoutChangingTarget(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := targetInfo.Mode().Perm(); got != 0o600 {
-		t.Fatalf("target permissions = %04o, want 0600", got)
+	// Windows 文件系统没有 Unix 权限位，perm 断言仅适用于 POSIX 平台。
+	if runtime.GOOS != "windows" {
+		if got := targetInfo.Mode().Perm(); got != 0o600 {
+			t.Fatalf("target permissions = %04o, want 0600", got)
+		}
 	}
 	linkInfo, err := os.Lstat(link)
 	if err != nil {
@@ -311,6 +314,11 @@ func assertNoAtomicTemporaryFiles(t *testing.T, dir, prefix string) {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
+		// Windows 上打开的根句柄会阻止父目录 rebind（share 无 FILE_SHARE_DELETE），
+		// rebind 未发生则目标目录不存在，同样证明原子写未被破坏。
+		if os.IsNotExist(err) {
+			return
+		}
 		t.Fatal(err)
 	}
 	for _, entry := range entries {
