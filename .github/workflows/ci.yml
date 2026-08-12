@@ -3,12 +3,9 @@ name: CI
 on:
   push:
     branches: [main]
-    # 纯文档改动（*.md）不影响代码与门禁语义，跳过全量 CI，避免文档迭代
-    # 触发偶发测试误伤；tag 触发不受 paths 过滤影响，发布门禁保持全量。
+    # 纯文档改动不触发全量验证；tag 复用发布前同一提交的验证结果。
     paths-ignore:
       - "**/*.md"
-    tags:
-      - "v*"
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -23,6 +20,7 @@ concurrency:
 env:
   # 禁止 go 命令绕过矩阵静默下载其他工具链，确保每个门禁验证的就是声明版本。
   GOTOOLCHAIN: local
+  GOWORK: "off"
 
 jobs:
   workflow-lint:
@@ -54,8 +52,10 @@ jobs:
         with:
           go-version-file: go.mod
           check-latest: false
-      - name: Run actionlint
-        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      - name: Check workflows with actionlint and ShellCheck
+        run: bash scripts/check-workflows.sh
+      - name: Verify release entry behavior
+        run: python3 -B -m unittest discover -s scripts -p 'test_*.py'
       - name: Record verification inputs
         run: python3 scripts/verification-inputs.py "$RUNNER_TEMP/verification-inputs.json"
       - name: Preserve verification inputs
@@ -181,10 +181,16 @@ jobs:
             github.com/hexagon-codes/toolkit/os/sandbox "${required_tests[@]}"
       - name: Test (race + coverage)
         if: runner.os != 'Windows'
-        run: go test -mod=readonly -race -count=1 -coverprofile=coverage.out ./...
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -json -mod=readonly -race -count=1 -coverprofile=coverage.out ./... | tee "$RUNNER_TEMP/race-tests.jsonl"
       - name: Test Windows (race)
         if: runner.os == 'Windows'
-        run: go test -mod=readonly -race -count=1 ./...
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -json -mod=readonly -race -count=1 ./... | tee "$RUNNER_TEMP/race-tests.jsonl"
       - name: Verify repository remains clean
         if: always()
         shell: bash
@@ -324,7 +330,8 @@ jobs:
             }
           }
 
-          $events = @(go test -race -tags windows_security -json -count=1 -timeout 300s ./os/sandbox -run $pattern)
+          $eventsPath = Join-Path $env:RUNNER_TEMP "windows-sandbox-security.jsonl"
+          $events = @(go test -race -tags windows_security -json -count=1 -timeout 300s ./os/sandbox -run $pattern | Tee-Object -FilePath $eventsPath)
           $testExitCode = $LASTEXITCODE
           $events | ForEach-Object { Write-Output $_ }
           if ($testExitCode -ne 0) {
@@ -413,9 +420,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # 1.26.x 强制解析该版本线的最新补丁；stable 是有意不可复现的前向兼容性探针。
-          - name: Go 1.26 current
-            go-version: '1.26.x'
+          # 当前版本线来自 go.mod；stable 是有意浮动的前向兼容性探针。
+          - name: Current Go release line
+            go-version: 'current'
             check-latest: true
           - name: Latest stable Go
             go-version: 'stable'
@@ -441,22 +448,47 @@ jobs:
               exit 1
             fi
           done
+      - name: Resolve minimum Go release line
+        id: minimum
+        shell: bash
+        run: |
+          set -euo pipefail
+          minimum_line="$(awk '$1 == "go" {split($2, version, "."); print version[1] "." version[2] ".x"; exit}' go.mod)"
+          echo "version=$minimum_line" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: ${{ matrix.go-version }}
+          go-version: ${{ matrix.go-version == 'current' && steps.minimum.outputs.version || matrix.go-version }}
           check-latest: ${{ matrix.check-latest }}
       - name: Verify selected toolchain
+        id: toolchain
+        shell: bash
         run: |
+          set -euo pipefail
           go version
           go env GOTOOLCHAIN
+          actual_version="$(go env GOVERSION)"
+          minimum_version="go$(awk '$1 == "go" {print $2; exit}' go.mod)"
+          if [[ "$actual_version" == "$minimum_version" ]]; then
+            echo 'verify=false' >> "$GITHUB_OUTPUT"
+            echo "Covered by Native minimum (Linux): $actual_version"
+            echo "- ${{ matrix.name }}: $actual_version is covered by Native minimum (Linux). CI result still requires the complete minimum matrix." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'verify=true' >> "$GITHUB_OUTPUT"
+            echo "Verifying distinct toolchain: $actual_version (minimum: $minimum_version)"
+          fi
       - name: Install Linux sandbox dependencies
+        if: steps.toolchain.outputs.verify == 'true'
         run: ./scripts/install-bubblewrap-ci.sh
-      - run: go mod download
+      - if: steps.toolchain.outputs.verify == 'true'
+        run: go mod download
       - name: Build
+        if: steps.toolchain.outputs.verify == 'true'
         run: go build ./...
       - name: Vet
+        if: steps.toolchain.outputs.verify == 'true'
         run: go vet ./...
       - name: Test
+        if: steps.toolchain.outputs.verify == 'true'
         run: go test -count=1 ./...
 
   examples:

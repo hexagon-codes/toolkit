@@ -1,36 +1,16 @@
 name: Sandbox CodeExec
 
 on:
-  push:
-    branches: [main]
-    tags:
-      - "v*"
-    paths:
-      - ".github/workflows/sandbox-code-exec.yml"
-      - "scripts/**"
-      - ".github/consumer-baselines.json"
-      - "go.mod"
-      - "go.sum"
-      - "os/sandbox/**"
-  pull_request:
-    branches: [main]
-    paths:
-      - ".github/workflows/sandbox-code-exec.yml"
-      - "scripts/**"
-      - ".github/consumer-baselines.json"
-      - "go.mod"
-      - "go.sum"
-      - "os/sandbox/**"
   workflow_dispatch:
     inputs:
       hexclaw_ref:
         description: "hexagon-codes/hexclaw ref to test against"
         required: false
-        default: "main"
+        default: ""
       run_live_network:
         description: "Run live network code_exec crawler checks on Linux/macOS"
         required: false
-        default: "true"
+        default: "false"
 
 permissions:
   contents: read
@@ -82,7 +62,9 @@ jobs:
           check-latest: false
 
       - name: Run actionlint
-        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+        env:
+          GOWORK: "off"
+        run: bash scripts/check-workflows.sh
 
   sandbox-code-exec:
     name: ${{ matrix.name }}

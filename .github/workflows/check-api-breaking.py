@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import argparse
 import difflib
+import json
 from pathlib import Path
 import sys
 
@@ -48,33 +50,61 @@ def read_text(path: Path, label: str) -> str:
         raise SystemExit(f"Failed to read {label} {path}: {error}") from error
 
 
-def main() -> None:
-    allow_empty = len(sys.argv) == 4 and sys.argv[3] == "--allow-empty"
-    if len(sys.argv) not in (3, 4):
-        raise SystemExit("Usage: check-api-breaking.py REPORT BASELINE [--allow-empty]")
+def has_compatible_changes(report: str) -> bool:
+    package = ""
+    compatible = False
+    found = False
+    for line in report.replace("\r\n", "\n").splitlines():
+        if line.startswith("# "):
+            package = line
+            compatible = False
+        elif line == "## compatible changes":
+            if not package or package == "# summary":
+                raise SystemExit("Compatible API section has no package header.")
+            compatible = True
+        elif line.startswith("## "):
+            compatible = False
+        elif compatible and line.strip():
+            found = True
+    return found
 
-    report_path = Path(sys.argv[1])
-    baseline_path = Path(sys.argv[2])
-    actual = extract_breaking_sections(read_text(report_path, "gorelease report"))
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("report", type=Path)
+    parser.add_argument("baseline", type=Path)
+    parser.add_argument("--allow-empty", action="store_true")
+    parser.add_argument("--json-output", type=Path)
+    args = parser.parse_args()
+
+    report_path = args.report
+    baseline_path = args.baseline
+    report = read_text(report_path, "gorelease report")
+    actual = extract_breaking_sections(report)
+    compatible = has_compatible_changes(report)
     expected = read_text(baseline_path, "breaking API baseline").replace("\r\n", "\n")
     if extract_breaking_sections(expected) != expected:
         raise SystemExit("Breaking API baseline is not canonical.")
     if actual != expected:
-        # patch 发布（如 v0.3.1）对比上一 tag 无 incompatible 变更时允许空报告；
+        # patch 发布对比上一 tag 无 incompatible 变更时允许空报告；
         # 有 incompatible 变更的发布仍必须与 baseline 完全一致。
-        if allow_empty and actual == "":
-            print("No breaking API changes; approved for a patch release.")
-            return
-        sys.stderr.writelines(
-            difflib.unified_diff(
-                expected.splitlines(keepends=True),
-                actual.splitlines(keepends=True),
-                fromfile=str(baseline_path),
-                tofile=str(report_path),
+        if args.allow_empty and actual == "":
+            print("No breaking API changes detected.")
+        else:
+            sys.stderr.writelines(
+                difflib.unified_diff(
+                    expected.splitlines(keepends=True),
+                    actual.splitlines(keepends=True),
+                    fromfile=str(baseline_path),
+                    tofile=str(report_path),
+                )
             )
-        )
-        raise SystemExit("Unapproved breaking API changes detected.")
-    print("Breaking API baseline matched.")
+            raise SystemExit("Unapproved breaking API changes detected.")
+    else:
+        print("Breaking API baseline matched.")
+    if args.json_output:
+        args.json_output.write_text(json.dumps({"has_breaking": bool(actual),
+                                               "has_compatible": compatible}) + "\n")
 
 
 if __name__ == "__main__":

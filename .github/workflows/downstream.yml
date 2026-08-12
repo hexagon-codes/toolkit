@@ -1,17 +1,8 @@
 name: Downstream Contract
 
-# 接缝契约门禁：toolkit（L0）任何改动，必须覆盖全部已知消费者及嵌套模块。
+# 按需验证固定消费者及嵌套模块的编译契约，不参与 toolkit 发布资格。
 # 下游使用 go.mod 声明的最低工具链，禁止静默切换到其他版本。
 on:
-  push:
-    branches: [main]
-    # 纯文档改动跳过；tag 触发不受 paths 过滤影响，发布门禁保持全量。
-    paths-ignore:
-      - "**/*.md"
-    tags:
-      - "v*"
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 permissions:

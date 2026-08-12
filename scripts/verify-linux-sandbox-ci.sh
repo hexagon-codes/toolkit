@@ -20,10 +20,16 @@ expected_go="go$(awk '$1 == "go" {print $2; exit}' go.mod)"
 
 # 探针只绑定真实载荷及其加载依赖，避免空根文件系统造成能力误判。
 payload=/usr/bin/true
+[[ -x "$payload" ]] || { echo "Probe payload is not executable: $payload" >&2; exit 1; }
 bindings=(--ro-bind "$payload" "$payload")
-dependencies="$(ldd "$payload")"
+dependencies="$(LC_ALL=C ldd "$payload")"
+if grep -Fq 'not found' <<<"$dependencies"; then
+  echo "Probe payload has an unresolved runtime dependency." >&2
+  printf '%s\n' "$dependencies" >&2
+  exit 1
+fi
 while IFS= read -r dependency; do
-  [[ -f "$dependency" ]] || { echo "Missing probe dependency: $dependency" >&2; exit 1; }
+  [[ -f "$dependency" && -r "$dependency" ]] || { echo "Missing or unreadable probe dependency: $dependency" >&2; exit 1; }
   bindings+=(--ro-bind "$dependency" "$dependency")
 done < <(awk '{for (i=1; i<=NF; i++) if ($i ~ /^\//) print $i}' <<<"$dependencies")
 
@@ -66,7 +72,7 @@ for identity in root nonroot; do
     sudo install -d -m 0700 "$home_dir" "$cache_dir" "$tmp_dir"
   fi
   probe_log="$evidence_dir/linux-$identity-bwrap-probe.log"
-  if "${launcher[@]}" env -i HOME="$home_dir" PATH="$trusted_path" \
+  if "${launcher[@]}" env -i HOME="$home_dir" PATH="$trusted_path" LC_ALL=C \
     /usr/bin/bwrap "${bindings[@]}" --unshare-user --unshare-pid --unshare-ipc --unshare-uts \
     --disable-userns --assert-userns-disabled --unshare-net --new-session --die-with-parent \
     --cap-drop ALL --uid 65534 --gid 65534 --proc /proc --dev /dev -- "$payload" >"$probe_log" 2>&1; then
@@ -74,7 +80,9 @@ for identity in root nonroot; do
   else
     probe_exit=$?
     cat "$probe_log" >&2
-    if ! grep -Eqi 'namespace|operation not permitted|permission denied|uid map|gid map' "$probe_log"; then
+    # 仅已知的命名空间与身份映射环境限制可跳过；载荷、路径、挂载等错误保持失败。
+    limitation_pattern='^bwrap: (Creating new namespace failed: Operation not permitted|No permissions to create new namespace([,[:space:]]|$)|Error writing to (uid_map|gid_map): (Operation not permitted|Permission denied)|setting up (uid|gid) map: (Operation not permitted|Permission denied))'
+    if ! grep -Eq "$limitation_pattern" "$probe_log"; then
       echo "Sandbox probe failed before proving an environment capability limitation." >&2
       exit "$probe_exit"
     fi

@@ -30,8 +30,12 @@ if "--consumers" in sys.argv[2:]:
     result["consumers"] = {name: git_sha(root.parent / name) for name in refs}
 if os.environ.get("API_BASE_TAG"):
     baseline = Path(os.environ["API_BREAKING_BASELINE"])
+    changes = json.loads(Path(os.environ["API_CHANGES_FILE"]).read_text())
+    if (set(changes) != {"has_breaking", "has_compatible"}
+            or any(type(value) is not bool for value in changes.values())):
+        raise SystemExit("API change classification is invalid")
     result.update(base_tag=os.environ["API_BASE_TAG"], base_sha=os.environ["API_BASE_SHA"],
                   baseline_sha256=hashlib.sha256(baseline.read_bytes()).hexdigest(),
-                  gorelease_version=os.environ["GORELEASE_VERSION"])
+                  gorelease_version=os.environ["GORELEASE_VERSION"], api_changes=changes)
 Path(sys.argv[1]).write_text(json.dumps(result, indent=2) + "\n")
 print(json.dumps(result))

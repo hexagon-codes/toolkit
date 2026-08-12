@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
-"""按候选提交核对远端验证；显式发布时才创建不可变版本 tag。"""
+"""发布前复用同一提交的核心验证；发布后独立核验不可变 tag 和模块。"""
 
 import argparse
+import base64
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
 import tempfile
 
 
-def command(*args):
-    return subprocess.check_output(args, text=True).strip()
+class ReleaseError(Exception):
+    pass
+
+
+def command(*args, **kwargs):
+    return subprocess.check_output(args, text=True, **kwargs).strip()
 
 
 def api(path):
@@ -22,118 +28,214 @@ def source(candidate, path):
     return command("git", "show", candidate + ":" + path)
 
 
+def version_tuple(version):
+    if not re.fullmatch(r"v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", version):
+        raise ReleaseError("A stable semantic version tag is required")
+    return tuple(map(int, version[1:].split(".")))
+
+
 def tag_commit(repo, tag):
     obj = api(f"repos/{repo}/git/ref/tags/{tag}")["object"]
     while obj["type"] == "tag":
         obj = api(f"repos/{repo}/git/tags/{obj['sha']}")["object"]
     if obj["type"] != "commit":
-        raise SystemExit("Release tag does not resolve to a commit")
+        raise ReleaseError("Release tag does not resolve to a commit")
     return obj["sha"]
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("version")
-    parser.add_argument("--candidate", default="HEAD")
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--prepare", action="store_true", help="Start missing checks or rerun failed jobs")
-    mode.add_argument("--publish", action="store_true", help="Create and push the tag after verification")
-    args = parser.parse_args()
-    if not re.fullmatch(r"v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", args.version):
-        raise SystemExit("A stable semantic version tag is required")
-    root = Path(__file__).resolve().parent.parent
-    import os
-    os.chdir(root)
-    candidate = command("git", "rev-parse", args.candidate + "^{commit}")
-    repo = json.loads(command("gh", "repo", "view", "--json", "nameWithOwner"))["nameWithOwner"]
+def local_tag_commit(version):
+    result = subprocess.run(["git", "rev-parse", "--verify", "refs/tags/" + version + "^{commit}"],
+                            text=True, capture_output=True)
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def verify_published(repo, version, candidate):
+    # 历史发布核验不读取最新版本、候选 CI 产物或当前工作区的 go.mod。
+    document = api(f"repos/{repo}/contents/go.mod?ref={candidate}")
+    go_mod = base64.b64decode(document["content"]).decode()
+    match = re.search(r"(?m)^module\s+(\S+)", go_mod)
+    if not match:
+        raise ReleaseError("Published source has no module path")
+    module = match[1]
+    with tempfile.TemporaryDirectory(prefix="toolkit-module-") as directory:
+        # 在模块外解析工具链，历史核验不受当前 go.mod 的版本要求影响。
+        go_root = command("go", "env", "GOROOT", cwd=directory, env=dict(os.environ, GOWORK="off"))
+        go_executable = Path(go_root) / "bin" / ("go.exe" if os.name == "nt" else "go")
+        # 直接读取不可变 Git tag，避免镜像收录延迟；Go 校验和数据库仍验证实际包。
+        env = dict(os.environ, GOWORK="off", GOTOOLCHAIN="local", GOMODCACHE=directory + "/modules",
+                   GOPROXY="direct", GOPRIVATE="", GONOPROXY="", GONOSUMDB="",
+                   GOSUMDB="sum.golang.org")
+        raw = command(str(go_executable), "mod", "download", "-json", module + "@" + version,
+                      cwd=directory, env=env)
+        downloaded = json.loads(raw)
+        if (downloaded.get("Error") or downloaded.get("Path") != module
+                or downloaded.get("Version") != version
+                or not downloaded.get("Sum") or not downloaded.get("GoModSum")
+                or downloaded.get("Origin", {}).get("Hash") != candidate):
+            raise ReleaseError("Downloaded module does not match the published tag and commit")
+        if not Path(downloaded["Zip"]).is_file() or Path(downloaded["GoMod"]).read_text() != go_mod:
+            raise ReleaseError("Published module archive or go.mod is inconsistent")
+    return {"version": version, "candidate": candidate, "module": module,
+            "sum": downloaded["Sum"], "go_mod_sum": downloaded["GoModSum"],
+            "state": "published-and-verified"}
+
+
+def validate_version(version, base, changes):
+    target, previous = version_tuple(version), version_tuple(base)
+    if target <= previous:
+        raise ReleaseError("Release version must be newer than the latest stable version")
+    if any(type(changes.get(key)) is not bool for key in ("has_breaking", "has_compatible")):
+        raise ReleaseError("API change classification is missing; refresh API verification")
+    if changes["has_breaking"]:
+        # v0 patch 兼容是本项目的承诺，SemVer 本身未对 v0 作此保证。
+        required_bump = target[:2] > previous[:2] if previous[0] == 0 else target[0] > previous[0]
+        if not required_bump:
+            raise ReleaseError("Breaking API changes require a minor bump in v0 or a major bump in v1+")
+    elif changes["has_compatible"] and previous[0] >= 1 and target[:2] <= previous[:2]:
+        raise ReleaseError("Compatible API additions require a minor or major version bump")
+
+
+def refresh(repo, filename, candidate, main_sha):
+    if candidate != main_sha:
+        return "Select the current main commit for fresh verification; historical evidence cannot be substituted"
+    command("gh", "workflow", "run", filename, "--ref", "main", "--repo", repo)
+    return "Fresh exact-SHA verification dispatched; wait for completion and check again"
+
+
+def read_receipt(repo, run, candidate):
+    artifacts = api(f"repos/{repo}/actions/runs/{run['id']}/artifacts?per_page=100")["artifacts"]
+    if not any(item["name"].startswith("verification-inputs-") and not item["expired"] for item in artifacts):
+        raise ReleaseError("Verification artifacts are missing or expired")
+    with tempfile.TemporaryDirectory(prefix="toolkit-release-") as directory:
+        try:
+            command("gh", "run", "download", str(run["id"]), "--repo", repo,
+                    "--pattern", "verification-inputs-*", "--dir", directory)
+        except subprocess.CalledProcessError as error:
+            raise ReleaseError("Verification artifacts could not be downloaded; check access or refresh verification") from error
+        records = [json.loads(path.read_text()) for path in Path(directory).rglob("*-inputs.json")]
+    if not records:
+        raise ReleaseError("Verification receipts are missing")
+    for record in records:
+        if (record.get("candidate_sha") != candidate or record.get("event_sha") != candidate
+                or record.get("run_id") != str(run["id"]) or record.get("event") != run["event"]
+                or record.get("platform") != "linux"):
+            raise ReleaseError("Verification receipt does not match its exact-SHA run")
+    return max(records, key=lambda item: int(item["run_attempt"]))
+
+
+def qualify(repo, version, candidate, refs, prepare):
     comparison = api(f"repos/{repo}/compare/{candidate}...main")
     if comparison["status"] not in ("ahead", "identical"):
-        raise SystemExit("Candidate is not in main history")
+        raise ReleaseError("Candidate is not in main history")
     main_sha = api(f"repos/{repo}/branches/main")["commit"]["sha"]
-    refs = api(f"repos/{repo}/git/matching-refs/tags/")
-    tags = [item["ref"].removeprefix("refs/tags/") for item in refs]
-    stable = [tag for tag in tags if re.fullmatch(r"v\d+\.\d+\.\d+", tag) and tag != args.version]
-    base = max(stable, key=lambda tag: tuple(map(int, tag[1:].split("."))))
-    if tuple(map(int, args.version[1:].split("."))) <= tuple(map(int, base[1:].split("."))):
-        raise SystemExit("Release version must be newer than the latest stable version")
+    stable = [item["ref"].removeprefix("refs/tags/") for item in refs
+              if re.fullmatch(r"refs/tags/v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", item["ref"])]
+    if not stable:
+        raise ReleaseError("An initial stable API baseline is required")
+    base = max(stable, key=version_tuple)
+    if version_tuple(version) <= version_tuple(base):
+        raise ReleaseError("Release version must be newer than the latest stable version")
+    major = version_tuple(version)[0]
+    module = re.search(r"(?m)^module\s+(\S+)", source(candidate, "go.mod"))[1]
+    suffix = re.search(r"/v([0-9]+)$", module)
+    if (major >= 2 and (not suffix or int(suffix[1]) != major)
+            or major < 2 and suffix is not None):
+        raise ReleaseError("Candidate module path does not match the release major version")
     base_sha = tag_commit(repo, base)
-    consumers = json.loads(source(candidate, ".github/consumer-baselines.json"))
     workflow = source(candidate, ".github/workflows/api-compat.yml")
     baseline_path = re.search(r'API_BREAKING_BASELINE:\s*"([^"]+)"', workflow)[1]
     baseline = subprocess.check_output(["git", "show", candidate + ":" + baseline_path])
-    baseline_digest = hashlib.sha256(baseline).hexdigest()
-    gorelease = re.search(r"GORELEASE_VERSION:\s*(\S+)", workflow)[1]
-    pending = []
-    receipts = []
-    for filename in ("ci.yml", "api-compat.yml", "downstream.yml", "sandbox-code-exec.yml"):
+    expected_api = {"base_tag": base, "base_sha": base_sha,
+                    "baseline_sha256": hashlib.sha256(baseline).hexdigest(),
+                    "gorelease_version": re.search(r"GORELEASE_VERSION:\s*(\S+)", workflow)[1]}
+    pending, receipts = [], []
+    for filename in ("ci.yml", "api-compat.yml"):
         runs = api(f"repos/{repo}/actions/workflows/{filename}/runs?head_sha={candidate}&per_page=100")["workflow_runs"]
         runs = [run for run in runs if run["head_branch"] == "main"
                 and run["event"] in ("push", "workflow_dispatch")
                 and run["head_repository"]["full_name"] == repo]
         run = max(runs, key=lambda item: item["id"]) if runs else None
+        reason = None
         if run is None:
-            if args.prepare and candidate == main_sha:
-                dispatch = ["gh", "workflow", "run", filename, "--ref", "main", "--repo", repo]
-                if filename == "sandbox-code-exec.yml":
-                    dispatch.extend(["-f", "hexclaw_ref=" + consumers["hexclaw"], "-f", "run_live_network=false"])
-                command(*dispatch)
-            pending.append(filename + ": missing exact-SHA verification")
+            reason = "Missing exact-SHA verification"
+        elif run["status"] != "completed":
+            pending.append(filename + ": " + run["status"] + " " + run["html_url"])
             continue
-        if run["status"] != "completed" or run["conclusion"] != "success":
-            if args.prepare and run["status"] == "completed":
-                command("gh", "run", "rerun", str(run["id"]), "--failed", "--repo", repo)
-            pending.append(filename + ": " + (run["conclusion"] or run["status"]) + " " + run["html_url"])
-            continue
-        with tempfile.TemporaryDirectory(prefix="toolkit-release-") as directory:
-            command("gh", "run", "download", str(run["id"]), "--repo", repo,
-                    "--pattern", "verification-inputs-*", "--dir", directory)
-            records = [json.loads(path.read_text()) for path in Path(directory).rglob("*-inputs.json")]
-        selected = {}
-        for record in records:
-            if (record.get("candidate_sha") != candidate or record.get("event_sha") != candidate
-                    or record.get("run_id") != str(run["id"]) or record.get("event") != run["event"]):
-                raise SystemExit("Verification receipt does not match its exact-SHA run: " + filename)
-            platform = record["platform"]
-            if platform not in selected or int(record["run_attempt"]) > int(selected[platform]["run_attempt"]):
-                selected[platform] = record
-        expected = {"linux", "darwin", "windows"} if filename == "sandbox-code-exec.yml" else {"linux"}
-        if set(selected) != expected:
-            raise SystemExit("Verification receipts are incomplete: " + filename)
-        for record in selected.values():
-            if filename in ("downstream.yml", "sandbox-code-exec.yml") and record.get("consumers") != consumers:
-                raise SystemExit("Consumer verification does not use the candidate baselines")
-            if filename == "api-compat.yml" and (
-                    record.get("base_tag") != base or record.get("base_sha") != base_sha
-                    or record.get("baseline_sha256") != baseline_digest or record.get("gorelease_version") != gorelease):
-                if args.prepare:
-                    command("gh", "run", "rerun", str(run["id"]), "--repo", repo)
-                pending.append("API comparison inputs changed; rerun API verification")
-        receipts.append({"workflow": filename, "run_id": run["id"], "url": run["html_url"]})
+        elif run["conclusion"] != "success":
+            reason = "Latest verification failed: " + str(run["conclusion"]) + " " + run["html_url"]
+        else:
+            try:
+                record = read_receipt(repo, run, candidate)
+                if filename == "api-compat.yml":
+                    if any(record.get(key) != value for key, value in expected_api.items()):
+                        raise ReleaseError("API comparison inputs changed")
+                    changes = record.get("api_changes", {})
+                    if any(type(changes.get(key)) is not bool for key in ("has_breaking", "has_compatible")):
+                        raise ReleaseError("API change classification is missing")
+                    validate_version(version, base, changes)
+            except ReleaseError as error:
+                # 版本与 API 不匹配不能靠重跑解决；证据缺失才提供补验路径。
+                if str(error).startswith(("Breaking API", "Compatible API")):
+                    raise
+                reason = str(error)
+        if reason:
+            if prepare:
+                reason += "; " + refresh(repo, filename, candidate, main_sha)
+            pending.append(filename + ": " + reason)
+        else:
+            receipts.append({"workflow": filename, "run_id": run["id"], "url": run["html_url"]})
     if pending:
-        raise SystemExit("Release is not ready:\n" + "\n".join(pending))
-    # tag 创建前再次核对发布比较基线，避免检查期间发生另一轮发布。
-    current_tags = api(f"repos/{repo}/git/matching-refs/tags/")
-    if {item["ref"] for item in current_tags} != {item["ref"] for item in refs}:
-        raise SystemExit("Published tags changed during verification; check again")
-    print(json.dumps({"version": args.version, "candidate": candidate, "base": base, "runs": receipts}, indent=2))
-    if args.version in tags:
-        if tag_commit(repo, args.version) != candidate:
-            raise SystemExit("Existing release tag points to a different commit")
-        print("Release tag already points to the verified candidate")
+        raise ReleaseError("Release is not ready:\n" + "\n".join(pending))
+    # 只比较 tag 的实际对象，检查期间发生新发布时必须重新核对 API 基线。
+    current = api(f"repos/{repo}/git/matching-refs/tags/")
+    if {item["ref"]: item["object"]["sha"] for item in current} != {
+            item["ref"]: item["object"]["sha"] for item in refs}:
+        raise ReleaseError("Published tags changed during verification; check again")
+    return {"version": version, "candidate": candidate, "base": base, "runs": receipts, "state": "ready"}
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("version")
+    parser.add_argument("--candidate", help="Expected commit; defaults to existing tag or HEAD")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--prepare", action="store_true", help="Dispatch fresh missing or failed main checks")
+    mode.add_argument("--publish", action="store_true", help="Create or resume pushing the verified tag")
+    mode.add_argument("--verify-published", action="store_true", help="Verify an existing published module")
+    args = parser.parse_args()
+    version_tuple(args.version)
+    os.chdir(Path(__file__).resolve().parent.parent)
+    repo = json.loads(command("gh", "repo", "view", "--json", "nameWithOwner"))["nameWithOwner"]
+    refs = api(f"repos/{repo}/git/matching-refs/tags/")
+    remote_exists = any(item["ref"] == "refs/tags/" + args.version for item in refs)
+    local_sha = local_tag_commit(args.version)
+    remote_sha = tag_commit(repo, args.version) if remote_exists else None
+    candidate = (command("git", "rev-parse", args.candidate + "^{commit}") if args.candidate
+                 else remote_sha or local_sha or command("git", "rev-parse", "HEAD"))
+    if (remote_sha and remote_sha != candidate) or (local_sha and local_sha != candidate):
+        raise ReleaseError("Existing release tag points to a different commit; tags are immutable")
+    if remote_sha:
+        print(json.dumps(verify_published(repo, args.version, candidate), indent=2))
         return
+    if args.verify_published:
+        raise ReleaseError("Release tag is not published")
+    result = qualify(repo, args.version, candidate, refs, args.prepare)
+    print(json.dumps(result, indent=2))
     if args.publish:
-        if command("git", "status", "--porcelain"):
-            raise SystemExit("A clean worktree is required before publishing")
-        local = subprocess.run(["git", "rev-parse", "--verify", "refs/tags/" + args.version], capture_output=True)
-        if local.returncode == 0:
-            raise SystemExit("Local release tag already exists; inspect it before publishing")
-        message = f"发布 {args.version}\n"
-        with tempfile.NamedTemporaryFile(mode="w", prefix="toolkit-tag-", delete=True) as stream:
-            stream.write(message)
-            stream.flush()
-            subprocess.run(["git", "tag", "-a", args.version, candidate, "-F", stream.name], check=True)
+        if not local_sha:
+            with tempfile.NamedTemporaryFile(mode="w", prefix="toolkit-tag-") as stream:
+                stream.write(f"发布 {args.version}\n")
+                stream.flush()
+                subprocess.run(["git", "tag", "-a", args.version, candidate, "-F", stream.name], check=True)
+        # 上次 push 中断后复用同一 SHA 的本地 tag，不删除、移动或重建。
         subprocess.run(["git", "push", "origin", "refs/tags/" + args.version], check=True)
+        if tag_commit(repo, args.version) != candidate:
+            raise ReleaseError("Remote tag does not match the verified candidate")
+        print(json.dumps(verify_published(repo, args.version, candidate), indent=2))
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (ReleaseError, subprocess.CalledProcessError) as error:
+        raise SystemExit(str(error)) from error

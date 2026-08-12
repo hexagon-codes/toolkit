@@ -1,12 +1,9 @@
 name: API Compatibility
 
-# 用 gorelease 对照上一个 tag 检测导出 API，并验证明确的候选版本满足 SemVer。
-# v0.x 允许在 minor 版本中包含有意破坏，但工具、网络、加载和版本验证失败都必须阻断。
+# 发布前对照最新稳定 tag 检测导出 API，发布入口结合变更分类核对候选版本。
 on:
   push:
     branches: [main]
-    tags:
-      - "v*"
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -21,6 +18,7 @@ concurrency:
 env:
   # 确保 API 门禁使用 setup-go 选定的工具链，不允许静默自动升级。
   GOTOOLCHAIN: local
+  GOWORK: "off"
   GORELEASE_VERSION: v0.0.0-20260727155853-b88d891fe743
   API_BREAKING_BASELINE: ".github/workflows/api-breaking-v0.3.0.txt"
   API_BREAKING_CHECKER: ".github/workflows/check-api-breaking.py"
@@ -57,33 +55,24 @@ jobs:
           check-latest: false
       - name: Install gorelease
         run: go install golang.org/x/exp/cmd/gorelease@${{ env.GORELEASE_VERSION }}
-      - name: Verify release tag
-        if: github.ref_type == 'tag'
-        shell: bash
-        run: |
-          set -euo pipefail
-          # 只校验 tag 名是合法 SemVer；具体版本的发布审批由发布流程（人）完成，
-          # 门禁不再绑定固定版本号，避免每次发版都要先改 workflow。
-          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Release tag must be a semantic version: got '$GITHUB_REF_NAME'." >&2
-            exit 1
-          fi
       - name: Check API compatibility
         shell: bash
         run: |
           set -euo pipefail
           report_path="$RUNNER_TEMP/gorelease-report.txt"
-          # 统一以最新的已发布 tag 为 base 做 API 对比（tag 触发时排除自身，
-          # PR 触发时不含目标版本 tag，自然得到最新发布版本）。gorelease 不带
-          # -version：目标版本已存在时报 already exists、base 非 major 最新时
-          # 报 Cannot suggest，两种受限模式都不适用于发布门禁。
-          base_version="$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -vx "$GITHUB_REF_NAME" | head -1)"
+          # 版本建议只用于发布前；tag 发布后的模块核验不再次运行 gorelease。
+          base_version="$(git tag --sort=v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | tail -1)"
+          if [[ ! "$base_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "A stable API comparison base is required." >&2
+            exit 1
+          fi
           export API_BASE_TAG="$base_version"
           API_BASE_SHA="$(git rev-parse "$base_version^{commit}")"
           export API_BASE_SHA
-          python3 scripts/verification-inputs.py "$RUNNER_TEMP/api-inputs.json"
+          export API_CHANGES_FILE="$RUNNER_TEMP/api-changes.json"
           gorelease -base="$base_version" | tee "$report_path"
-          python3 "$API_BREAKING_CHECKER" "$report_path" "$API_BREAKING_BASELINE" --allow-empty
+          python3 "$API_BREAKING_CHECKER" "$report_path" "$API_BREAKING_BASELINE" --allow-empty --json-output "$API_CHANGES_FILE"
+          python3 scripts/verification-inputs.py "$RUNNER_TEMP/api-inputs.json"
       - name: Preserve verification inputs
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -91,5 +80,6 @@ jobs:
           name: verification-inputs-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/api-inputs.json
+            ${{ runner.temp }}/api-changes.json
             ${{ runner.temp }}/gorelease-report.txt
           retention-days: 90

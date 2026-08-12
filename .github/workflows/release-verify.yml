@@ -1,0 +1,50 @@
+name: Verify Published Module
+
+# 发布前核心 CI 已验证源码，tag 后仅核对实际交付的模块。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Published stable version to verify"
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+  GOWORK: "off"
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: false
+      - name: Verify tag and downloaded module
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version || github.ref_name }}
+        run: |
+          set -euo pipefail
+          args=("$RELEASE_VERSION" --verify-published)
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            args+=(--candidate "$GITHUB_SHA")
+          fi
+          python3 scripts/release.py "${args[@]}" | tee "$RUNNER_TEMP/published-module.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: published-module-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/published-module.json
+          retention-days: 90
