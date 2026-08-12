@@ -50,6 +50,7 @@ nonroot_tests=(
 )
 
 module_cache="$runtime_dir/modcache"
+test_binary="$runtime_dir/sandbox.test"
 cache_ready=false
 for identity in root nonroot; do
   home_dir="$runtime_dir/$identity-home"
@@ -85,15 +86,18 @@ for identity in root nonroot; do
   fi
   if [[ "$cache_ready" == false ]]; then
     GOMODCACHE="$module_cache" GOCACHE="$runtime_dir/prewarm-cache" \
-      go test -mod=readonly -run '^$' ./os/sandbox
+      go test -mod=readonly -c -o "$test_binary" ./os/sandbox
     chmod -R a+rX "$module_cache"
     cache_ready=true
   fi
   alternation="$(IFS='|'; echo "${required[*]}")"
   events="$evidence_dir/linux-$identity-sandbox-security.jsonl"
-  "${launcher[@]}" env -i HOME="$home_dir" TMPDIR="$tmp_dir" \
-    PATH="$go_root/bin:$trusted_path" GOROOT="$go_root" GOTOOLCHAIN=local GOWORK=off GOENV=off \
-    GOPATH="$home_dir/go" GOCACHE="$cache_dir" GOMODCACHE="$module_cache" GOPROXY=off GOSUMDB=off \
-    "$go_bin" test -json -count=1 -timeout 600s ./os/sandbox -run "^($alternation)$" | tee "$events"
+  (
+    cd -- "$runtime_dir"
+    "${launcher[@]}" env -i HOME="$home_dir" TMPDIR="$tmp_dir" \
+      PATH="$go_root/bin:$trusted_path" GOROOT="$go_root" GOTOOLCHAIN=local GOWORK=off GOENV=off \
+      GOPATH="$home_dir/go" GOCACHE="$cache_dir" GOMODCACHE="$module_cache" GOPROXY=off GOSUMDB=off \
+      "$test_binary" -test.v=test2json -test.count=1 -test.timeout=600s -test.run="^($alternation)$"
+  ) | "$go_bin" tool test2json -t -p github.com/hexagon-codes/toolkit/os/sandbox | tee "$events"
   python3 "$script_dir/verify-go-test-events.py" "$events" github.com/hexagon-codes/toolkit/os/sandbox "${required[@]}"
 done
