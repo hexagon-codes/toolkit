@@ -56,6 +56,12 @@
 - `util/logger`：自定义 `slog.Handler` 共享动态 `LevelVar`，`SetLevel` 现在可以控制 `UseHandler`、`UseHandlerWithConfig` 和 `NewWithHandler` 创建的日志器。
 
 ### Fixed
+- Windows：`os/sandbox` 的句柄重开在 `ReOpenFile` 无法提升访问权限（请求超过原句柄权限即 `ACCESS_DENIED`）时，统一回退为按 `GetFinalPathNameByHandle` 解析出的真实路径重新 `CreateFile`；工作区 DACL/integrity 更新与目录句柄冻结共同受益，不再逐处按路径打开。
+- Windows：文件与目录身份检测以内核信息类查询为权威来源——`FileStandardInformation.Directory` 判定目录性、`FileAttributeTagInformation.ReparseTag` 判定 reparse point、`IO_REPARSE_TAG_MOUNT_POINT` 补全 junction 的目录位；修复 `FILE_FLAG_OPEN_REPARSE_POINT` 打开时 `GetFileInformationByHandle` 属性位缺失导致的 junction 误判为普通目录。
+- Windows：目录替换复核以 NTFS 创建时间为额外判据（文件索引可能被新目录复用），任一环节取不到创建时间时按 fail-closed 视为身份已变化，不再把替换后的目录误判为原身份。
+- macOS：sandbox 系统读挂载与可执行放行覆盖 homebrew 安装树（`/opt/homebrew`、`/usr/local` 含 `Cellar`），修复沙箱内 homebrew 运行时的 `import` 与 `exec` 失败（如 pip 的站点包与解释器 shebang 位于 Cellar 深层路径）。
+- `blobstore`：Windows 上原子替换对瞬时占用（目标被无 `FILE_SHARE_DELETE` 的句柄短暂打开，如防病毒扫描）做有界指数退避重试；`Go` 的 `os.Open` 在 Windows 上共享模式不含 `FILE_SHARE_DELETE`，测试改用带删除共享的句柄验证"替换时句柄仍有效"语义。
+- Windows：AppContainer 沙箱内子进程未显式设置 stdio 时默认打开 `NUL` 设备会被拒；测试载荷统一显式继承父进程 stdio。
 - 补齐数据库、HTTP/SSE、文件复制和可观测性链路中的资源关闭与错误传播，避免关闭错误或异步导出错误被静默丢弃。
 - `infra/otel`：OTLP 批量导出失败时重新入队未发送 Span；`Tracer.Shutdown` 先等待代际排空并刷新最终 Span，再使用调用方 context 停止 exporter 自有任务，并汇总异步导出、刷新和关闭错误。
 - MySQL 超时查询不再在调用方读取结果前提前取消派生上下文。
@@ -65,6 +71,11 @@
 - `os/sandbox`：macOS/Linux 的 hostedtoolcache 路径改为从当前用户主目录派生，不再把固定 Runner 主目录写入二进制。
 
 ### Tests
+- CI 的 Windows 作业统一在 checkout 后以 `git checkout-index -f -u -a` 重写工作树为 LF 并刷新索引 stat 缓存，消除 `autocrlf` 导致的 gofmt/tidy/合同测试伪失败；收尾门禁改为内容级校验（`git diff` 权威），不再被平台行尾表示差异误伤。
+- Windows AppLocker 门禁在托管 runner 上强制执行不可用（策略已应用但执行未被阻止）时条件化跳过，与 root Linux bwrap 门禁的环境探测语义一致。
+- Sandbox CodeExec 的 go 运行时测试改为仅 Linux 强制执行；darwin 不可信沙箱的 deny process-fork 与 go build 派生工具链子进程的语义冲突，不作为 macOS 门禁要求。
+- Sandbox CodeExec 的 go.work 纳入 ai-core 与 hexagon 源码，避免解析到未适配 v0.3.0 的历史发布版本；Downstream Contract 的 codeup 侧消费者合同作业移除，改由消费者侧自验脚本接管。
+- 移除 codecov 上传步骤（tokenless 上传已被拒绝），覆盖率仍由 `-coverprofile` 本地生成。
 - 新增 MySQL 8.4 与 Redis 7.4 具名 ACL 的隔离容器集成测试脚本，并纳入 CI。
 - CI 全量 lint 门禁改为检查整个仓库。
 - API 兼容工作流新增 `v*` Tag 触发与候选版本一致性校验，`v0.3.0` breaking baseline 固定为 34 个不兼容包段。
