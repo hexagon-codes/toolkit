@@ -70,5 +70,11 @@ jobs:
         run: |
           set -euo pipefail
           report_path="$RUNNER_TEMP/gorelease-report.txt"
-          gorelease -base="$API_BASE_VERSION" -version="$API_RELEASE_VERSION" | tee "$report_path"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            # tag 触发时目标版本已存在，gorelease 的 -version 会报 "already exists"；
+            # 只做 base 对比输出 breaking 报告，版本号一致性由 Verify release tag 保证。
+            gorelease -base="$API_BASE_VERSION" | tee "$report_path"
+          else
+            gorelease -base="$API_BASE_VERSION" -version="$API_RELEASE_VERSION" | tee "$report_path"
+          fi
           python3 "$API_BREAKING_CHECKER" "$report_path" "$API_BREAKING_BASELINE"
