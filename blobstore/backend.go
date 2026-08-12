@@ -55,7 +55,23 @@ func (s *Store) SaveStream(ctx context.Context, r io.Reader, ext string) (string
 	return s.saveStream(ctx, root, r, ext)
 }
 
+// SaveStreamAllowEmpty 显式保存可为零字节的实际文件，返回其内容寻址相对路径。
+// 除允许空内容外，取消、路径、原子写入、去重与资源释放合同均与 SaveStream 相同。
+// 未取得实际文件的业务仍应使用 SaveStream，不以此方法制造空制品。
+func (s *Store) SaveStreamAllowEmpty(ctx context.Context, r io.Reader, ext string) (string, error) {
+	root, release, err := s.acquireRoot()
+	if err != nil {
+		return "", err
+	}
+	defer release()
+	return s.saveStreamWithEmpty(ctx, root, r, ext, true)
+}
+
 func (s *Store) saveStream(ctx context.Context, root *os.Root, r io.Reader, ext string) (relResult string, err error) {
+	return s.saveStreamWithEmpty(ctx, root, r, ext, false)
+}
+
+func (s *Store) saveStreamWithEmpty(ctx context.Context, root *os.Root, r io.Reader, ext string, allowEmpty bool) (relResult string, err error) {
 	if isNilInterface(ctx) {
 		return "", errors.New("blobstore: context must not be nil")
 	}
@@ -79,7 +95,7 @@ func (s *Store) saveStream(ctx context.Context, root *os.Root, r io.Reader, ext 
 	if err != nil {
 		return "", fmt.Errorf("stream copy: %w", err)
 	}
-	if n == 0 {
+	if n == 0 && !allowEmpty {
 		return "", errors.New("empty data")
 	}
 	if err := tmp.file.Sync(); err != nil {
