@@ -43,6 +43,12 @@ func snapshotSandboxDirectoryIdentity(field, path string) (sandboxPathIdentity, 
 		return sandboxPathIdentity{}, fmt.Errorf("sandbox %s must not be a symbolic link", field)
 	}
 	if !info.IsDir() {
+		// Windows 下 Lstat 经 OPEN_REPARSE_POINT 读 junction 会丢失 DIRECTORY
+		// 属性位；先用权威 reparse tag 复核，是 reparse point 就按 reparse 报错，
+		// 保持错误分类准确（拒绝行为本身始终 fail-closed）。
+		if sandboxPathIsReparsePoint(path) {
+			return sandboxPathIdentity{}, fmt.Errorf("sandbox %s must not be a reparse point", field)
+		}
 		return sandboxPathIdentity{}, fmt.Errorf("sandbox %s must be a directory", field)
 	}
 	canonical, err := filepath.EvalSymlinks(path)

@@ -197,8 +197,9 @@ jobs:
           # 合同测试假失败。关闭 local autocrlf 后由 git 原生重写全部工作树文件为 LF
           # （checkout-index 不经 MSYS2 文本转换，二进制判定交给 git 自身）。
           git config core.autocrlf false
-          git checkout-index -f -a
-          echo "autocrlf=$(git config --get core.autocrlf) global=$(git config --global --get core.autocrlf)" 
+          git checkout-index -f -u -a
+          # 重写工作树后刷新索引 stat 缓存，避免 git status 按旧 stat 误报 M。
+          git update-index --refresh >/dev/null 2>&1 || true
       - name: Setup Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:

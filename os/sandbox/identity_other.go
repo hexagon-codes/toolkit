@@ -16,3 +16,8 @@ func sandboxCreationTime(string) time.Time {
 func sandboxIdentityExtraMatches(sandboxPathIdentity, os.FileInfo) bool {
 	return true
 }
+
+// sandboxPathIsReparsePoint 非 Windows 平台无 junction 属性位问题。
+func sandboxPathIsReparsePoint(string) bool {
+	return false
+}
