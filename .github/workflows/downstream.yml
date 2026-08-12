@@ -5,6 +5,9 @@ name: Downstream Contract
 on:
   push:
     branches: [main]
+    # 纯文档改动跳过；tag 触发不受 paths 过滤影响，发布门禁保持全量。
+    paths-ignore:
+      - "**/*.md"
     tags:
       - "v*"
   pull_request:

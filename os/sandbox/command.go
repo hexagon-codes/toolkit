@@ -31,6 +31,9 @@ type sandboxPathIdentity struct {
 	// creationTime 是平台额外身份（Windows 目录创建时间的 FILETIME 原始值），
 	// 用于识别文件索引可能复用的替换场景；非 Windows 平台保持零值。
 	creationTime uint64
+	// windowsFileID 是 Windows 的 128 位文件 ID（含 NTFS 复用序列号，目录被
+	// 替换后必然不同），为最权威的身份判据；非 Windows 平台保持零值。
+	windowsFileID [16]byte
 }
 
 func snapshotSandboxDirectoryIdentity(field, path string) (sandboxPathIdentity, error) {
@@ -55,10 +58,11 @@ func snapshotSandboxDirectoryIdentity(field, path string) (sandboxPathIdentity, 
 		return sandboxPathIdentity{}, fmt.Errorf("resolve sandbox %s: %w", field, err)
 	}
 	return sandboxPathIdentity{
-		path:         filepath.Clean(path),
-		canonical:    filepath.Clean(canonical),
-		info:         info,
-		creationTime: sandboxCreationTime(path),
+		path:          filepath.Clean(path),
+		canonical:     filepath.Clean(canonical),
+		info:          info,
+		creationTime:  sandboxCreationTime(path),
+		windowsFileID: sandboxFileID(path),
 	}, nil
 }
 

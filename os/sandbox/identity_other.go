@@ -20,3 +20,8 @@ func sandboxIdentityExtraMatches(sandboxPathIdentity, os.FileInfo) bool {
 func sandboxPathIsReparsePoint(string) bool {
 	return false
 }
+
+// sandboxFileID 非 Windows 平台无文件 ID 身份。
+func sandboxFileID(string) [16]byte {
+	return [16]byte{}
+}

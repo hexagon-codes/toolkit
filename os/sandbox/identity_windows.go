@@ -49,16 +49,19 @@ func sandboxCreationTime(path string) uint64 {
 // fail-closed 视为身份已变化（无法证明相同即不可信），避免文件索引复用或
 // 创建时间不可读时把替换后的目录误判为原身份。
 func sandboxIdentityExtraMatches(identity sandboxPathIdentity, current os.FileInfo) bool {
-	if identity.creationTime == 0 {
+	// 128 位文件 ID 是 Windows 最权威的身份判据：目录被替换后即使文件索引
+	// 复用，NTFS 的复用序列号也会使 ID 必然不同；快照或复核任一环节取不到
+	// ID 都按 fail-closed 视为已变化。
+	if identity.windowsFileID == [16]byte{} {
 		return false
 	}
-	currentCreation := sandboxCreationTime(identity.path)
-	if currentCreation == 0 {
+	currentID := sandboxFileID(identity.path)
+	if currentID == [16]byte{} {
 		return false
 	}
-	if identity.creationTime != currentCreation {
-		fmt.Fprintf(os.Stderr, "sandbox: directory identity changed: creation time 0x%x != 0x%x (path %s)\n",
-			identity.creationTime, currentCreation, identity.path)
+	if identity.windowsFileID != currentID {
+		fmt.Fprintf(os.Stderr, "sandbox: directory identity changed: file ID %x != %x (path %s)\n",
+			identity.windowsFileID, currentID, identity.path)
 		return false
 	}
 	return true
@@ -101,4 +104,47 @@ func sandboxPathIsReparsePoint(path string) bool {
 		return false
 	}
 	return tagInfo.reparseTag != 0
+}
+
+// sandboxFileID 返回路径对应文件的 NTFS 128 位文件 ID（FILE_ID_INFO）。
+// 该 ID 包含 MFT 复用序列号：目录被替换后即使文件索引复用，序列号也会
+// 递增，是 Windows 上最权威的文件身份判据。失败返回零值（fail-closed）。
+func sandboxFileID(path string) [16]byte {
+	pathPointer, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return [16]byte{}
+	}
+	handle, err := windows.CreateFile(
+		pathPointer,
+		windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windowsReparseFlag,
+		0,
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "sandbox: read file ID for %q: %v\n", path, err)
+		return [16]byte{}
+	}
+	defer func() {
+		if closeErr := windows.CloseHandle(handle); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "sandbox: close file ID handle: %v\n", closeErr)
+		}
+	}()
+	// FILE_ID_INFO 结构（x/sys/windows 仅有信息类常量 FileIdInfo=18）。
+	var fileID struct {
+		volumeSerial uint64
+		identifier   [16]byte
+	}
+	if err := windows.GetFileInformationByHandleEx(
+		handle,
+		windows.FileIdInfo,
+		(*byte)(unsafe.Pointer(&fileID)),
+		uint32(unsafe.Sizeof(fileID)),
+	); err != nil {
+		fmt.Fprintf(os.Stderr, "sandbox: read file ID info for %q: %v\n", path, err)
+		return [16]byte{}
+	}
+	return fileID.identifier
 }

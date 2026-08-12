@@ -3,6 +3,10 @@ name: CI
 on:
   push:
     branches: [main]
+    # 纯文档改动（*.md）不影响代码与门禁语义，跳过全量 CI，避免文档迭代
+    # 触发偶发测试误伤；tag 触发不受 paths 过滤影响，发布门禁保持全量。
+    paths-ignore:
+      - "**/*.md"
     tags:
       - "v*"
   pull_request:
