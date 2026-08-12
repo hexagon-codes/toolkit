@@ -218,7 +218,7 @@ func auditLinuxWorkspaceContext(ctx context.Context, workspace string) error {
 		key := linuxInodeKey{device: stat.Dev, inode: stat.Ino}
 		value := links[key]
 		value.observed++
-		value.total = stat.Nlink
+		value.total = uint64(stat.Nlink)
 		links[key] = value
 		return nil
 	})
