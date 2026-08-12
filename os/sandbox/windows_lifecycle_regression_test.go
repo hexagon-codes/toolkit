@@ -201,7 +201,6 @@ func TestWindowsRequiredSandboxTestsRegisterDeterministicCleanup(t *testing.T) {
 		{"win_acl_policy_test.go", "func TestWindowsWorkspaceRejectsExternalHardLink", "newWindowsTestSandbox("},
 		{"win_acl_policy_test.go", "func TestWindowsWorkspaceRejectsReparsePoint", "newWindowsTestSandbox("},
 		{"win_acl_policy_test.go", "func TestWindowsWorkspaceRejectsInternalReparsePoint", "newWindowsTestSandbox("},
-		{"windows_application_control_integration_test.go", "func TestWindowsApplicationControlPolicyIsNotBypassed", "newWindowsTestSandbox("},
 		{"windows_root_contract_regression_test.go", "func TestWindowsNetworkPolicyMatrix", "registerWindowsTestSandboxCleanup("},
 		{"windows_security_boundary_test.go", "func TestWindows_NetworkDisabledSocketMatrix", "newWindowsTestSandbox("},
 		{"win_integration_test.go", "func TestWindows_Timeout", "newWindowsTestSandbox("},

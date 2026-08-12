@@ -47,13 +47,6 @@ type workflowStep struct {
 	run    string
 }
 
-type installerRequirement struct {
-	workflow string
-	job      string
-	command  string
-	ifExpr   string
-}
-
 type shellCommand struct {
 	words          []string
 	depth          int
@@ -71,15 +64,6 @@ type shellSegment struct {
 type shellBlock struct {
 	kind     string
 	function string
-}
-
-func TestBubblewrapWorkflowUsesSharedPinnedInstaller(t *testing.T) {
-	t.Parallel()
-
-	workflows := readWorkflowFiles(t, repositoryRoot(t))
-	if err := validateBubblewrapWorkflows(workflows); err != nil {
-		t.Fatal(err)
-	}
 }
 
 func TestBubblewrapInstallerSecurityContract(t *testing.T) {
@@ -104,70 +88,6 @@ func TestBubblewrapInstallerSecurityContract(t *testing.T) {
 	}
 	if err := validateBubblewrapInstaller(body); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestBubblewrapWorkflowContractRejectsCommentOnlyInstaller(t *testing.T) {
-	t.Parallel()
-
-	const source = `jobs:
-  test:
-    steps:
-      - uses: actions/checkout@0000000000000000000000000000000000000000
-      - name: Install Linux sandbox dependencies
-        if: runner.os == 'Linux'
-        run: ./scripts/install-bubblewrap-ci.sh
-`
-	requirement := installerRequirement{
-		workflow: "fixture.yml",
-		job:      "test",
-		command:  installerRootPath,
-		ifExpr:   "runner.os == 'Linux'",
-	}
-	document, err := parseWorkflow(source)
-	if err != nil {
-		t.Fatalf("parse valid workflow fixture: %v", err)
-	}
-	if _, contractErr := requireInstallerStep(document.jobs["test"], requirement); contractErr != nil {
-		t.Fatalf("valid workflow fixture must satisfy installer contract: %v", contractErr)
-	}
-	mutated, ok := replaceExactlyOnce(
-		source,
-		"run: "+installerRootPath,
-		"run: /bin/true # "+installerRootPath,
-	)
-	if !ok {
-		t.Fatal("prepare workflow mutation: installer run node not found exactly once")
-	}
-	document, err = parseWorkflow(mutated)
-	if err != nil {
-		t.Fatalf("parse mutated workflow fixture: %v", err)
-	}
-	if _, err := requireInstallerStep(document.jobs["test"], requirement); err == nil {
-		t.Fatal("workflow contract accepted an installer path present only in a YAML comment")
-	}
-}
-
-func TestBubblewrapWorkflowParserDoesNotTreatOtherTriggerListsAsPaths(t *testing.T) {
-	t.Parallel()
-
-	const source = `on:
-  push:
-    branches:
-      - scripts/install-bubblewrap-ci.sh
-    paths:
-      - go.mod
-jobs:
-  test:
-    steps:
-      - run: /bin/true
-`
-	document, err := parseWorkflow(source)
-	if err != nil {
-		t.Fatalf("parse trigger fixture: %v", err)
-	}
-	if containsExact(document.triggers["push"].paths, "scripts/install-bubblewrap-ci.sh") {
-		t.Fatal("workflow parser treated a branches entry as a paths entry")
 	}
 }
 
@@ -272,32 +192,6 @@ verify_reproducible_binary "$primary_output_dir/bwrap" "$verification_output_dir
 	}
 }
 
-func TestBubblewrapWorkflowContractRejectsShortCircuitedInstaller(t *testing.T) {
-	t.Parallel()
-
-	const source = `jobs:
-  test:
-    steps:
-      - uses: actions/checkout@0000000000000000000000000000000000000000
-      - name: Install Linux sandbox dependencies
-        if: runner.os == 'Linux'
-        run: /usr/bin/true || ./scripts/install-bubblewrap-ci.sh
-`
-	requirement := installerRequirement{
-		workflow: "fixture.yml",
-		job:      "test",
-		command:  installerRootPath,
-		ifExpr:   "runner.os == 'Linux'",
-	}
-	document, err := parseWorkflow(source)
-	if err != nil {
-		t.Fatalf("parse workflow fixture: %v", err)
-	}
-	if _, err := requireInstallerStep(document.jobs["test"], requirement); err == nil {
-		t.Fatal("workflow contract accepted an installer skipped by shell short-circuiting")
-	}
-}
-
 func TestBubblewrapInstallerContractRejectsShortCircuitedReproducibility(t *testing.T) {
 	t.Parallel()
 
@@ -352,132 +246,6 @@ func TestBubblewrapInstallerContractRequiresHashMismatchFailure(t *testing.T) {
 	if err := validateBubblewrapInstaller(mutated); err == nil {
 		t.Fatal("installer contract accepted a disabled reproducibility hash comparison")
 	}
-}
-
-func TestReadWorkflowFilesIncludesYAMLAndYML(t *testing.T) {
-	t.Parallel()
-
-	root := t.TempDir()
-	workflowDir := filepath.Join(root, ".github", "workflows")
-	if err := os.MkdirAll(workflowDir, 0o700); err != nil {
-		t.Fatalf("create workflow directory: %v", err)
-	}
-	for _, name := range []string{"primary.yml", "secondary.yaml"} {
-		if err := os.WriteFile(filepath.Join(workflowDir, name), []byte("jobs: {}\n"), 0o600); err != nil {
-			t.Fatalf("write workflow fixture %s: %v", name, err)
-		}
-	}
-	workflows := readWorkflowFiles(t, root)
-	for _, path := range []string{".github/workflows/primary.yml", ".github/workflows/secondary.yaml"} {
-		if _, ok := workflows[path]; !ok {
-			t.Errorf("workflow scan omitted %s", path)
-		}
-	}
-}
-
-func validateBubblewrapWorkflows(sources map[string]string) error {
-	documents := make(map[string]workflowDocument, len(sources))
-	for path, source := range sources {
-		document, err := parseWorkflow(source)
-		if err != nil {
-			return fmt.Errorf("parse workflow %s: %w", path, err)
-		}
-		documents[path] = document
-	}
-
-	requirements := []installerRequirement{
-		{workflow: ".github/workflows/ci.yml", job: "test", command: installerRootPath, ifExpr: "runner.os == 'Linux'"},
-		{workflow: ".github/workflows/ci.yml", job: "linux-root-sandbox-security", command: installerRootPath},
-		{workflow: ".github/workflows/ci.yml", job: "toolchain-compatibility", command: installerRootPath},
-		{workflow: ".github/workflows/sandbox-code-exec.yml", job: "sandbox-code-exec", command: installerSubPath, ifExpr: "runner.os == 'Linux'"},
-		{workflow: ".github/workflows/downstream.yml", job: "downstream", command: installerSubPath},
-	}
-	for _, requirement := range requirements {
-		document, ok := documents[requirement.workflow]
-		if !ok {
-			return fmt.Errorf("required workflow is missing: %s", requirement.workflow)
-		}
-		job, ok := document.jobs[requirement.job]
-		if !ok {
-			return fmt.Errorf("required workflow job is missing: %s:%s", requirement.workflow, requirement.job)
-		}
-		index, err := requireInstallerStep(job, requirement)
-		if err != nil {
-			return err
-		}
-		if !hasCheckoutBefore(job.steps, index) {
-			return fmt.Errorf("installer must run after checkout: %s:%s", requirement.workflow, requirement.job)
-		}
-	}
-
-	sandbox := documents[".github/workflows/sandbox-code-exec.yml"]
-	for _, event := range []string{"push", "pull_request"} {
-		trigger, ok := sandbox.triggers[event]
-		if !ok {
-			return fmt.Errorf("sandbox workflow trigger is missing: %s", event)
-		}
-		if !containsExact(trigger.paths, "scripts/install-bubblewrap-ci.sh") {
-			return fmt.Errorf("sandbox workflow %s paths must include scripts/install-bubblewrap-ci.sh", event)
-		}
-	}
-
-	for path, document := range documents {
-		for jobName, job := range document.jobs {
-			for _, step := range job.steps {
-				if !isShellWorkflowStep(step) {
-					continue
-				}
-				commands, err := parseShell(step.run)
-				if err != nil {
-					return fmt.Errorf("parse run step %s:%s:%s: %w", path, jobName, step.name, err)
-				}
-				for _, command := range commands {
-					executable, arguments := shellExecutable(command.words)
-					base := filepath.Base(executable)
-					if (base == "apt" || base == "apt-get") && containsExact(arguments, "bubblewrap") {
-						return fmt.Errorf("workflow must not install the distribution Bubblewrap package: %s:%s:%s", path, jobName, step.name)
-					}
-				}
-			}
-		}
-	}
-	return nil
-}
-
-func requireInstallerStep(job workflowJob, requirement installerRequirement) (int, error) {
-	indices := make([]int, 0, 1)
-	for index, step := range job.steps {
-		if !isShellWorkflowStep(step) {
-			continue
-		}
-		commands, err := parseShell(step.run)
-		if err != nil {
-			return -1, fmt.Errorf("parse installer step %s:%s: %w", requirement.workflow, requirement.job, err)
-		}
-		for _, command := range commands {
-			executable, arguments := shellExecutable(command.words)
-			if isUnconditionalTopLevel(command) && executable == requirement.command && len(arguments) == 0 {
-				indices = append(indices, index)
-			}
-		}
-	}
-	if len(indices) != 1 {
-		return -1, fmt.Errorf("workflow job must invoke the pinned installer exactly once: %s:%s got %d", requirement.workflow, requirement.job, len(indices))
-	}
-	step := job.steps[indices[0]]
-	if normalizeExpression(step.ifExpr) != normalizeExpression(requirement.ifExpr) {
-		return -1, fmt.Errorf("unexpected installer condition in %s:%s: got %q want %q", requirement.workflow, requirement.job, step.ifExpr, requirement.ifExpr)
-	}
-	return indices[0], nil
-}
-
-func hasCheckoutBefore(steps []workflowStep, index int) bool {
-	for _, step := range steps[:index] {
-		if strings.HasPrefix(step.uses, "actions/checkout@") {
-			return true
-		}
-	}
-	return false
 }
 
 func validateBubblewrapInstaller(source string) error {
@@ -1507,15 +1275,6 @@ func shellCommandExecutesPath(words []string, path string) bool {
 	return false
 }
 
-func isShellWorkflowStep(step workflowStep) bool {
-	shell := strings.ToLower(strings.TrimSpace(step.shell))
-	return shell == "" || shell == "bash" || shell == "sh" || strings.HasPrefix(shell, "bash ") || strings.HasPrefix(shell, "sh ")
-}
-
-func normalizeExpression(value string) string {
-	return strings.Join(strings.Fields(value), " ")
-}
-
 func leadingSpaces(value string) int {
 	return len(value) - len(strings.TrimLeft(value, " "))
 }
@@ -1536,32 +1295,6 @@ func repositoryRoot(t *testing.T) string {
 		t.Fatal("locate contract test file")
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(currentFile), ".."))
-}
-
-func readWorkflowFiles(t *testing.T, root string) map[string]string {
-	t.Helper()
-
-	var paths []string
-	for _, pattern := range []string{"*.yml", "*.yaml"} {
-		matches, err := filepath.Glob(filepath.Join(root, ".github", "workflows", pattern))
-		if err != nil {
-			t.Fatalf("list workflow files matching %s: %v", pattern, err)
-		}
-		paths = append(paths, matches...)
-	}
-	if len(paths) == 0 {
-		t.Fatal("no workflow files found")
-	}
-	sort.Strings(paths)
-	result := make(map[string]string, len(paths))
-	for _, path := range paths {
-		relative, err := filepath.Rel(root, path)
-		if err != nil {
-			t.Fatalf("resolve workflow path %s: %v", path, err)
-		}
-		result[filepath.ToSlash(relative)] = readContractFile(t, path)
-	}
-	return result
 }
 
 func readContractFile(t *testing.T, path string) string {

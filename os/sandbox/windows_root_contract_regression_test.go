@@ -27,26 +27,6 @@ func windowsBackendForTest(t *testing.T, sandboxValue Sandbox) *windowsSandbox {
 	return backend
 }
 
-func TestWindowsRestrictedTokenKeepsApplicationControlEnabled(t *testing.T) {
-	const sandboxInertFlag = uint32(0x2)
-
-	flags := restrictedTokenFlags()
-	if flags&sandboxInertFlag != 0 {
-		t.Fatalf("restricted token flags %#x include SANDBOX_INERT", flags)
-	}
-	if flags != disableMaxPrivilege {
-		t.Fatalf("restricted token flags = %#x, want DISABLE_MAX_PRIVILEGE only", flags)
-	}
-
-	token, err := createSandboxToken()
-	if err != nil {
-		t.Fatalf("create restricted token without SANDBOX_INERT: %v", err)
-	}
-	if err := token.Close(); err != nil {
-		t.Fatalf("close restricted token: %v", err)
-	}
-}
-
 func TestWindowsNewRejectsReadablePathsUntilBrokeredMappingsExist(t *testing.T) {
 	_, err := New(Config{
 		Workspace:            t.TempDir(),

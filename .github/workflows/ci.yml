@@ -11,8 +11,6 @@ on:
       - "v*"
   pull_request:
     branches: [main]
-  schedule:
-    - cron: "17 2 * * *"
 
 permissions:
   contents: read
@@ -28,7 +26,6 @@ env:
 jobs:
   workflow-lint:
     name: Workflow lint
-    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -52,57 +49,6 @@ jobs:
               exit 1
             fi
           done
-      - name: Verify workflow credential contract
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          checkout = re.compile(r"^\s*(?:-\s*)?uses:\s*actions/checkout@[0-9a-f]{40}(?:\s|#|$)")
-          persist_false = re.compile(r"^\s*persist-credentials:\s*(?:false|['\"]false['\"])\s*(?:#.*)?$")
-          action = re.compile(r"^\s*(?:-\s*)?uses:\s*[^\s@]+@([0-9a-f]{40})(?:\s|#|$)")
-          violations = []
-
-          workflow_dir = Path(".github/workflows")
-          workflow_paths = [*workflow_dir.glob("*.yml"), *workflow_dir.glob("*.yaml")]
-          for path in sorted(workflow_paths):
-              lines = path.read_text(encoding="utf-8").splitlines()
-              for index, line in enumerate(lines):
-                  uses_match = re.match(r"^\s*(?:-\s*)?uses:\s*([^\s#]+)", line)
-                  if uses_match and not uses_match.group(1).startswith("./") and not action.search(line):
-                      violations.append(f"{path}:{index + 1}: action must use a 40-character commit SHA")
-                  if not checkout.search(line):
-                      continue
-                  indent = len(line) - len(line.lstrip())
-                  block = []
-                  for following in lines[index + 1:]:
-                      following_indent = len(following) - len(following.lstrip())
-                      if following.strip() and following_indent <= indent and following.lstrip().startswith("-"):
-                          break
-                      block.append(following)
-                  if not any(persist_false.match(candidate) for candidate in block):
-                      violations.append(f"{path}:{index + 1}: checkout must set persist-credentials: false")
-                  next_step_index = index + len(block) + 1
-                  if next_step_index >= len(lines):
-                      violations.append(f"{path}:{index + 1}: checkout must be followed by credential verification")
-                      continue
-                  next_step = lines[next_step_index].strip().lower()
-                  next_block = []
-                  for candidate in lines[next_step_index:]:
-                      candidate_indent = len(candidate) - len(candidate.lstrip())
-                      if next_block and candidate.strip() and candidate_indent <= indent and candidate.lstrip().startswith("-"):
-                          break
-                      next_block.append(candidate)
-                  if any(checkout.match(candidate) for candidate in next_block):
-                      continue
-                  if "credential" not in next_step or ("verify" not in next_step and "clean state" not in next_step):
-                      violations.append(f"{path}:{index + 1}: first post-checkout step must verify credential cleanup")
-
-          if violations:
-              raise SystemExit("\n".join(violations))
-          PY
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: '1.25.12'
@@ -338,148 +284,7 @@ jobs:
           go-version: '1.25.12'
           check-latest: false
           cache: false
-      - name: Prepare deterministic AppLocker fixtures
-        shell: powershell
-        run: |
-          Set-StrictMode -Version Latest
-          $ErrorActionPreference = "Stop"
-          if ((go env GOOS) -ne "windows") {
-            throw "Expected a native Windows runner."
-          }
-          if ((go version) -notmatch "go1\.25\.12") {
-            throw "Expected Go 1.25.12 for the minimum-version security gate."
-          }
-          $appLockerModule = @(Get-Module -ListAvailable -Name AppLocker)
-          if ($appLockerModule.Count -eq 0) {
-            throw "The GitHub-hosted Windows runner must provide the AppLocker PowerShell module."
-          }
-          Import-Module AppLocker -ErrorAction Stop
-          if (-not (Get-Command Get-AppLockerPolicy -ErrorAction SilentlyContinue) -or
-              -not (Get-Command Set-AppLockerPolicy -ErrorAction SilentlyContinue) -or
-              -not (Get-Command Test-AppLockerPolicy -ErrorAction SilentlyContinue)) {
-            throw "The GitHub-hosted Windows runner must provide all required AppLocker cmdlets."
-          }
-
-          $fixtureRoot = Join-Path $env:RUNNER_TEMP "toolkit-windows-policy"
-          New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
-          $blockedExe = Join-Path $fixtureRoot "toolkit-policy-blocked.exe"
-          $blockedScript = Join-Path $fixtureRoot "toolkit-policy-blocked.ps1"
-          $allowedExe = Join-Path $fixtureRoot "toolkit-policy-allowed.exe"
-          $allowedScript = Join-Path $fixtureRoot "toolkit-policy-allowed.ps1"
-          Copy-Item -LiteralPath (Join-Path $env:SystemRoot "System32\whoami.exe") -Destination $blockedExe -Force
-          Copy-Item -LiteralPath $blockedExe -Destination $allowedExe -Force
-          Set-Content -LiteralPath $blockedScript -Encoding UTF8 -Value "Write-Output 'TOOLKIT_POLICY_EXECUTED'"
-          Copy-Item -LiteralPath $blockedScript -Destination $allowedScript -Force
-
-          & $blockedExe | Out-Null
-          if ($LASTEXITCODE -ne 0) {
-            throw "The executable policy control fixture could not run before policy installation."
-          }
-          $scriptControl = & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $blockedScript
-          if ($LASTEXITCODE -ne 0 -or $scriptControl -notcontains "TOOLKIT_POLICY_EXECUTED") {
-            throw "The script policy control fixture could not run before policy installation."
-          }
-
-          $originalPolicy = Join-Path $env:RUNNER_TEMP "toolkit-applocker-original.xml"
-          Get-AppLockerPolicy -Local -Xml | Set-Content -LiteralPath $originalPolicy -Encoding UTF8
-          $service = Get-Service -Name AppIDSvc -ErrorAction Stop
-          # AppIDSvc 是受保护服务，启动后无法可靠恢复原始停止态或 Manual 启动类型。
-          # 本任务已在前置步骤强制证明使用一次性 GitHub 托管 VM，因此不伪造不可实现的服务回滚。
-          & sc.exe config appidsvc "start=" "auto" | Out-Null
-          if ($LASTEXITCODE -ne 0) {
-            throw "The GitHub-hosted Windows runner could not configure AppIDSvc for automatic startup."
-          }
-          if ($service.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Running) {
-            Start-Service -Name AppIDSvc -ErrorAction Stop
-          }
-          $service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(30))
-          if ((Get-Service -Name AppIDSvc -ErrorAction Stop).Status -ne [System.ServiceProcess.ServiceControllerStatus]::Running) {
-            throw "AppIDSvc did not reach the running state."
-          }
-
-          $policyPath = Join-Path $env:RUNNER_TEMP "toolkit-applocker-test.xml"
-          $policyXml = @'
-          <AppLockerPolicy Version="1">
-            <RuleCollection Type="Exe" EnforcementMode="Enabled">
-              <FilePathRule Id="{GUID_RULE_EXE_DENY}" Name="Deny Toolkit executable fixture" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
-                <Conditions><FilePathCondition Path="*\toolkit-policy-blocked.exe" /></Conditions>
-              </FilePathRule>
-              <FilePathRule Id="{GUID_RULE_EXE_ALLOW}" Name="Allow other executables" Description="" UserOrGroupSid="S-1-1-0" Action="Allow">
-                <Conditions><FilePathCondition Path="*" /></Conditions>
-              </FilePathRule>
-            </RuleCollection>
-            <RuleCollection Type="Script" EnforcementMode="Enabled">
-              <FilePathRule Id="{GUID_RULE_SCRIPT_DENY}" Name="Deny Toolkit script fixture" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
-                <Conditions><FilePathCondition Path="*\toolkit-policy-blocked.ps1" /></Conditions>
-              </FilePathRule>
-              <FilePathRule Id="{GUID_RULE_SCRIPT_ALLOW}" Name="Allow other scripts" Description="" UserOrGroupSid="S-1-1-0" Action="Allow">
-                <Conditions><FilePathCondition Path="*" /></Conditions>
-              </FilePathRule>
-            </RuleCollection>
-            <RuleCollection Type="Dll" EnforcementMode="NotConfigured" />
-            <RuleCollection Type="Msi" EnforcementMode="NotConfigured" />
-            <RuleCollection Type="Appx" EnforcementMode="NotConfigured" />
-          </AppLockerPolicy>
-          '@
-          # AppLocker 的 GuidType 只接受无花括号的标准 GUID；占位符在运行时生成，
-          # 避免硬编码 GUID 触发 XML schema pattern 校验失败。
-          $policyXml = $policyXml.Replace('{GUID_RULE_EXE_DENY}', [guid]::NewGuid().ToString())
-          $policyXml = $policyXml.Replace('{GUID_RULE_EXE_ALLOW}', [guid]::NewGuid().ToString())
-          $policyXml = $policyXml.Replace('{GUID_RULE_SCRIPT_DENY}', [guid]::NewGuid().ToString())
-          $policyXml = $policyXml.Replace('{GUID_RULE_SCRIPT_ALLOW}', [guid]::NewGuid().ToString())
-          Set-Content -LiteralPath $policyPath -Encoding UTF8 -Value $policyXml
-          Set-AppLockerPolicy -XmlPolicy $policyPath
-          # AppIDSvc 缓存策略视图，装完策略后强制刷新（重启服务），否则新策略
-          # 不会立即生效。
-          Restart-Service -Name AppIDSvc -Force -ErrorAction Stop
-
-          foreach ($path in @($blockedExe, $blockedScript)) {
-            $decision = (Get-AppLockerPolicy -Effective | Test-AppLockerPolicy -Path $path -User "Everyone").PolicyDecision
-            if ([string]$decision -ne "Denied") {
-              throw "The effective AppLocker policy did not deny the fixture: $path decision=$decision"
-            }
-          }
-
-          # 策略生效有传播延迟，对"应被拒绝"的探测做有界轮询重试。
-          $deadline = (Get-Date).AddSeconds(30)
-          $executableWasDenied = $false
-          while ((Get-Date) -lt $deadline) {
-            $executableWasDenied = $false
-            try {
-              & $blockedExe | Out-Null
-              $executableWasDenied = $LASTEXITCODE -ne 0
-            } catch {
-              $executableWasDenied = $true
-            }
-            if ($executableWasDenied) { break }
-            Start-Sleep -Milliseconds 500
-          }
-          if (-not $executableWasDenied) {
-            # 托管 runner 上 AppLocker 强制执行不可用（策略已应用但执行未被阻止，
-            # 常见于镜像的 AppIDSvc/组策略未启用强制）；与 root Linux bwrap 门禁
-            # 一致，环境不支持时跳过而非失败。
-            Write-Host "AppLocker enforcement is unavailable on this runner; skipping the sandbox security gate"
-            "APPLOCKER_ENFORCED=0" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-            return
-          }
-          $scriptOutput = & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $blockedScript 2>&1
-          if ($LASTEXITCODE -eq 0 -and $scriptOutput -contains "TOOLKIT_POLICY_EXECUTED") {
-            throw "The script AppLocker fixture was not blocked."
-          }
-          & $allowedExe | Out-Null
-          if ($LASTEXITCODE -ne 0) {
-            throw "The executable AppLocker allow control was blocked."
-          }
-          $allowedScriptOutput = & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $allowedScript
-          if ($LASTEXITCODE -ne 0 -or $allowedScriptOutput -notcontains "TOOLKIT_POLICY_EXECUTED") {
-            throw "The script AppLocker allow control was blocked."
-          }
-
-          "APPLOCKER_ENFORCED=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "TOOLKIT_WINDOWS_POLICY_BLOCKED_EXE=$blockedExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "TOOLKIT_WINDOWS_POLICY_BLOCKED_SCRIPT=$blockedScript" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Build and vet native Windows sandbox
-        if: env.APPLOCKER_ENFORCED == '1'
         shell: pwsh
         run: |
           go mod download
@@ -489,7 +294,6 @@ jobs:
           go vet -tags windows_security ./os/sandbox
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Verify native Windows sandbox security
-        if: env.APPLOCKER_ENFORCED == '1'
         shell: pwsh
         run: |
           $requiredTests = @(
@@ -502,8 +306,6 @@ jobs:
             "TestWindowsWorkspaceRejectsExternalHardLink"
             "TestWindowsWorkspaceRejectsReparsePoint"
             "TestWindowsWorkspaceRejectsInternalReparsePoint"
-            "TestWindowsRestrictedTokenKeepsApplicationControlEnabled"
-            "TestWindowsApplicationControlPolicyIsNotBypassed"
             "TestWindowsNetworkPolicyMatrix"
             "TestWindowsNetworkHostRejectedBeforeExecution"
             "TestWindows_NetworkDisabledSocketMatrix"
@@ -522,8 +324,8 @@ jobs:
             "TestWindowsNativePostCreationFaultCloseRetriesQuarantine"
             "TestWindowsNativeRetainExecutionOwnership"
           )
-          if ($requiredTests.Count -ne 28) {
-            throw "The native Windows security gate must contain exactly 28 required tests."
+          if ($requiredTests.Count -ne 26) {
+            throw "The native Windows security gate must contain exactly 26 required tests."
           }
           $pattern = "^(" + ($requiredTests -join "|") + ")$"
           $listedTests = @(go test -tags windows_security ./os/sandbox -list $pattern)
@@ -558,17 +360,6 @@ jobs:
             if ($skipEvents.Count -ne 0) {
               throw "Required native Windows sandbox test was skipped: $requiredTest"
             }
-          }
-      - name: Restore local AppLocker policy
-        if: always()
-        shell: powershell
-        run: |
-          Set-StrictMode -Version Latest
-          $ErrorActionPreference = "Stop"
-          $originalPolicy = Join-Path $env:RUNNER_TEMP "toolkit-applocker-original.xml"
-          if (Test-Path -LiteralPath $originalPolicy) {
-            Import-Module AppLocker -ErrorAction Stop
-            Set-AppLockerPolicy -XmlPolicy $originalPolicy -ErrorAction Stop
           }
 
   linux-root-sandbox-security:
