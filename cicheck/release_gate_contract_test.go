@@ -67,7 +67,8 @@ func TestAPICompatibilityGateIsHardAndAuditable(t *testing.T) {
 	if len(baselineSetting) != 2 {
 		t.Fatal("API compatibility gate must declare its approved baseline")
 	}
-	baseline := readContractFile(t, filepath.Join(repositoryRoot(t), baselineSetting[1]))
+	baseline := strings.ReplaceAll(readContractFile(t, filepath.Join(repositoryRoot(t), baselineSetting[1])), "\r\n", "\n")
+	baseline = strings.ReplaceAll(baseline, "\r\n", "\n")
 	if strings.Contains(baseline, "## compatible changes") || strings.Contains(baseline, "# summary") {
 		t.Fatal("breaking API baseline must contain only incompatible change sections")
 	}
