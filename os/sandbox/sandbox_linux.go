@@ -60,7 +60,8 @@ type linuxSandbox struct {
 func init() {
 	if len(os.Args) == 3 && os.Args[1] == linuxBoundaryProbeArgument &&
 		os.Getenv(linuxBoundaryProbeEnv) == linuxBoundaryProbeMark {
-		os.Exit(runLinuxBoundaryProbePayload(os.Args[2] == "1"))
+		// 参数与父进程 strconv.FormatBool 的布尔编码一致，环境门标记仍独立使用 "1"。
+		os.Exit(runLinuxBoundaryProbePayload(os.Args[2] == "true"))
 	}
 }
 

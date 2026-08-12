@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -45,6 +46,64 @@ func TestLinuxBoundaryProbeNonRootProvesProcessLimitWithEAGAIN(t *testing.T) {
 	result := runLinuxBwrapProbe(bwrap, false)
 	if result.Isolation != LimitStatusEnforced {
 		t.Fatalf("non-root Linux boundary probe = %+v, want isolation enforced", result)
+	}
+}
+
+func TestLinuxBoundaryProbeSharedNetworkHonorsBooleanArgument(t *testing.T) {
+	requireUsableLinuxBwrap(t)
+	bwrap, err := linuxBwrapPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	if initErr := initializePOSIXRuntimeDirectories(workspace); initErr != nil {
+		t.Fatal(initErr)
+	}
+	probeExecutable, err := copyLinuxBoundaryProbeExecutable(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := cleanLinuxEnv(workspace, os.Environ())
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err = appendLinuxParentNamespaceEnvironment(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env = append(env, linuxBoundaryProbeEnv+"="+linuxBoundaryProbeMark)
+
+	// 仅共享网络，其他命名空间与能力清空保持真实隔离，避免前置条件掩盖布尔解析错误。
+	sandboxInstance := &linuxSandbox{cfg: Config{Workspace: workspace, Network: NetworkHost}}
+	for _, networkMustDiffer := range []bool{false, true} {
+		t.Run(strconv.FormatBool(networkMustDiffer), func(t *testing.T) {
+			args, err := sandboxInstance.bwrapArgs(Command{
+				Path: probeExecutable,
+				Args: []string{linuxBoundaryProbeArgument, strconv.FormatBool(networkMustDiffer)},
+				Dir:  workspace,
+				Env:  env,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			// bwrap 路径由可信系统候选解析，参数通过结构化命令生成。
+			cmd := exec.CommandContext(ctx, bwrap, args...) // #nosec G204 -- 路径与参数来自受控的真实探针夹具。
+			cmd.Env = trustedPOSIXLauncherEnvironment()
+			output, err := cmd.CombinedOutput()
+			if networkMustDiffer {
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) || exitErr.ExitCode() != 126 ||
+					!strings.Contains(string(output), "Linux boundary probe did not isolate network namespace") {
+					t.Fatalf("shared network probe with true: error=%v output=%q, want network namespace rejection with exit 126", err, output)
+				}
+				return
+			}
+			if err != nil || parseLinuxBoundaryProbeResult(string(output)).Isolation != LimitStatusEnforced {
+				t.Fatalf("shared network probe with false: error=%v output=%q, want isolation enforced", err, output)
+			}
+		})
 	}
 }
 
