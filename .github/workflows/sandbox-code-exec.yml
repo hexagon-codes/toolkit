@@ -42,7 +42,7 @@ env:
   GOTOOLCHAIN: local
   GOPRIVATE: github.com/hexagon-codes/*
   HEXCLAW_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.hexclaw_ref || 'main' }}
-  RUN_LIVE_NETWORK: ${{ github.event_name != 'workflow_dispatch' || inputs.run_live_network == 'true' }}
+  RUN_LIVE_NETWORK: ${{ github.event_name == 'workflow_dispatch' && inputs.run_live_network == 'true' }}
 
 jobs:
   workflow-lint:
@@ -276,8 +276,23 @@ jobs:
             else
               required_tests+=(TestCodeExecSkill_Execute_ModuleGoFiles)
             fi
-            if [[ "$HEXCLAW_CODE_EXEC_LIVE_NETWORK" == "1" ]]; then
-              required_tests+=(TestCodeExecSkill_Execute_PythonCrawlerHostNetworkRejected)
+            # 按行为组发现受控网络用例；公网检查仅在手动开启时纳入。
+            crawler_tests="$(go test -list '^TestCodeExecSkill_Execute_PythonCrawler' ./skill/builtin)"
+            found_crawler=false
+            while IFS= read -r test_name; do
+              if [[ "$test_name" == TestCodeExecSkill_Execute_PythonCrawler* ]]; then
+                if [[ "$test_name" == TestCodeExecSkill_Execute_PythonCrawlerPublicNetwork* && "$HEXCLAW_CODE_EXEC_LIVE_NETWORK" != "1" ]]; then
+                  continue
+                fi
+                required_tests+=("$test_name")
+                if [[ "$test_name" != TestCodeExecSkill_Execute_PythonCrawlerPublicNetwork* ]]; then
+                  found_crawler=true
+                fi
+              fi
+            done <<<"$crawler_tests"
+            if [[ "$found_crawler" != true ]]; then
+              echo "Required code_exec Python crawler test group is missing." >&2
+              exit 1
             fi
           fi
 
