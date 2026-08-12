@@ -4,6 +4,11 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 cd -- "$script_dir/.."
 evidence_dir="${RUNNER_TEMP:?RUNNER_TEMP is required}"
+# 身份切换后的挂载解析不能依赖 runner 私有目录的遍历权限。
+# 共享父目录只提供遍历，HOME/cache/tmp 仍由各身份以 0700 独占。
+runtime_dir="$(mktemp -d /tmp/toolkit-linux-ci.XXXXXX)"
+chmod 0755 "$runtime_dir"
+trap 'sudo rm -rf -- "$runtime_dir"' EXIT
 trusted_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 go_bin="$(command -v go)"
 go_root="$(go env GOROOT)"
@@ -44,12 +49,12 @@ nonroot_tests=(
   TestLinuxBwrapHidesExternalWorkspaceWithoutPrivilege
 )
 
-module_cache="$evidence_dir/toolkit-sandbox-modcache"
+module_cache="$runtime_dir/modcache"
 cache_ready=false
 for identity in root nonroot; do
-  home_dir="$evidence_dir/toolkit-$identity-home"
-  cache_dir="$evidence_dir/toolkit-$identity-cache"
-  tmp_dir="$evidence_dir/toolkit-$identity-tmp"
+  home_dir="$runtime_dir/$identity-home"
+  cache_dir="$runtime_dir/$identity-cache"
+  tmp_dir="$runtime_dir/$identity-tmp"
   launcher=(sudo)
   required=("${root_tests[@]}")
   if [[ "$identity" == nonroot ]]; then
@@ -79,7 +84,7 @@ for identity in root nonroot; do
     continue
   fi
   if [[ "$cache_ready" == false ]]; then
-    GOMODCACHE="$module_cache" GOCACHE="$evidence_dir/toolkit-prewarm-cache" \
+    GOMODCACHE="$module_cache" GOCACHE="$runtime_dir/prewarm-cache" \
       go test -mod=readonly -run '^$' ./os/sandbox
     chmod -R a+rX "$module_cache"
     cache_ready=true
