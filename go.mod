@@ -15,6 +15,7 @@ require (
 	github.com/redis/go-redis/v9 v9.17.3
 	go.mongodb.org/mongo-driver v1.17.7
 	golang.org/x/crypto v0.52.0
+	golang.org/x/net v0.55.0
 	golang.org/x/sync v0.21.0
 	golang.org/x/sys v0.45.0
 	golang.org/x/time v0.8.0
