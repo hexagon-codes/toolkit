@@ -1021,7 +1021,8 @@ reflectx.HasField(user, "Name")                    // true
 names := reflectx.FieldNames(user)                 // ["Name", "Age"]
 
 // 深拷贝（支持循环引用检测，nil 安全）
-copied := reflectx.DeepCopy(original)              // 递归深拷贝
+copied := reflectx.DeepCopy(original)              // 递归深拷贝；不能隔离的值沿用历史行为
+checked, err := reflectx.DeepCopyChecked(original) // 可失败深拷贝；私有可变引用返回错误
 shallow := reflectx.Clone(original)                // 浅拷贝
 
 // 类型检查

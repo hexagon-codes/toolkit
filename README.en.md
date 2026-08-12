@@ -1021,7 +1021,8 @@ reflectx.HasField(user, "Name")                    // true
 names := reflectx.FieldNames(user)                 // ["Name", "Age"]
 
 // Deep copy (supports cycle detection, nil-safe)
-copied := reflectx.DeepCopy(original)              // recursive deep copy
+copied := reflectx.DeepCopy(original)              // recursive deep copy; historical behavior for non-isolatable values
+checked, err := reflectx.DeepCopyChecked(original) // checked copy; returns an error for private mutable references
 shallow := reflectx.Clone(original)                // shallow copy
 
 // Type checks
