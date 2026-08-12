@@ -4,10 +4,12 @@ name: API Compatibility
 # v0.x 允许在 minor 版本中包含有意破坏，但工具、网络、加载和版本验证失败都必须阻断。
 on:
   push:
+    branches: [main]
     tags:
       - "v*"
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -19,6 +21,7 @@ concurrency:
 env:
   # 确保 API 门禁使用 setup-go 选定的工具链，不允许静默自动升级。
   GOTOOLCHAIN: local
+  GORELEASE_VERSION: v0.0.0-20260727155853-b88d891fe743
   API_BREAKING_BASELINE: ".github/workflows/api-breaking-v0.3.0.txt"
   API_BREAKING_CHECKER: ".github/workflows/check-api-breaking.py"
 
@@ -27,7 +30,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -48,12 +51,12 @@ jobs:
               exit 1
             fi
           done
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           check-latest: false
       - name: Install gorelease
-        run: go install golang.org/x/exp/cmd/gorelease@v0.0.0-20260727155853-b88d891fe743
+        run: go install golang.org/x/exp/cmd/gorelease@${{ env.GORELEASE_VERSION }}
       - name: Verify release tag
         if: github.ref_type == 'tag'
         shell: bash
@@ -75,5 +78,17 @@ jobs:
           # -version：目标版本已存在时报 already exists、base 非 major 最新时
           # 报 Cannot suggest，两种受限模式都不适用于发布门禁。
           base_version="$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -vx "$GITHUB_REF_NAME" | head -1)"
+          export API_BASE_TAG="$base_version"
+          export API_BASE_SHA="$(git rev-parse "$base_version^{commit}")"
+          python3 scripts/verification-inputs.py "$RUNNER_TEMP/api-inputs.json"
           gorelease -base="$base_version" | tee "$report_path"
           python3 "$API_BREAKING_CHECKER" "$report_path" "$API_BREAKING_BASELINE" --allow-empty
+      - name: Preserve verification inputs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: verification-inputs-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/api-inputs.json
+            ${{ runner.temp }}/gorelease-report.txt
+          retention-days: 90

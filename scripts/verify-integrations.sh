@@ -4,7 +4,7 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd -- "$script_dir/.." && pwd -P)"
-events_dir="$(mktemp -d)"
+events_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/toolkit-integration-XXXXXX")"
 
 mysql_container="toolkit-mysql-${PPID}-$$"
 redis_container="toolkit-redis-${PPID}-$$"
@@ -16,12 +16,17 @@ mysql_image="mysql:8.4@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe
 redis_image="redis:7.4@sha256:e9b2e45ecd47fbb69b877cf8d045d5cccaaaed52524b6e098b4abe8212994f73"
 
 cleanup() {
+  if [[ "$1" -ne 0 ]]; then
+    docker logs "$mysql_container" >"$events_dir/mysql-service.log" 2>&1 || true
+    docker logs "$redis_container" >"$events_dir/redis-service.log" 2>&1 || true
+    cat "$events_dir"/*-service.log >&2
+  fi
   docker rm -f "$mysql_container" "$redis_container" >/dev/null 2>&1 || true
-  if [[ -n "${events_dir:-}" && -d "$events_dir" && "$events_dir" != "/" ]]; then
+  if [[ -z "${RUNNER_TEMP:-}" && -n "${events_dir:-}" && -d "$events_dir" && "$events_dir" != "/" ]]; then
     rm -rf -- "$events_dir"
   fi
 }
-trap cleanup EXIT
+trap 'cleanup "$?"' EXIT
 
 command -v docker >/dev/null 2>&1 || {
   printf '%s\n' "docker is required to run integration tests" >&2

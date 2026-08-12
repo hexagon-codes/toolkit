@@ -11,6 +11,7 @@ on:
       - "v*"
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -25,11 +26,11 @@ env:
 
 jobs:
   workflow-lint:
-    name: Workflow lint
+    name: CI workflow lint
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Verify checkout credentials are absent
@@ -49,12 +50,21 @@ jobs:
               exit 1
             fi
           done
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           check-latest: false
       - name: Run actionlint
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      - name: Record verification inputs
+        run: python3 scripts/verification-inputs.py "$RUNNER_TEMP/verification-inputs.json"
+      - name: Preserve verification inputs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: verification-inputs-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/verification-inputs.json
+          retention-days: 90
 
   test:
     name: Native minimum (${{ matrix.name }})
@@ -74,7 +84,7 @@ jobs:
           - name: Windows
             os: windows-2022
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Verify checkout credentials are absent
@@ -94,7 +104,7 @@ jobs:
               exit 1
             fi
           done
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           # 最低工具链以 go.mod 为唯一来源，补丁升级无需逐个修改工作流。
           go-version-file: go.mod
@@ -113,25 +123,16 @@ jobs:
       - name: Install Linux sandbox dependencies
         if: runner.os == 'Linux'
         run: ./scripts/install-bubblewrap-ci.sh
-      - name: Install Node.js 22 (macOS image node is broken)
+      - name: Setup Node.js (macOS)
         if: runner.os == 'macOS'
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-      - name: Install working runtimes (macOS image node/pip are broken)
+      - name: Setup Python (macOS)
         if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          set -euo pipefail
-          # 镜像自带 pip3 缺失 pip 模块且残留损坏的 dist-info 记录（ensurepip/get-pip
-          # 升级时卸载报 uninstall-no-record-file、--ignore-installed 跳过包安装）。
-          # 物理清理 site-packages 的 pip 痕迹后全新安装包与脚本。
-          SITE_PACKAGES="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
-          rm -rf "$SITE_PACKAGES"/pip "$SITE_PACKAGES"/pip-*.dist-info
-          curl -fsSL -o "$RUNNER_TEMP/get-pip.py" https://bootstrap.pypa.io/get-pip.py
-          PYTHONBREAKSYSTEMPACKAGES=1 python3 "$RUNNER_TEMP/get-pip.py" --break-system-packages
-          node --version
-          pip3 --version
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
       - name: Verify root module metadata
         run: go mod tidy -diff
       - run: go mod download
@@ -140,7 +141,10 @@ jobs:
       - name: Vet
         run: go vet -mod=readonly ./...
       - name: Test
-        run: go test -mod=readonly -count=1 ./...
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -json -mod=readonly -count=1 ./... | tee "$RUNNER_TEMP/ordinary-tests.jsonl"
       - name: Verify native macOS sandbox security
         if: runner.os == 'macOS'
         shell: bash
@@ -173,34 +177,8 @@ jobs:
             TestDarwinTrustedBuildRunsFrozenGoCompilerChild
             TestDarwinRejectsProcessCreationAndContainmentBeforePayload
           )
-          alternation="$(IFS='|'; echo "${required_tests[*]}")"
-          pattern="^(${alternation})$"
-          listed_tests="$(go test ./os/sandbox -list "$pattern")"
-          for test_name in "${required_tests[@]}"; do
-            if ! grep -Fxq "$test_name" <<<"$listed_tests"; then
-              echo "Required native macOS sandbox test is missing: $test_name" >&2
-              exit 1
-            fi
-          done
-
-          events="$RUNNER_TEMP/macos-sandbox-security.jsonl"
-          set +e
-          go test -json -count=1 -timeout 600s ./os/sandbox -run "$pattern" | tee "$events"
-          test_exit_code=${PIPESTATUS[0]}
-          set -e
-          if [[ $test_exit_code -ne 0 ]]; then
-            exit "$test_exit_code"
-          fi
-          for test_name in "${required_tests[@]}"; do
-            if grep -Eq "\"Action\":\"skip\".*\"Test\":\"${test_name}(/[^\"]*)?\"" "$events"; then
-              echo "Required native macOS sandbox test must not be skipped: $test_name" >&2
-              exit 1
-            fi
-            if ! grep -Eq "\"Action\":\"pass\".*\"Test\":\"${test_name}\"([,}])" "$events"; then
-              echo "Required native macOS sandbox test has no top-level pass event: $test_name" >&2
-              exit 1
-            fi
-          done
+          python3 scripts/verify-go-test-events.py "$RUNNER_TEMP/ordinary-tests.jsonl" \
+            github.com/hexagon-codes/toolkit/os/sandbox "${required_tests[@]}"
       - name: Test (race + coverage)
         if: runner.os != 'Windows'
         run: go test -mod=readonly -race -count=1 -coverprofile=coverage.out ./...
@@ -220,6 +198,16 @@ jobs:
             git status --short
             exit 1
           fi
+      - name: Preserve diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: diagnostics-${{ github.job }}-${{ runner.os }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/*.jsonl
+            ${{ runner.temp }}/*probe.log
+            ${{ runner.temp }}/toolkit-integration-*
+          retention-days: 7
 
   windows-sandbox-security:
     name: Native Windows sandbox security
@@ -229,7 +217,7 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 35
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Verify hosted runner and checkout credentials
@@ -280,7 +268,7 @@ jobs:
           git checkout-index -f -u -a
           # 重写工作树后刷新索引 stat 缓存，避免 git status 按旧 stat 误报 M。
           git update-index --refresh >/dev/null 2>&1 || true
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           check-latest: false
@@ -325,9 +313,6 @@ jobs:
             "TestWindowsNativePostCreationFaultCloseRetriesQuarantine"
             "TestWindowsNativeRetainExecutionOwnership"
           )
-          if ($requiredTests.Count -ne 26) {
-            throw "The native Windows security gate must contain exactly 26 required tests."
-          }
           $pattern = "^(" + ($requiredTests -join "|") + ")$"
           $listedTests = @(go test -tags windows_security ./os/sandbox -list $pattern)
           if ($LASTEXITCODE -ne 0) {
@@ -362,6 +347,16 @@ jobs:
               throw "Required native Windows sandbox test was skipped: $requiredTest"
             }
           }
+      - name: Preserve diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: diagnostics-${{ github.job }}-${{ runner.os }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/*.jsonl
+            ${{ runner.temp }}/*probe.log
+            ${{ runner.temp }}/toolkit-integration-*
+          retention-days: 7
 
   linux-root-sandbox-security:
     name: Native root Linux sandbox security
@@ -369,7 +364,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Verify checkout credentials are absent
@@ -389,177 +384,25 @@ jobs:
               exit 1
             fi
           done
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: false
       - name: Install native Linux sandbox dependencies
         run: ./scripts/install-bubblewrap-ci.sh
-      - name: Probe root bubblewrap availability
+      - name: Verify native root and non-root Linux sandbox
         shell: bash
-        run: |
-          set -euo pipefail
-          # GitHub 托管 runner 的 root 环境可能无法创建用户命名空间（bwrap 探测
-          # 在 root 上下文失败而非 root 可用）；root 门禁仅在环境支持时强制执行。
-          trusted_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-          if sudo env -i HOME="$RUNNER_TEMP/toolkit-root-home" PATH="$trusted_path" \
-            /usr/bin/bwrap --unshare-user --unshare-pid --unshare-ipc --unshare-uts \
-            --cap-drop ALL --uid 65534 --gid 65534 --proc /proc --dev /dev -- /bin/true >/dev/null 2>&1; then
-            echo "BWRAP_ROOT_USABLE=1" >> "$GITHUB_ENV"
-          else
-            echo "BWRAP_ROOT_USABLE=0" >> "$GITHUB_ENV"
-            echo "root bubblewrap is unavailable on this runner; skipping root isolation gate"
-          fi
-      - name: Prepare isolated root and non-root test environments
-        if: env.BWRAP_ROOT_USABLE == '1'
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ "$(go env GOOS)" != "linux" ]]; then
-            echo "Expected a native Linux runner." >&2
-            exit 1
-          fi
-          expected_go="go$(awk '$1 == "go" {print $2; exit}' go.mod)"
-          if [[ "$(go env GOVERSION)" != "$expected_go" ]]; then
-            echo "Expected $expected_go for the minimum-version gate." >&2
-            exit 1
-          fi
-
-          module_cache="$RUNNER_TEMP/toolkit-sandbox-modcache"
-          GOMODCACHE="$module_cache" go mod download all
-          chmod -R a+rX "$module_cache"
-
-          sudo install -d -m 0700 "$RUNNER_TEMP/toolkit-root-home" "$RUNNER_TEMP/toolkit-root-cache" "$RUNNER_TEMP/toolkit-root-tmp"
-          sudo install -d -o nobody -g "$(id -gn nobody)" -m 0700 \
-            "$RUNNER_TEMP/toolkit-nonroot-home" \
-            "$RUNNER_TEMP/toolkit-nonroot-cache" \
-            "$RUNNER_TEMP/toolkit-nonroot-tmp"
-      - name: Verify native root and non-root Linux sandbox security
-        if: env.BWRAP_ROOT_USABLE == '1'
-        shell: bash
-        run: |
-          set -euo pipefail
-          go_bin="$(command -v go)"
-          go_root="$(go env GOROOT)"
-          module_cache="$RUNNER_TEMP/toolkit-sandbox-modcache"
-          trusted_path="$go_root/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-
-          root_tests=(
-            TestLinuxBoundaryProbeRootDropsCapabilitiesButRejectsIneffectiveProcessLimit
-            TestLinuxRootExecReportsProcessesNotRequestedWithoutFalseEnforcement
-            TestLinuxRootRequiredProcessesRejectsBeforePayload
-            TestLinuxBwrapArgsDropCapabilitiesAndIsolateNamespaces
-            TestLinuxMissingDeniedPathRejectsPayloadBeforeLaunch
-            TestLinuxDeniedPathCreatedAfterNewRemainsHiddenAndReadOnly
-            TestLinuxDeniedDirectoryCannotBeReadOrWritten
-            TestLinuxWorkspaceRejectsHardlinkToExternalFile
-            TestLinuxPreLaunchIdentityRecheckRejectsDirectoryReplacement
-            TestLinuxPreLaunchIdentityRecheckRejectsCommandReplacement
-            TestLinuxPreLaunchAuditRejectsNewExternalHardlink
-            TestLinuxProcessContainmentTerminationIsBackedByPIDNamespace
-            TestLinuxRootBwrapHidesHostUnixSocket
-          )
-          nonroot_tests=(
-            TestLinuxBoundaryProbeNonRootProvesProcessLimitWithEAGAIN
-            TestLinuxNonRootExecSeparatesAvailableProcessesCapabilityFromRequest
-            TestLinuxNonRootConfiguredProcessLimitReachesEAGAIN
-            TestLinuxBwrapHidesExternalWorkspaceWithoutPrivilege
-          )
-          required_tests=("${root_tests[@]}" "${nonroot_tests[@]}")
-          alternation="$(IFS='|'; echo "${required_tests[*]}")"
-          pattern="^(${alternation})$"
-          listed_tests="$(go test ./os/sandbox -list "$pattern")"
-          for test_name in "${required_tests[@]}"; do
-            if ! grep -Fxq "$test_name" <<<"$listed_tests"; then
-              echo "Required native Linux sandbox test is missing: $test_name" >&2
-              exit 1
-            fi
-          done
-
-          root_alternation="$(IFS='|'; echo "${root_tests[*]}")"
-          root_pattern="^(${root_alternation})$"
-          root_events="$RUNNER_TEMP/linux-root-sandbox-security.jsonl"
-          if [[ "$(sudo id -u)" != "0" ]]; then
-            echo "Expected an isolated root execution context." >&2
-            exit 1
-          fi
-          if [[ "$(sudo env -i PATH="$trusted_path" GOROOT="$go_root" GOTOOLCHAIN=local "$go_bin" env GOOS)" != "linux" ]]; then
-            echo "Expected a native Linux root execution context." >&2
-            exit 1
-          fi
-          set +e
-          sudo env -i \
-            HOME="$RUNNER_TEMP/toolkit-root-home" \
-            TMPDIR="$RUNNER_TEMP/toolkit-root-tmp" \
-            PATH="$trusted_path" \
-            GOROOT="$go_root" \
-            GOTOOLCHAIN=local \
-            GOWORK=off \
-            GOENV=off \
-            GOPATH="$RUNNER_TEMP/toolkit-root-home/go" \
-            GOCACHE="$RUNNER_TEMP/toolkit-root-cache" \
-            GOMODCACHE="$module_cache" \
-            GOPROXY=off \
-            GOSUMDB=off \
-            "$go_bin" test -json -count=1 -timeout 600s ./os/sandbox -run "$root_pattern" | tee "$root_events"
-          root_exit_code=${PIPESTATUS[0]}
-          set -e
-          if [[ $root_exit_code -ne 0 ]]; then
-            exit "$root_exit_code"
-          fi
-
-          nonroot_alternation="$(IFS='|'; echo "${nonroot_tests[*]}")"
-          nonroot_pattern="^(${nonroot_alternation})$"
-          nonroot_events="$RUNNER_TEMP/linux-nonroot-sandbox-security.jsonl"
-          if [[ "$(sudo -u nobody id -u)" == "0" ]]; then
-            echo "Expected an isolated non-root execution context." >&2
-            exit 1
-          fi
-          if [[ "$(sudo -u nobody env -i PATH="$trusted_path" GOROOT="$go_root" GOTOOLCHAIN=local "$go_bin" env GOOS)" != "linux" ]]; then
-            echo "Expected a native Linux non-root execution context." >&2
-            exit 1
-          fi
-          set +e
-          sudo -u nobody env -i \
-            HOME="$RUNNER_TEMP/toolkit-nonroot-home" \
-            TMPDIR="$RUNNER_TEMP/toolkit-nonroot-tmp" \
-            PATH="$trusted_path" \
-            GOROOT="$go_root" \
-            GOTOOLCHAIN=local \
-            GOWORK=off \
-            GOENV=off \
-            GOPATH="$RUNNER_TEMP/toolkit-nonroot-home/go" \
-            GOCACHE="$RUNNER_TEMP/toolkit-nonroot-cache" \
-            GOMODCACHE="$module_cache" \
-            GOPROXY=off \
-            GOSUMDB=off \
-            "$go_bin" test -json -count=1 -timeout 600s ./os/sandbox -run "$nonroot_pattern" | tee "$nonroot_events"
-          nonroot_exit_code=${PIPESTATUS[0]}
-          set -e
-          if [[ $nonroot_exit_code -ne 0 ]]; then
-            exit "$nonroot_exit_code"
-          fi
-
-          for test_name in "${root_tests[@]}"; do
-            if grep -Eq "\"Action\":\"skip\".*\"Test\":\"${test_name}(/[^\"]*)?\"" "$root_events"; then
-              echo "Required native root Linux sandbox test must not be skipped: $test_name" >&2
-              exit 1
-            fi
-            if ! grep -Eq "\"Action\":\"pass\".*\"Test\":\"${test_name}\"([,}])" "$root_events"; then
-              echo "Required native root Linux sandbox test has no top-level pass event: $test_name" >&2
-              exit 1
-            fi
-          done
-          for test_name in "${nonroot_tests[@]}"; do
-            if grep -Eq "\"Action\":\"skip\".*\"Test\":\"${test_name}(/[^\"]*)?\"" "$nonroot_events"; then
-              echo "Required native non-root Linux sandbox test must not be skipped: $test_name" >&2
-              exit 1
-            fi
-            if ! grep -Eq "\"Action\":\"pass\".*\"Test\":\"${test_name}\"([,}])" "$nonroot_events"; then
-              echo "Required native non-root Linux sandbox test has no top-level pass event: $test_name" >&2
-              exit 1
-            fi
-          done
+        run: bash scripts/verify-linux-sandbox-ci.sh
+      - name: Preserve diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: diagnostics-${{ github.job }}-${{ runner.os }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/*.jsonl
+            ${{ runner.temp }}/*probe.log
+            ${{ runner.temp }}/toolkit-integration-*
+          retention-days: 7
 
   toolchain-compatibility:
     name: Toolchain compatibility (${{ matrix.name }})
@@ -578,7 +421,7 @@ jobs:
             go-version: 'stable'
             check-latest: true
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Verify checkout credentials are absent
@@ -598,7 +441,7 @@ jobs:
               exit 1
             fi
           done
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ matrix.go-version }}
           check-latest: ${{ matrix.check-latest }}
@@ -629,7 +472,7 @@ jobs:
           - macos-15
           - windows-2022
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Verify checkout credentials are absent
@@ -649,7 +492,7 @@ jobs:
               exit 1
             fi
           done
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           check-latest: false
@@ -698,7 +541,7 @@ jobs:
           - macos-15
           - windows-2022
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0  # only-new-issues 需完整历史以计算与基线的差异
           persist-credentials: false
@@ -719,7 +562,7 @@ jobs:
               exit 1
             fi
           done
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           check-latest: false
@@ -746,7 +589,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Verify checkout credentials are absent
@@ -766,19 +609,29 @@ jobs:
               exit 1
             fi
           done
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           check-latest: false
       - name: Run isolated integration tests
         run: ./scripts/verify-integrations.sh
+      - name: Preserve diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: diagnostics-${{ github.job }}-${{ runner.os }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/*.jsonl
+            ${{ runner.temp }}/*probe.log
+            ${{ runner.temp }}/toolkit-integration-*
+          retention-days: 7
 
   vuln:
     name: Vulnerability Scan
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Verify checkout credentials are absent
@@ -798,7 +651,7 @@ jobs:
               exit 1
             fi
           done
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           # 使用最低支持版本扫描；标准库漏洞必须通过显式提升基线修复，不能被浮动工具链掩盖。
           go-version-file: go.mod
@@ -808,3 +661,21 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
           # 工具异常、分析失败和真实漏洞均保持非零退出，禁止宽泛豁免制造假绿。
           govulncheck ./...
+
+  ci-result:
+    name: CI result
+    if: always()
+    needs: [workflow-lint, test, windows-sandbox-security, linux-root-sandbox-security, toolchain-compatibility, examples, lint, integration, vuln]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Verify all required jobs completed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PYCODE'
+          import json, os
+          failed = {name: value['result'] for name, value in json.loads(os.environ['RESULTS']).items() if value['result'] != 'success'}
+          if failed:
+              raise SystemExit('Required CI jobs did not pass: ' + json.dumps(failed))
+          PYCODE

@@ -2,6 +2,7 @@ package cicheck
 
 import (
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -11,12 +12,8 @@ func TestAPICompatibilityGateIsHardAndAuditable(t *testing.T) {
 
 	source, document := loadWorkflowContract(t, "api-compat.yml")
 	active := activeYAMLContract(source)
-	// 结构合同用固定串断言；版本号只断言 SemVer 格式（发版升级版本号无需
-	// 修改测试），baseline 文件名断言与主版本前缀一致。
-	// 结构合同用固定串断言；版本号不再硬编码——tag 名只校验 SemVer 格式，
-	// API 对比以最新已发布 tag 为动态 base，保证每次发版无需修改测试与 workflow。
+	// 只核对执行不变量，版本与批准基线路径由工作流声明。
 	for _, required := range []string{
-		`API_BREAKING_BASELINE: ".github/workflows/api-breaking-v0.3.0.txt"`,
 		`API_BREAKING_CHECKER: ".github/workflows/check-api-breaking.py"`,
 		`gorelease -base="$base_version"`,
 		`python3 "$API_BREAKING_CHECKER" "$report_path" "$API_BREAKING_BASELINE" --allow-empty`,
@@ -66,10 +63,11 @@ func TestAPICompatibilityGateIsHardAndAuditable(t *testing.T) {
 		"Unapproved breaking API changes detected.",
 	)
 
-	baseline := readContractFile(t, filepath.Join(repositoryRoot(t), ".github", "workflows", "api-breaking-v0.3.0.txt"))
-	if strings.Count(baseline, "## incompatible changes") != 34 {
-		t.Fatalf("v0.3.0 breaking API baseline must contain exactly 34 package sections")
+	baselineSetting := regexp.MustCompile(`(?m)^\s*API_BREAKING_BASELINE:\s*"([^"]+)"\s*$`).FindStringSubmatch(active)
+	if len(baselineSetting) != 2 {
+		t.Fatal("API compatibility gate must declare its approved baseline")
 	}
+	baseline := readContractFile(t, filepath.Join(repositoryRoot(t), baselineSetting[1]))
 	if strings.Contains(baseline, "## compatible changes") || strings.Contains(baseline, "# summary") {
 		t.Fatal("breaking API baseline must contain only incompatible change sections")
 	}

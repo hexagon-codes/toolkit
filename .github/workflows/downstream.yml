@@ -12,6 +12,7 @@ on:
       - "v*"
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -28,27 +29,42 @@ env:
 jobs:
   downstream:
     name: ai-core + hexagon + examples + hexclaw
-    # HexClaw 会真实执行 toolkit/os/sandbox，因此与 sandbox-code-exec 的 Linux 运行器保持一致。
+    # 编译契约与原生接缝验证使用同一 Linux 工具链环境。
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: toolkit
           persist-credentials: false
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Read consumer baselines
+        id: consumers
+        shell: bash
+        run: |
+          python - <<'PYCODE'
+          import json, os
+          with open('toolkit/.github/consumer-baselines.json') as source:
+              refs = json.load(source)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              for name, sha in refs.items():
+                  output.write(name.replace('-', '_') + '=' + sha + '\n')
+          PYCODE
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: hexagon-codes/ai-core
+          ref: ${{ steps.consumers.outputs.ai_core }}
           path: ai-core
           persist-credentials: false
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: hexagon-codes/hexagon
+          ref: ${{ steps.consumers.outputs.hexagon }}
           path: hexagon
           persist-credentials: false
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: hexagon-codes/hexclaw
+          ref: ${{ steps.consumers.outputs.hexclaw }}
           path: hexclaw
           persist-credentials: false
       - name: Verify checkout credentials are absent
@@ -72,13 +88,11 @@ jobs:
               exit 1
             fi
           done
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: toolkit/go.mod
           check-latest: false
           cache: false
-      - name: Install Linux sandbox dependencies
-        run: ./toolkit/scripts/install-bubblewrap-ci.sh
       - name: go.work（下游用本 PR 的 toolkit）
         run: go work init ./toolkit ./ai-core ./hexagon ./hexagon/examples ./hexclaw
       # 下游契约 = 编译契约：build 证明 API 未破坏下游；全量测试由各下游
@@ -95,3 +109,14 @@ jobs:
       - name: hexclaw build + compile tests
         working-directory: hexclaw
         run: go build -mod=readonly ./... && go test -mod=readonly -run '^$' -count=1 ./...
+      - name: Record verification inputs
+        working-directory: toolkit
+        shell: bash
+        run: python scripts/verification-inputs.py "$RUNNER_TEMP/verification-inputs.json" --consumers
+      - name: Preserve verification inputs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: verification-inputs-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/verification-inputs.json
+          retention-days: 90
