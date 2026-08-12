@@ -66,9 +66,9 @@ func run(ctx context.Context, spec Spec, result Result) (Result, error) {
 				waitErr = errors.Join(waitErr, killErr)
 			}
 			groupErr = syscall.Kill(-result.PID, 0)
-			// 终止信号送达与 init 回收之间存在短暂窗口，取消收口须等待本组真正消失。
+			// 退出回收期间可能暂不可探测，取消收口须等待本组真正消失。
 			deadline := time.Now().Add(500 * time.Millisecond)
-			for groupErr == nil && time.Now().Before(deadline) {
+			for (groupErr == nil || errors.Is(groupErr, syscall.EPERM)) && time.Now().Before(deadline) {
 				time.Sleep(time.Millisecond)
 				groupErr = syscall.Kill(-result.PID, 0)
 			}
