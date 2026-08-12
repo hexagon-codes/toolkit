@@ -8,6 +8,11 @@ toolkit 是 Hexagon 生态的 **L0 通用工具库**（零 AI 依赖：语言增
 - 尽量零第三方依赖；引入新依赖需在 PR 说明理由（尤其避免拉入 cgo / 重型传递依赖）。
 
 ## 本地开发
+
+最低 Go 版本以根 `go.mod` 为准，`examples/go.mod` 同步维护。CI 的固定工具链通过 `setup-go` 的 `go-version-file` 读取模块声明；升级最低版本时不在各工作流重复写入补丁版本号。版本线前向兼容探针和 `stable` 探针继续保留；最低 Go 版本升级须在 CHANGELOG 中说明兼容性影响。
+
+Sandbox CodeExec 跨仓门禁按 `TestCodeExecSkill_Execute_PythonCrawler` 行为组发现爬虫用例；该组必须存在，发现的每个用例均须执行且通过，不允许跳过。后缀可随下游行为细化调整。自动门禁使用受控 HTTP 服务验证断网与联网行为；`PythonCrawlerPublicNetwork` 公网检查仅由现有手动输入开启。
+
 ```bash
 go build ./...
 go vet ./...

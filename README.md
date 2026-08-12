@@ -4,7 +4,7 @@
 
 一个生产级 Go 通用工具包，采用领域驱动设计理念。
 
-[![Go Version](https://img.shields.io/badge/Go-%3E%3D%201.25.13-blue)](https://go.dev/)
+[![Go Version](https://img.shields.io/badge/Go-%3E%3D%201.26.10-blue)](https://go.dev/)
 
 ## 特性
 
@@ -21,6 +21,8 @@
 ✅ **熔断保护** - AI API 专用熔断器预设，多实例管理
 
 ## 快速开始
+
+v0.3.6 要求 Go 1.26.10 或更高版本。
 
 ```bash
 go get github.com/hexagon-codes/toolkit@v0.3.6

@@ -4,7 +4,7 @@
 
 A production-grade Go general-purpose toolkit with domain-driven design principles.
 
-[![Go Version](https://img.shields.io/badge/Go-%3E%3D%201.25.13-blue)](https://go.dev/)
+[![Go Version](https://img.shields.io/badge/Go-%3E%3D%201.26.10-blue)](https://go.dev/)
 
 ## Features
 
@@ -21,6 +21,8 @@ A production-grade Go general-purpose toolkit with domain-driven design principl
 ✅ **Circuit Breaker** - AI API dedicated circuit breaker presets, multi-instance management
 
 ## Quick Start
+
+v0.3.6 requires Go 1.26.10 or later.
 
 ```bash
 go get github.com/hexagon-codes/toolkit@v0.3.6
