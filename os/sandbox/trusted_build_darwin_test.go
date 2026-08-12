@@ -55,8 +55,29 @@ func TestDarwinTrustedBuildRunsFrozenGoCompilerChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 编译器探针不需要遥测，避免 go 命令的后台计数任务与临时目录清理竞争。
-	environment = append(environment, "GOTELEMETRY=off")
+	// GOTELEMETRY 不是可设置的环境变量；通过同一隔离环境关闭遥测，避免后台写入与目录清理竞争。
+	telemetryResult, err := sandboxInstance.Exec(context.Background(), Command{
+		Path: goBinary,
+		Args: []string{"telemetry", "off"},
+		Env:  environment,
+	})
+	if err != nil {
+		t.Fatalf("disable isolated Go telemetry: %v", err)
+	}
+	if telemetryResult.ExitCode != 0 {
+		t.Fatalf("disable isolated Go telemetry: exit=%d stderr=%q", telemetryResult.ExitCode, telemetryResult.Stderr)
+	}
+	telemetryMode, err := sandboxInstance.Exec(context.Background(), Command{
+		Path: goBinary,
+		Args: []string{"env", "GOTELEMETRY"},
+		Env:  environment,
+	})
+	if err != nil {
+		t.Fatalf("read isolated Go telemetry mode: %v", err)
+	}
+	if telemetryMode.ExitCode != 0 || strings.TrimSpace(telemetryMode.Stdout) != "off" {
+		t.Fatalf("isolated Go telemetry mode: exit=%d stdout=%q stderr=%q", telemetryMode.ExitCode, telemetryMode.Stdout, telemetryMode.Stderr)
+	}
 	result, err := sandboxInstance.Exec(context.Background(), Command{
 		Path: goBinary,
 		Args: []string{"tool", "compile", "-V=full"},
