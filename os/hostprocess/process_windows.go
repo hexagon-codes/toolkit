@@ -26,12 +26,12 @@ type jobAccountingInformation struct {
 	TotalTerminatedProcesses  uint32
 }
 
-func run(ctx context.Context, spec Spec, result Result) (Result, error) {
-	job, err := windows.CreateJobObject(nil, nil)
-	if err != nil {
-		return result, fmt.Errorf("create host process job: %w", err)
+func run(ctx context.Context, spec Spec, result Result) (_ Result, resultErr error) {
+	job, jobErr := windows.CreateJobObject(nil, nil)
+	if jobErr != nil {
+		return result, fmt.Errorf("create host process job: %w", jobErr)
 	}
-	defer windows.CloseHandle(job)
+	defer func() { resultErr = errors.Join(resultErr, windows.CloseHandle(job)) }()
 	limits := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{}
 	limits.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
 	if _, err := windows.SetInformationJobObject(job, windows.JobObjectExtendedLimitInformation, uintptr(unsafe.Pointer(&limits)), uint32(unsafe.Sizeof(limits))); err != nil {
@@ -40,24 +40,21 @@ func run(ctx context.Context, spec Spec, result Result) (Result, error) {
 
 	streams := []*os.File{spec.Stdin, spec.Stdout, spec.Stderr}
 	handles := make([]windows.Handle, 0, len(streams))
+	defer func() {
+		for _, handle := range handles {
+			resultErr = errors.Join(resultErr, windows.CloseHandle(handle))
+		}
+	}()
 	for _, stream := range streams {
 		var handle windows.Handle
 		if err := windows.DuplicateHandle(windows.CurrentProcess(), windows.Handle(stream.Fd()), windows.CurrentProcess(), &handle, 0, true, windows.DUPLICATE_SAME_ACCESS); err != nil {
-			for _, open := range handles {
-				windows.CloseHandle(open)
-			}
 			return result, fmt.Errorf("duplicate host process stream: %w", err)
 		}
 		handles = append(handles, handle)
 	}
-	defer func() {
-		for _, handle := range handles {
-			windows.CloseHandle(handle)
-		}
-	}()
-	attributes, err := windows.NewProcThreadAttributeList(2)
-	if err != nil {
-		return result, fmt.Errorf("create host process attributes: %w", err)
+	attributes, attributesErr := windows.NewProcThreadAttributeList(2)
+	if attributesErr != nil {
+		return result, fmt.Errorf("create host process attributes: %w", attributesErr)
 	}
 	defer attributes.Delete()
 	if err := attributes.Update(windows.PROC_THREAD_ATTRIBUTE_HANDLE_LIST, unsafe.Pointer(&handles[0]), uintptr(len(handles))*unsafe.Sizeof(handles[0])); err != nil {
@@ -96,8 +93,8 @@ func run(ctx context.Context, spec Spec, result Result) (Result, error) {
 		&environment[0], directory, &startup.StartupInfo, &process); err != nil {
 		return result, fmt.Errorf("start host process: %w", err)
 	}
-	defer windows.CloseHandle(process.Process)
-	defer windows.CloseHandle(process.Thread)
+	defer func() { resultErr = errors.Join(resultErr, windows.CloseHandle(process.Process)) }()
+	defer func() { resultErr = errors.Join(resultErr, windows.CloseHandle(process.Thread)) }()
 	result.Started, result.PID = true, int(process.ProcessId)
 
 	var cancelErr error
