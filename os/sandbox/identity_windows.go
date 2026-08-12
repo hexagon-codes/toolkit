@@ -28,6 +28,7 @@ func sandboxCreationTime(path string) time.Time {
 		0,
 	)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "sandbox: read creation time for %q: %v\n", path, err)
 		return time.Time{}
 	}
 	defer func() {
@@ -37,6 +38,7 @@ func sandboxCreationTime(path string) time.Time {
 	}()
 	var info windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		fmt.Fprintf(os.Stderr, "sandbox: read creation time info for %q: %v\n", path, err)
 		return time.Time{}
 	}
 	return time.Unix(0, info.CreationTime.Nanoseconds())

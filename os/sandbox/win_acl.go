@@ -233,7 +233,25 @@ func openWindowsWorkspaceRootGuard(path string) (*os.File, windowsFileIdentity, 
 	if err != nil {
 		return nil, windowsFileIdentity{}, "", errors.Join(fmt.Errorf("inspect raw Windows workspace root: %w", err), file.Close())
 	}
-	if identity.attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+	// reparse point 判定不依赖 attributes 位的完整性（OPEN_REPARSE_POINT 打开时
+	// GetFileInformationByHandle 返回的属性位不可靠），直接查询内核 reparse tag：
+	// tag 非零即拒绝；查询失败则无法证明对象非 reparse，按 fail-closed 拒绝。
+	var tagInfo struct {
+		fileAttributes uint32
+		reparseTag     uint32
+	}
+	if tagErr := windows.GetFileInformationByHandleEx(
+		handle,
+		windows.FileAttributeTagInfo,
+		(*byte)(unsafe.Pointer(&tagInfo)),
+		uint32(unsafe.Sizeof(tagInfo)),
+	); tagErr != nil {
+		return nil, windowsFileIdentity{}, "", errors.Join(
+			fmt.Errorf("windows sandbox workspace root: cannot verify reparse tag: %w", tagErr),
+			file.Close(),
+		)
+	}
+	if tagInfo.reparseTag != 0 || identity.attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
 		return nil, windowsFileIdentity{}, "", errors.Join(fmt.Errorf("windows sandbox workspace root must not be a reparse point"), file.Close())
 	}
 	if identity.attributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
