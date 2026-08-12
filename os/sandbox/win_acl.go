@@ -386,6 +386,11 @@ func inspectWindowsFileHandle(file *os.File) (windowsFileIdentity, error) {
 		if tagInfo.reparseTag != 0 {
 			attributes |= windows.FILE_ATTRIBUTE_REPARSE_POINT
 		}
+		// junction/mount point（IO_REPARSE_TAG_MOUNT_POINT）必然是目录类对象；
+		// 补全 DIRECTORY 位使其能被识别为"目录类 reparse point"。
+		if tagInfo.reparseTag == windows.IO_REPARSE_TAG_MOUNT_POINT {
+			attributes |= windows.FILE_ATTRIBUTE_DIRECTORY
+		}
 	}
 	runtime.KeepAlive(file)
 	return windowsFileIdentity{

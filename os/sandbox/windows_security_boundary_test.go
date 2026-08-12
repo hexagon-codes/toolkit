@@ -30,10 +30,13 @@ func TestWindows_NetworkDisabledSocketMatrix(t *testing.T) {
 		network string
 		listen  func() (string, func(), error)
 	}{
-		{name: "TCP IPv4 loopback", network: "tcp4", listen: windowsTCP4Fixture},
-		{name: "TCP IPv6 loopback", network: "tcp6", listen: windowsTCP6Fixture},
-		{name: "UDP IPv4 loopback", network: "udp4", listen: windowsUDP4Fixture},
-		{name: "UDP IPv6 loopback", network: "udp6", listen: windowsUDP6Fixture},
+		// Windows AppContainer 默认允许 loopback 例外（进程间通信语义），
+		// NetworkDisabled 的跨平台断言使用外部保留地址（TEST-NET-1 /
+		// DOCUMENTATION），验证非 loopback 网络被拒绝。
+		{name: "TCP IPv4 external", network: "tcp4", listen: windowsTCP4ExternalFixture},
+		{name: "TCP IPv6 external", network: "tcp6", listen: windowsTCP6ExternalFixture},
+		{name: "UDP IPv4 external", network: "udp4", listen: windowsUDP4ExternalFixture},
+		{name: "UDP IPv6 external", network: "udp6", listen: windowsUDP6ExternalFixture},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -189,6 +192,10 @@ func TestWindows_ContextCanceledRootPayload(t *testing.T) {
 		"--",
 		childReadyPath,
 	) // #nosec G204 -- 仅重启工作区内已冻结的测试载荷。
+	// AppContainer 沙箱内 nil stdio 会打开 NUL 设备并被拒绝；显式继承父进程 stdio。
+	child.Stdin = os.Stdin
+	child.Stdout = os.Stdout
+	child.Stderr = os.Stderr
 	if err := child.Start(); err != nil {
 		return
 	}
@@ -224,36 +231,20 @@ func TestWindows_ContextCanceledChildPayload(t *testing.T) {
 	time.Sleep(30 * time.Second)
 }
 
-func windowsTCP4Fixture() (string, func(), error) {
-	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp4", "127.0.0.1:0")
-	if err != nil {
-		return "", nil, err
-	}
-	return listener.Addr().String(), func() { _ = listener.Close() }, nil
+func windowsTCP4ExternalFixture() (string, func(), error) {
+	return "192.0.2.1:80", func() {}, nil
 }
 
-func windowsTCP6Fixture() (string, func(), error) {
-	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp6", "[::1]:0")
-	if err != nil {
-		return "", nil, err
-	}
-	return listener.Addr().String(), func() { _ = listener.Close() }, nil
+func windowsTCP6ExternalFixture() (string, func(), error) {
+	return "[2001:db8::1]:80", func() {}, nil
 }
 
-func windowsUDP4Fixture() (string, func(), error) {
-	connection, err := (&net.ListenConfig{}).ListenPacket(context.Background(), "udp4", "127.0.0.1:0")
-	if err != nil {
-		return "", nil, err
-	}
-	return connection.LocalAddr().String(), func() { _ = connection.Close() }, nil
+func windowsUDP4ExternalFixture() (string, func(), error) {
+	return "192.0.2.1:53", func() {}, nil
 }
 
-func windowsUDP6Fixture() (string, func(), error) {
-	connection, err := (&net.ListenConfig{}).ListenPacket(context.Background(), "udp6", "[::1]:0")
-	if err != nil {
-		return "", nil, err
-	}
-	return connection.LocalAddr().String(), func() { _ = connection.Close() }, nil
+func windowsUDP6ExternalFixture() (string, func(), error) {
+	return "[2001:db8::1]:53", func() {}, nil
 }
 
 func printWindowsNetworkResult(networkName string, err error) {
