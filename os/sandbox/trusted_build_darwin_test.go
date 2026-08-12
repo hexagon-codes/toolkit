@@ -35,8 +35,9 @@ func TestDarwinTrustedBuildProfileAllowsChildrenWithoutClaimingContainment(t *te
 
 func TestDarwinTrustedBuildRunsFrozenGoCompilerChild(t *testing.T) {
 	goBinary := requireDarwinRuntime(t, "go")
+	workspace := t.TempDir()
 	sandboxInstance, err := New(Config{
-		Workspace:            t.TempDir(),
+		Workspace:            workspace,
 		ExecutionProfile:     ExecutionProfileTrustedBuild,
 		RequiredCapabilities: TrustedBuildIsolationCapabilities,
 		Timeout:              30,
@@ -50,9 +51,16 @@ func TestDarwinTrustedBuildRunsFrozenGoCompilerChild(t *testing.T) {
 		}
 	})
 
+	environment, err := darwinExecEnv(workspace, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 编译器探针不需要遥测，避免 go 命令的后台计数任务与临时目录清理竞争。
+	environment = append(environment, "GOTELEMETRY=off")
 	result, err := sandboxInstance.Exec(context.Background(), Command{
 		Path: goBinary,
 		Args: []string{"tool", "compile", "-V=full"},
+		Env:  environment,
 	})
 	if err != nil {
 		t.Fatalf("trusted Go compiler command failed: %v", err)

@@ -1038,11 +1038,21 @@ func TestDarwinReadableOtherWorkspaceCannotMapExecutable(t *testing.T) {
 	_, workspace, otherWorkspace := newDarwinSharedWorkspacePair(t)
 	probe := buildDarwinExecutableMapProbe(t, workspace)
 	payload := filepath.Join(otherWorkspace, "readable-payload")
-	// 一页普通文件足以触发 file-map-executable，避免把运行时和 Mach-O 签名检查抖动混入边界测试。
-	if writeErr := os.WriteFile(payload, make([]byte, 4096), 0o600); writeErr != nil {
+	// 使用可实际加载的 Mach-O；普通数据页可能先被宿主的代码映射校验拒绝。
+	if writeErr := os.WriteFile(payload, darwinExecutableMapProbeBinary, 0o700); writeErr != nil {
 		t.Fatal(writeErr)
 	}
 	dataAlias := "/System/Volumes/Data" + payload
+	// 先加载载荷，再对同一文件和别名做宿主正向对照，隔离 Seatbelt 的拒绝行为。
+	for _, command := range []*exec.Cmd{
+		exec.CommandContext(t.Context(), payload, payload),
+		exec.CommandContext(t.Context(), probe, dataAlias),
+	} {
+		output, controlErr := command.CombinedOutput()
+		if controlErr != nil || strings.TrimSpace(string(output)) != "MAP-ESCAPED" {
+			t.Fatalf("host executable mapping control failed: output=%q error=%v", output, controlErr)
+		}
+	}
 	sandboxInstance, err := newDarwinTestSandbox(Config{
 		Workspace:     workspace,
 		ReadablePaths: []string{otherWorkspace, "/System/Volumes/Data" + otherWorkspace},
@@ -1118,20 +1128,6 @@ func buildDarwinExecutableMapProbe(t *testing.T, workspace string) string {
 		output, err := command.CombinedOutput()
 		if err != nil {
 			darwinExecutableMapProbeErr = fmt.Errorf("compile executable mapping probe: %w: %s", err, output)
-			return
-		}
-		controlPayload := filepath.Join(buildDirectory, "host-control-payload")
-		if writeErr := os.WriteFile(controlPayload, make([]byte, 4096), 0o600); writeErr != nil {
-			darwinExecutableMapProbeErr = writeErr
-			return
-		}
-		controlOutput, controlErr := exec.CommandContext(t.Context(), probe, controlPayload).CombinedOutput()
-		if controlErr != nil {
-			darwinExecutableMapProbeErr = fmt.Errorf("host executable mapping control failed: output=%q: %w", controlOutput, controlErr)
-			return
-		}
-		if strings.TrimSpace(string(controlOutput)) != "MAP-ESCAPED" {
-			darwinExecutableMapProbeErr = fmt.Errorf("host executable mapping control failed: output=%q", controlOutput)
 			return
 		}
 		darwinExecutableMapProbeBinary, darwinExecutableMapProbeErr = os.ReadFile(probe)
