@@ -38,7 +38,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GO_VERSION: "1.25.12"
+  GO_VERSION: "1.25.13"
   # 确保原生沙箱门禁使用 setup-go 选定的工具链，不允许静默自动升级。
   GOTOOLCHAIN: local
   GOPRIVATE: github.com/hexagon-codes/*

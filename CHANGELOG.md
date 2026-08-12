@@ -2,6 +2,18 @@
 
 本文件记录 toolkit 的用户可见变更，遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.3.5] - 2026-10-04
+
+### Changed
+
+- 构建基线：最低 Go 补丁版本从 1.25.12 提升至 1.25.13，根模块、`examples`、现有 CI 固定工具链与文档徽章同步更新；`1.25.x` 和 `stable` 兼容性矩阵保持不变。
+
+### Fixed
+
+- `os/sandbox`：Linux 工作区链接计数将 `syscall.Stat_t.Nlink` 显式转换为 `uint64`，修复 Linux ARM64 上字段类型差异导致的编译失败，保留原有链接计数校验。
+- Windows 测试夹具在 Job 限额查询期间固定输出缓冲区，避免 `uintptr` 包装调用中的 Go 栈地址移动；原限额断言保持不变。
+- Go 源文件明确使用 LF 检出，避免 Windows 自动换行转换影响格式检查。
+
 ## [0.3.1] - 2026-08-12
 
 发布流程修复版。Go 代码与 v0.3.0 完全一致，仅修正 Tag 触发时的门禁缺陷。

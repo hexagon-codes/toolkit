@@ -4,7 +4,7 @@
 
 A production-grade Go general-purpose toolkit with domain-driven design principles.
 
-[![Go Version](https://img.shields.io/badge/Go-%3E%3D%201.25.12-blue)](https://go.dev/)
+[![Go Version](https://img.shields.io/badge/Go-%3E%3D%201.25.13-blue)](https://go.dev/)
 
 ## Features
 
