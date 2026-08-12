@@ -2,7 +2,6 @@ package cicheck
 
 import (
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 )
@@ -30,24 +29,18 @@ func TestAPICompatibilityGateIsHardAndAuditable(t *testing.T) {
 	active := activeYAMLContract(source)
 	// 结构合同用固定串断言；版本号只断言 SemVer 格式（发版升级版本号无需
 	// 修改测试），baseline 文件名断言与主版本前缀一致。
+	// 结构合同用固定串断言；版本号不再硬编码——tag 名只校验 SemVer 格式，
+	// API 对比以最新已发布 tag 为动态 base，保证每次发版无需修改测试与 workflow。
 	for _, required := range []string{
-		`API_BASE_VERSION: "v`,
-		`API_RELEASE_VERSION: "v`,
 		`API_BREAKING_BASELINE: ".github/workflows/api-breaking-v0.3.0.txt"`,
 		`API_BREAKING_CHECKER: ".github/workflows/check-api-breaking.py"`,
 		`gorelease -base="$base_version"`,
-		`python3 "$API_BREAKING_CHECKER" "$report_path" "$API_BREAKING_BASELINE"`,
-		`if [[ "$GITHUB_REF_NAME" != "$API_RELEASE_VERSION" ]]; then`,
+		`python3 "$API_BREAKING_CHECKER" "$report_path" "$API_BREAKING_BASELINE" --allow-empty`,
+		`=~ ^v[0-9]+\.[0-9]+\.[0-9]+$`,
 	} {
 		if !strings.Contains(active, required) {
 			t.Fatalf("API compatibility gate is missing %q", required)
 		}
-	}
-	if !regexp.MustCompile(`API_BASE_VERSION: "v[0-9]+\.[0-9]+\.[0-9]+"`).MatchString(active) {
-		t.Fatal("API_BASE_VERSION must be a pinned semantic version")
-	}
-	if !regexp.MustCompile(`API_RELEASE_VERSION: "v[0-9]+\.[0-9]+\.[0-9]+"`).MatchString(active) {
-		t.Fatal("API_RELEASE_VERSION must be a semantic version")
 	}
 	if strings.Contains(active, "gorelease ||") {
 		t.Fatal("API compatibility gate must not swallow gorelease failures")

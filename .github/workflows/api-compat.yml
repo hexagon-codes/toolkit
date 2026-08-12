@@ -19,10 +19,6 @@ concurrency:
 env:
   # 确保 API 门禁使用 setup-go 选定的工具链，不允许静默自动升级。
   GOTOOLCHAIN: local
-  API_BASE_VERSION: "v0.2.6"
-  # 目标发布版本。tag 触发时 Verify release tag 会校验 tag 名与之一致；
-  # v0.3.1 为发布流程修复版（v0.3.0 的 Go 代码不变，仅修正 tag 门禁）。
-  API_RELEASE_VERSION: "v0.3.1"
   API_BREAKING_BASELINE: ".github/workflows/api-breaking-v0.3.0.txt"
   API_BREAKING_CHECKER: ".github/workflows/check-api-breaking.py"
 
@@ -63,8 +59,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "$GITHUB_REF_NAME" != "$API_RELEASE_VERSION" ]]; then
-            echo "Release tag must match the approved API release version: expected '$API_RELEASE_VERSION', got '$GITHUB_REF_NAME'." >&2
+          # 只校验 tag 名是合法 SemVer；具体版本的发布审批由发布流程（人）完成，
+          # 门禁不再绑定固定版本号，避免每次发版都要先改 workflow。
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tag must be a semantic version: got '$GITHUB_REF_NAME'." >&2
             exit 1
           fi
       - name: Check API compatibility
@@ -72,12 +70,10 @@ jobs:
         run: |
           set -euo pipefail
           report_path="$RUNNER_TEMP/gorelease-report.txt"
-          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
-            # tag 触发时目标版本已存在，gorelease 的 -version 会报 "already exists"；
-            # 事后审计对比上一个 tag（动态），版本号一致性由 Verify release tag 保证。
-            base_version="$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -vx "$GITHUB_REF_NAME" | head -1)"
-          else
-            base_version="$API_BASE_VERSION"
-          fi
+          # 统一以最新的已发布 tag 为 base 做 API 对比（tag 触发时排除自身，
+          # PR 触发时不含目标版本 tag，自然得到最新发布版本）。gorelease 不带
+          # -version：目标版本已存在时报 already exists、base 非 major 最新时
+          # 报 Cannot suggest，两种受限模式都不适用于发布门禁。
+          base_version="$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -vx "$GITHUB_REF_NAME" | head -1)"
           gorelease -base="$base_version" | tee "$report_path"
           python3 "$API_BREAKING_CHECKER" "$report_path" "$API_BREAKING_BASELINE" --allow-empty
