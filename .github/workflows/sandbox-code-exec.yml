@@ -267,11 +267,15 @@ jobs:
             required_tests+=(
               TestCodeExecSkill_Execute_Success
               TestCodeExecSkill_Execute_NonZeroExit
-              TestCodeExecSkill_Execute_ModuleGoFiles
               TestCodeExecSkill_Execute_Timeout
             )
             if [[ "$RUNNER_OS" == "macOS" ]]; then
               required_tests+=(TestBug20260626_CodeExecReadsConnectorAuthorizedDir)
+              # darwin untrusted 沙箱 deny process-fork，go build 需派生工具链
+              # 子进程，与不可信代码的 no-child 语义冲突；Linux bwrap 无此限制，
+              # 该测试仅在 Linux 强制执行。
+            else
+              required_tests+=(TestCodeExecSkill_Execute_ModuleGoFiles)
             fi
             if [[ "$HEXCLAW_CODE_EXEC_LIVE_NETWORK" == "1" ]]; then
               required_tests+=(TestCodeExecSkill_Execute_PythonCrawlerNetworkPolicy)
