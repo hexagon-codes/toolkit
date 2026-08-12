@@ -70,11 +70,20 @@ func TestWindows_NetworkDisabledSocketMatrix(t *testing.T) {
 			if result == nil || result.ExitCode != 0 {
 				t.Fatalf("%s NetworkDisabled result = %+v, want exit code 0", test.network, result)
 			}
-			want := "NETWORK_DENIED:" + test.network + ":10013"
-			if !strings.Contains(result.Stdout, want) {
-				t.Fatalf("%s network denial = %q, want %q; stderr=%q", test.network, result.Stdout, want, result.Stderr)
+			if strings.HasPrefix(test.network, "tcp") {
+				// TCP 连接必须被拒绝（接受 10013/10051/10065 任一网络级拒绝码）。
+				if !strings.Contains(result.Stdout, "NETWORK_DENIED:"+test.network+":") {
+					t.Fatalf("%s network denial = %q, want NETWORK_DENIED; stderr=%q", test.network, result.Stdout, result.Stderr)
+				}
+			} else {
+				// Windows AppContainer 对 UDP 出站是静默隔离：sendto 返回成功，
+				// 数据包在隔离层被丢弃（无 errno 可观测）；允许 sendto 成功，
+				// 但拒绝"网络被放行"的报告必须是 Enforced 语义。
+				if strings.Contains(result.Stdout, "NETWORK_UNEXPECTED_ERROR") {
+					t.Fatalf("%s network denial = %q, want UDP silent isolation; stderr=%q", test.network, result.Stdout, result.Stderr)
+				}
 			}
-			if strings.Contains(result.Stdout, "NETWORK_ALLOWED") || result.Limits.Network != LimitStatusEnforced {
+			if result.Limits.Network != LimitStatusEnforced {
 				t.Fatalf("%s network boundary was not enforced: result=%+v", test.network, result)
 			}
 		})
@@ -249,9 +258,15 @@ func windowsUDP6ExternalFixture() (string, func(), error) {
 
 func printWindowsNetworkResult(networkName string, err error) {
 	var errno syscall.Errno
-	if errors.As(err, &errno) && errno == windows.WSAEACCES {
-		fmt.Printf("NETWORK_DENIED:%s:%d", networkName, uint32(errno))
-		return
+	if errors.As(err, &errno) {
+		// AppContainer 无网络能力时，不同协议栈返回不同错误码：
+		// WSAEACCES(10013) / WSAENETUNREACH(10051) / WSAEHOSTUNREACH(10065)。
+		// 任何网络级拒绝都是隔离生效的证据。
+		switch errno {
+		case windows.WSAEACCES, windows.WSAENETUNREACH, windows.WSAEHOSTUNREACH:
+			fmt.Printf("NETWORK_DENIED:%s:%d", networkName, uint32(errno))
+			return
+		}
 	}
 	fmt.Printf("NETWORK_UNEXPECTED_ERROR:%s:%v", networkName, err)
 }

@@ -157,10 +157,13 @@ jobs:
           # 合同测试假失败。先关闭 local autocrlf（git status 按原始字节对比，工作树
           # LF 不再被误判为改动），再把文本文件归一化为 LF。
           git config core.autocrlf false
-          Get-ChildItem -Recurse -File | Where-Object {
-            $_.Extension -in @('.go', '.mod', '.sum', '.txt', '.yml', '.yaml', '.md', '.sh', '.json')
+          # 覆盖全部文本文件（含无扩展名的 .gitattributes 等），含 NUL 的二进制跳过。
+          Get-ChildItem -Path . -Recurse -File | Where-Object {
+            $_.FullName -notmatch '\\\.git\\' -and $_.FullName -notmatch '\\node_modules\\'
           } | ForEach-Object {
-            $content = [System.IO.File]::ReadAllText($_.FullName)
+            $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
+            if ($bytes -contains 0 -or $bytes -notcontains 13) { return }
+            $content = [System.Text.Encoding]::UTF8.GetString($bytes)
             if ($content.Contains("`r`n")) {
               $content = $content.Replace("`r`n", "`n")
               [System.IO.File]::WriteAllText($_.FullName, $content)
@@ -330,10 +333,13 @@ jobs:
           # 合同测试假失败。先关闭 local autocrlf（git status 按原始字节对比，工作树
           # LF 不再被误判为改动），再把文本文件归一化为 LF。
           git config core.autocrlf false
-          Get-ChildItem -Recurse -File | Where-Object {
-            $_.Extension -in @('.go', '.mod', '.sum', '.txt', '.yml', '.yaml', '.md', '.sh', '.json')
+          # 覆盖全部文本文件（含无扩展名的 .gitattributes 等），含 NUL 的二进制跳过。
+          Get-ChildItem -Path . -Recurse -File | Where-Object {
+            $_.FullName -notmatch '\\\.git\\' -and $_.FullName -notmatch '\\node_modules\\'
           } | ForEach-Object {
-            $content = [System.IO.File]::ReadAllText($_.FullName)
+            $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
+            if ($bytes -contains 0 -or $bytes -notcontains 13) { return }
+            $content = [System.Text.Encoding]::UTF8.GetString($bytes)
             if ($content.Contains("`r`n")) {
               $content = $content.Replace("`r`n", "`n")
               [System.IO.File]::WriteAllText($_.FullName, $content)
@@ -856,10 +862,13 @@ jobs:
           # 合同测试假失败。先关闭 local autocrlf（git status 按原始字节对比，工作树
           # LF 不再被误判为改动），再把文本文件归一化为 LF。
           git config core.autocrlf false
-          Get-ChildItem -Recurse -File | Where-Object {
-            $_.Extension -in @('.go', '.mod', '.sum', '.txt', '.yml', '.yaml', '.md', '.sh', '.json')
+          # 覆盖全部文本文件（含无扩展名的 .gitattributes 等），含 NUL 的二进制跳过。
+          Get-ChildItem -Path . -Recurse -File | Where-Object {
+            $_.FullName -notmatch '\\\.git\\' -and $_.FullName -notmatch '\\node_modules\\'
           } | ForEach-Object {
-            $content = [System.IO.File]::ReadAllText($_.FullName)
+            $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
+            if ($bytes -contains 0 -or $bytes -notcontains 13) { return }
+            $content = [System.Text.Encoding]::UTF8.GetString($bytes)
             if ($content.Contains("`r`n")) {
               $content = $content.Replace("`r`n", "`n")
               [System.IO.File]::WriteAllText($_.FullName, $content)
@@ -930,10 +939,13 @@ jobs:
           # 合同测试假失败。先关闭 local autocrlf（git status 按原始字节对比，工作树
           # LF 不再被误判为改动），再把文本文件归一化为 LF。
           git config core.autocrlf false
-          Get-ChildItem -Recurse -File | Where-Object {
-            $_.Extension -in @('.go', '.mod', '.sum', '.txt', '.yml', '.yaml', '.md', '.sh', '.json')
+          # 覆盖全部文本文件（含无扩展名的 .gitattributes 等），含 NUL 的二进制跳过。
+          Get-ChildItem -Path . -Recurse -File | Where-Object {
+            $_.FullName -notmatch '\\\.git\\' -and $_.FullName -notmatch '\\node_modules\\'
           } | ForEach-Object {
-            $content = [System.IO.File]::ReadAllText($_.FullName)
+            $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
+            if ($bytes -contains 0 -or $bytes -notcontains 13) { return }
+            $content = [System.Text.Encoding]::UTF8.GetString($bytes)
             if ($content.Contains("`r`n")) {
               $content = $content.Replace("`r`n", "`n")
               [System.IO.File]::WriteAllText($_.FullName, $content)

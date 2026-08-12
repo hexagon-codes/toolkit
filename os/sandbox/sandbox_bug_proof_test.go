@@ -38,6 +38,12 @@ func TestNewCreatesWorkspaceAndRejectsDangerousConfiguration(t *testing.T) {
 	if sandboxInstance == nil {
 		t.Fatal("New() returned a nil sandbox")
 	}
+	// Windows 上未关闭的沙箱句柄会占用工作区目录，阻止 t.TempDir 清理。
+	t.Cleanup(func() {
+		if closeErr := sandboxInstance.Close(); closeErr != nil {
+			t.Errorf("Close() error = %v", closeErr)
+		}
+	})
 	info, err := os.Stat(workspace)
 	if err != nil || !info.IsDir() {
 		t.Fatalf("workspace was not created as a directory: info=%v err=%v", info, err)
