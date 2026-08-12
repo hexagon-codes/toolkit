@@ -680,9 +680,22 @@ func TestWindows_JobMemoryRootPayload(t *testing.T) {
 		fmt.Printf("JOB_MEMORY_FIXTURE_FAILED:limit:%v", err)
 		return
 	}
-	limits, err := queryCurrentWindowsJobLimits()
-	if err != nil {
-		fmt.Printf("JOB_MEMORY_FIXTURE_FAILED:query-limits:%v", err)
+	// Job 限制在进程启动序列末尾应用，存在瞬时窗口；按 250ms 间隔轮询等待
+	// 限制生效后再断言，避免 race 构建下启动时序导致的误报。
+	var limits jobObjectExtendedLimitInformation
+	var limitErr error
+	for range 20 {
+		limits, limitErr = queryCurrentWindowsJobLimits()
+		memoryFlags := uint32(jobObjectLimitProcessMemory | jobObjectLimitJobMemory)
+		if limitErr == nil && limits.BasicLimitInformation.LimitFlags&memoryFlags == memoryFlags &&
+			uint64(limits.ProcessMemoryLimit) == expectedLimit &&
+			uint64(limits.JobMemoryLimit) == expectedLimit {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if limitErr != nil {
+		fmt.Printf("JOB_MEMORY_FIXTURE_FAILED:query-limits:%v", limitErr)
 		return
 	}
 	memoryFlags := uint32(jobObjectLimitProcessMemory | jobObjectLimitJobMemory)

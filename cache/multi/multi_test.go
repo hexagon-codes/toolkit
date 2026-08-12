@@ -253,7 +253,7 @@ func TestCache_Del(t *testing.T) {
 	})
 
 	if loadCount != 1 {
-		t.Error("expected loader to be called after Del")
+		t.Errorf("expected loader to be called after Del, got %d (layer data: %v)", loadCount, layer.data)
 	}
 }
 
