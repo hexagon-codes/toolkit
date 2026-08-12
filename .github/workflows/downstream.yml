@@ -1,7 +1,7 @@
 name: Downstream Contract
 
 # 接缝契约门禁：toolkit（L0）任何改动，必须覆盖全部已知消费者及嵌套模块。
-# Go 1.25 与 Go 1.26 消费者使用独立工作区，避免高版本 go.work 污染最低版本门禁。
+# 下游使用 go.mod 声明的最低工具链，禁止静默切换到其他版本。
 on:
   push:
     branches: [main]
@@ -74,7 +74,7 @@ jobs:
           done
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.25.13'
+          go-version-file: toolkit/go.mod
           check-latest: false
           cache: false
       - name: Install Linux sandbox dependencies

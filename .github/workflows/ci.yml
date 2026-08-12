@@ -51,7 +51,7 @@ jobs:
           done
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.25.13'
+          go-version-file: go.mod
           check-latest: false
       - name: Run actionlint
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
@@ -96,8 +96,8 @@ jobs:
           done
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          # 该矩阵专门验证 go.mod 声明的最低版本，必须精确固定为 1.25.13。
-          go-version: '1.25.13'
+          # 最低工具链以 go.mod 为唯一来源，补丁升级无需逐个修改工作流。
+          go-version-file: go.mod
           check-latest: false
       - name: Normalize checkout line endings (Windows)
         if: runner.os == 'Windows'
@@ -150,8 +150,9 @@ jobs:
             echo "Expected a native macOS runner." >&2
             exit 1
           fi
-          if ! go version | grep -Fq 'go1.25.13'; then
-            echo "Expected Go 1.25.13 for the minimum-version security gate." >&2
+          expected_go="go$(awk '$1 == "go" {print $2; exit}' go.mod)"
+          if [[ "$(go env GOVERSION)" != "$expected_go" ]]; then
+            echo "Expected $expected_go for the minimum-version gate." >&2
             exit 1
           fi
 
@@ -281,7 +282,7 @@ jobs:
           git update-index --refresh >/dev/null 2>&1 || true
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.25.13'
+          go-version-file: go.mod
           check-latest: false
           cache: false
       - name: Build and vet native Windows sandbox
@@ -390,7 +391,7 @@ jobs:
           done
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.25.13'
+          go-version-file: go.mod
           cache: false
       - name: Install native Linux sandbox dependencies
         run: ./scripts/install-bubblewrap-ci.sh
@@ -418,8 +419,9 @@ jobs:
             echo "Expected a native Linux runner." >&2
             exit 1
           fi
-          if ! go version | grep -Fq 'go1.25.13'; then
-            echo "Expected Go 1.25.13 for the minimum-version security gate." >&2
+          expected_go="go$(awk '$1 == "go" {print $2; exit}' go.mod)"
+          if [[ "$(go env GOVERSION)" != "$expected_go" ]]; then
+            echo "Expected $expected_go for the minimum-version gate." >&2
             exit 1
           fi
 
@@ -568,9 +570,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # 1.25.x 强制解析该版本线的最新补丁；stable 是有意不可复现的前向兼容性探针。
-          - name: Go 1.25 current
-            go-version: '1.25.x'
+          # 1.26.x 强制解析该版本线的最新补丁；stable 是有意不可复现的前向兼容性探针。
+          - name: Go 1.26 current
+            go-version: '1.26.x'
             check-latest: true
           - name: Latest stable Go
             go-version: 'stable'
@@ -649,7 +651,7 @@ jobs:
           done
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.25.13'
+          go-version-file: go.mod
           check-latest: false
       - name: Normalize checkout line endings (Windows)
         if: runner.os == 'Windows'
@@ -719,7 +721,7 @@ jobs:
           done
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.25.13'
+          go-version-file: go.mod
           check-latest: false
       - name: Normalize checkout line endings (Windows)
         if: runner.os == 'Windows'
@@ -766,7 +768,7 @@ jobs:
           done
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.25.13'
+          go-version-file: go.mod
           check-latest: false
       - name: Run isolated integration tests
         run: ./scripts/verify-integrations.sh
@@ -799,7 +801,7 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           # 使用最低支持版本扫描；标准库漏洞必须通过显式提升基线修复，不能被浮动工具链掩盖。
-          go-version: '1.25.13'
+          go-version-file: go.mod
           check-latest: false
       - name: govulncheck
         run: |
