@@ -237,7 +237,10 @@ func openWindowsWorkspaceRootGuard(path string) (*os.File, windowsFileIdentity, 
 		return nil, windowsFileIdentity{}, "", errors.Join(fmt.Errorf("windows sandbox workspace root must not be a reparse point"), file.Close())
 	}
 	if identity.attributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
-		return nil, windowsFileIdentity{}, "", errors.Join(fmt.Errorf("windows sandbox workspace must be a directory"), file.Close())
+		return nil, windowsFileIdentity{}, "", errors.Join(
+			fmt.Errorf("windows sandbox workspace must be a directory (attributes=0x%x)", identity.attributes),
+			file.Close(),
+		)
 	}
 	canonicalPath, err := canonicalWindowsPathFromHandle(file)
 	if err != nil {
