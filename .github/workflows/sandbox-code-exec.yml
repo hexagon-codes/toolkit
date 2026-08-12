@@ -191,15 +191,14 @@ jobs:
       - name: Normalize checkout line endings (Windows)
         if: runner.os == 'Windows'
         working-directory: toolkit
-        shell: pwsh
+        shell: bash
         run: |
           # Windows runner 全局 autocrlf=true 会把文本文件检出为 CRLF，导致 gofmt/tidy/
-          # 合同测试假失败。先关闭 local autocrlf（git status 按原始字节对比，工作树
-          # LF 不再被误判为改动），再把文本文件归一化为 LF。
-          # 关闭 local autocrlf 后用 git 原生重写全部文件（工作树统一 LF）：
-          # git 自行处理编码与二进制判定，比逐文件字节遍历可靠且覆盖所有文件。
+          # 合同测试假失败。关闭 local autocrlf 后由 git 原生重写全部工作树文件为 LF
+          # （checkout-index 不经 MSYS2 文本转换，二进制判定交给 git 自身）。
           git config core.autocrlf false
           git checkout-index -f -a
+          echo "autocrlf=$(git config --get core.autocrlf) global=$(git config --global --get core.autocrlf)" 
       - name: Setup Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
