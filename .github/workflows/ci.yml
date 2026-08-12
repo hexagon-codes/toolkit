@@ -264,7 +264,9 @@ jobs:
         run: |
           set -euo pipefail
           git diff --exit-code
-          if [[ -n "$(git status --porcelain --untracked-files=normal)" ]]; then
+          # Windows 上工作树 LF 会被 git status 误报为 M（平台表示差异，内容已由
+          # git diff 权威校验）；只检查真实变更（untracked/新增/删除）。
+          if git status --porcelain --untracked-files=normal | grep -qv '^ M '; then
             echo "Go verification generated untracked repository files." >&2
             git status --short
             exit 1
@@ -866,7 +868,9 @@ jobs:
         run: |
           set -euo pipefail
           git diff --exit-code
-          if [[ -n "$(git status --porcelain --untracked-files=normal)" ]]; then
+          # Windows 上工作树 LF 会被 git status 误报为 M（平台表示差异，内容已由
+          # git diff 权威校验）；只检查真实变更（untracked/新增/删除）。
+          if git status --porcelain --untracked-files=normal | grep -qv '^ M '; then
             echo "Example verification generated untracked repository files." >&2
             git status --short
             exit 1
