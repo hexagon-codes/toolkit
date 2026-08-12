@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 	"unsafe"
@@ -444,8 +443,7 @@ func TestWindows_JobTotalMemoryEnforced(t *testing.T) {
 		t.Fatalf("Job memory limit produced invalid evidence: stdout=%q stderr=%q", limited.Stdout, limited.Stderr)
 	}
 	if !strings.Contains(limited.Stdout, "JOB_MEMORY_LIMIT_ENFORCED:8") &&
-		!strings.Contains(limited.Stdout, "JOB_MEMORY_LIMIT_ENFORCED:1455") &&
-		!strings.Contains(limited.Stdout, "JOB_MEMORY_LIMIT_ENFORCED:commitment") {
+		!strings.Contains(limited.Stdout, "JOB_MEMORY_LIMIT_ENFORCED:1455") {
 		t.Fatalf("Job memory limit lacks a Windows allocation error: stdout=%q stderr=%q", limited.Stdout, limited.Stderr)
 	}
 	if limited.Limits.Memory != LimitStatusEnforced || limited.Limits.ProcessContainment != LimitStatusEnforced {
@@ -483,16 +481,10 @@ func runWindowsJobMemoryScenario(t *testing.T, memoryLimit int64, mode string) *
 		MaxProcesses:         8,
 		RequiredCapabilities: UntrustedCodeIsolationCapabilities | CapabilityMemory | CapabilityProcesses,
 	})
-	payloadPath := installWindowsTestPayload(t, workspacePath, "sandbox-job-memory-payload.exe")
+	payloadPath := installWindowsJobMemoryPayload(t, workspacePath)
 	result, execErr := sandboxValue.Exec(context.Background(), Command{
 		Path: payloadPath,
-		Args: []string{
-			"-test.run=^TestWindows_JobMemoryRootPayload$",
-			"-test.count=1",
-			"--",
-			mode,
-			strconv.FormatInt(memoryLimit, 10),
-		},
+		Args: []string{mode, strconv.FormatInt(memoryLimit, 10)},
 	})
 	if execErr != nil {
 		t.Fatalf("execute %s Job memory payload: %v", mode, execErr)
@@ -664,159 +656,6 @@ func TestWindows_JobProcessChildPayload(t *testing.T) {
 	time.Sleep(30 * time.Second)
 }
 
-// TestWindows_JobMemoryRootPayload 使用同一载荷分别证明宽松对照和 Job 总内存拒绝。
-func TestWindows_JobMemoryRootPayload(t *testing.T) {
-	if !strings.EqualFold(filepath.Base(os.Args[0]), "sandbox-job-memory-payload.exe") {
-		return
-	}
-	arguments := argumentsAfterDoubleDash(os.Args)
-	if len(arguments) != 2 || arguments[0] != "control" && arguments[0] != "limit" {
-		fmt.Print("JOB_MEMORY_FIXTURE_FAILED:mode")
-		return
-	}
-	mode := arguments[0]
-	expectedLimit, err := strconv.ParseUint(arguments[1], 10, 64)
-	if err != nil {
-		fmt.Printf("JOB_MEMORY_FIXTURE_FAILED:limit:%v", err)
-		return
-	}
-	// Job 限制在进程启动序列末尾应用，存在瞬时窗口；按 250ms 间隔轮询等待
-	// 限制生效后再断言，避免 race 构建下启动时序导致的误报。
-	var limits jobObjectExtendedLimitInformation
-	var limitErr error
-	for range 20 {
-		limits, limitErr = queryCurrentWindowsJobLimits()
-		memoryFlags := uint32(jobObjectLimitProcessMemory | jobObjectLimitJobMemory)
-		if limitErr == nil && limits.BasicLimitInformation.LimitFlags&memoryFlags == memoryFlags &&
-			uint64(limits.ProcessMemoryLimit) == expectedLimit &&
-			uint64(limits.JobMemoryLimit) == expectedLimit {
-			break
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
-	if limitErr != nil {
-		fmt.Printf("JOB_MEMORY_FIXTURE_FAILED:query-limits:%v", limitErr)
-		return
-	}
-	memoryFlags := uint32(jobObjectLimitProcessMemory | jobObjectLimitJobMemory)
-	if limits.BasicLimitInformation.LimitFlags&memoryFlags != memoryFlags ||
-		uint64(limits.ProcessMemoryLimit) != expectedLimit ||
-		uint64(limits.JobMemoryLimit) != expectedLimit {
-		fmt.Printf(
-			"JOB_MEMORY_FIXTURE_FAILED:job-limit:flags=0x%x process=%d job=%d want=%d",
-			limits.BasicLimitInformation.LimitFlags,
-			limits.ProcessMemoryLimit,
-			limits.JobMemoryLimit,
-			expectedLimit,
-		)
-		return
-	}
-	children := make([]*exec.Cmd, 0, 2)
-	waits := make([]<-chan error, 0, 2)
-	outcomes := make([]string, 0, 2)
-	for index := 0; index < 2; index++ {
-		resultPath := filepath.Join(".", fmt.Sprintf("memory-child-%d.result", index))
-		child := exec.CommandContext(
-			context.Background(),
-			os.Args[0],
-			"-test.run=^TestWindows_JobMemoryChildPayload$",
-			"-test.count=1",
-			"--",
-			resultPath,
-		) // #nosec G204 -- 仅重启工作区内已冻结的测试载荷。
-		// AppContainer 沙箱内 nil stdio 会打开 NUL 设备并被拒绝；显式继承父进程 stdio。
-		child.Stdin = os.Stdin
-		child.Stdout = os.Stdout
-		child.Stderr = os.Stderr
-		if err := child.Start(); err != nil {
-			killWindowsPayloadChildren(children, waits)
-			fmt.Printf("JOB_MEMORY_FIXTURE_FAILED:child-%d-start:%v", index, err)
-			return
-		}
-		waitDone := make(chan error, 1)
-		go func() {
-			waitDone <- child.Wait()
-			close(waitDone)
-		}()
-		children = append(children, child)
-		waits = append(waits, waitDone)
-		if ready, waitErr := waitForWindowsPayloadOutcome(resultPath, waitDone, 5*time.Second); !ready {
-			killWindowsPayloadChildren(children, waits)
-			// Job 总内存限制下，后续子进程可能连 Go runtime 启动都无法完成
-			// （未写 result 即退出）；该现象本身就是限制生效的证据。
-			if mode == "limit" && index == 1 {
-				fmt.Print("JOB_MEMORY_LIMIT_ENFORCED:commitment")
-				return
-			}
-			fmt.Printf("JOB_MEMORY_FIXTURE_FAILED:child-%d-result:%v", index, waitErr)
-			return
-		}
-		outcome, err := os.ReadFile(resultPath)
-		if err != nil {
-			killWindowsPayloadChildren(children, waits)
-			fmt.Printf("JOB_MEMORY_FIXTURE_FAILED:child-%d-read:%v", index, err)
-			return
-		}
-		outcomes = append(outcomes, strings.TrimSpace(string(outcome)))
-	}
-	killWindowsPayloadChildren(children, waits)
-	if mode == "control" {
-		if outcomes[0] != "ready" || outcomes[1] != "ready" {
-			fmt.Printf("JOB_MEMORY_FIXTURE_FAILED:control-outcomes:%v", outcomes)
-			return
-		}
-		fmt.Print("JOB_MEMORY_CONTROL_READY")
-		return
-	}
-	if outcomes[0] != "ready" {
-		fmt.Printf("JOB_MEMORY_FIXTURE_FAILED:first-outcome:%s", outcomes[0])
-		return
-	}
-	if outcomes[1] == "ready" {
-		fmt.Print("JOB_MEMORY_LIMIT_NOT_ENFORCED")
-		return
-	}
-	if outcomes[1] != "denied:8" && outcomes[1] != "denied:1455" {
-		fmt.Printf("JOB_MEMORY_FIXTURE_FAILED:second-outcome:%s", outcomes[1])
-		return
-	}
-	fmt.Printf("JOB_MEMORY_LIMIT_ENFORCED:%s", strings.TrimPrefix(outcomes[1], "denied:"))
-}
-
-// TestWindows_JobMemoryChildPayload 直接调用 VirtualAlloc，使失败证据绑定到 Windows 内存限额错误码。
-func TestWindows_JobMemoryChildPayload(t *testing.T) {
-	if !strings.EqualFold(filepath.Base(os.Args[0]), "sandbox-job-memory-payload.exe") {
-		return
-	}
-	arguments := argumentsAfterDoubleDash(os.Args)
-	if len(arguments) != 1 {
-		return
-	}
-	const allocationBytes = uintptr(64 * 1024 * 1024)
-	address, err := windows.VirtualAlloc(
-		0,
-		allocationBytes,
-		windows.MEM_COMMIT|windows.MEM_RESERVE,
-		windows.PAGE_READWRITE,
-	)
-	if err != nil {
-		var errno syscall.Errno
-		if !errors.As(err, &errno) ||
-			errno != windows.ERROR_NOT_ENOUGH_MEMORY && errno != windows.ERROR_COMMITMENT_LIMIT {
-			_ = os.WriteFile(arguments[0], []byte(fmt.Sprintf("fixture-error:%v", err)), 0o600)
-			return
-		}
-		_ = os.WriteFile(arguments[0], []byte(fmt.Sprintf("denied:%d", uint32(errno))), 0o600)
-		return
-	}
-	if err := os.WriteFile(arguments[0], []byte("ready"), 0o600); err != nil {
-		_ = windows.VirtualFree(address, 0, windows.MEM_RELEASE)
-		return
-	}
-	time.Sleep(30 * time.Second)
-	_ = windows.VirtualFree(address, 0, windows.MEM_RELEASE)
-}
-
 func TestWindows_EnvironmentClean(t *testing.T) {
 	const sentinel = "WINDOWS_HOST_ENV_SENTINEL_4B928DAE"
 	t.Setenv("TOOLKIT_WINDOWS_HOST_SECRET", sentinel)
@@ -856,6 +695,63 @@ func TestWindows_PathValidation(t *testing.T) {
 			t.Errorf("dangerous Windows path %q was accepted", path)
 		}
 	}
+}
+
+var (
+	windowsJobMemoryPayloadOnce   sync.Once
+	windowsJobMemoryPayloadBinary []byte
+	windowsJobMemoryPayloadErr    error
+)
+
+func installWindowsJobMemoryPayload(t *testing.T, workspacePath string) string {
+	t.Helper()
+	windowsJobMemoryPayloadOnce.Do(func() {
+		compiler, compilerErr := exec.LookPath("gcc")
+		if compilerErr != nil {
+			windowsJobMemoryPayloadErr = fmt.Errorf("native Job memory fixture requires gcc: %w", compilerErr)
+			return
+		}
+		buildDirectory, directoryErr := os.MkdirTemp("", "toolkit-job-memory-fixture-")
+		if directoryErr != nil {
+			windowsJobMemoryPayloadErr = directoryErr
+			return
+		}
+		defer func() {
+			if cleanupErr := os.RemoveAll(buildDirectory); cleanupErr != nil {
+				windowsJobMemoryPayloadErr = errors.Join(windowsJobMemoryPayloadErr, cleanupErr)
+			}
+		}()
+		payload := filepath.Join(buildDirectory, "job-memory.exe")
+		source, sourceErr := filepath.Abs(filepath.Join("testdata", "windows_job_memory.c"))
+		if sourceErr != nil {
+			windowsJobMemoryPayloadErr = sourceErr
+			return
+		}
+		command := exec.CommandContext(t.Context(), compiler, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-municode", "-static", "-s", "-o", payload, source)
+		output, compileErr := command.CombinedOutput()
+		if compileErr != nil {
+			windowsJobMemoryPayloadErr = fmt.Errorf("compile native Job memory fixture: %w: %s", compileErr, output)
+			return
+		}
+		windowsJobMemoryPayloadBinary, windowsJobMemoryPayloadErr = os.ReadFile(payload)
+	})
+	if windowsJobMemoryPayloadErr != nil {
+		t.Fatal(windowsJobMemoryPayloadErr)
+	}
+	payload := filepath.Join(workspacePath, "sandbox-job-memory-payload.exe")
+	if writeErr := os.WriteFile(payload, windowsJobMemoryPayloadBinary, 0o700); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	file, openErr := os.Open(payload)
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	defer file.Close()
+	canonicalPath, pathErr := canonicalWindowsPathFromHandle(file)
+	if pathErr != nil {
+		t.Fatal(pathErr)
+	}
+	return canonicalPath
 }
 
 func installWindowsTestPayload(t *testing.T, workspacePath, filename string) string {
