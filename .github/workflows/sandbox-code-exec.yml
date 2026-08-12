@@ -278,7 +278,7 @@ jobs:
               required_tests+=(TestCodeExecSkill_Execute_ModuleGoFiles)
             fi
             if [[ "$HEXCLAW_CODE_EXEC_LIVE_NETWORK" == "1" ]]; then
-              required_tests+=(TestCodeExecSkill_Execute_PythonCrawlerNetworkPolicy)
+              required_tests+=(TestCodeExecSkill_Execute_PythonCrawlerHostNetworkRejected)
             fi
           fi
 
