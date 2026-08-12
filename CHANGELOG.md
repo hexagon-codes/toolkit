@@ -2,6 +2,13 @@
 
 本文件记录 toolkit 的用户可见变更，遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.3.1] - 2026-08-12
+
+发布流程修复版。Go 代码与 v0.3.0 完全一致，仅修正 Tag 触发时的门禁缺陷。
+
+### Fixed
+- `API Compatibility` 工作流在 Tag 触发时不再用已存在的目标版本调用 `gorelease -version`（此前报 `version already exists`）；Tag 触发只做 base 对比输出 breaking 报告，版本号一致性由 `Verify release tag` 步骤保证。
+
 ## [0.3.0] - 2026-08-12
 
 ### Changed

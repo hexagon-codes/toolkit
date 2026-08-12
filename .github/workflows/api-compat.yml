@@ -20,7 +20,9 @@ env:
   # 确保 API 门禁使用 setup-go 选定的工具链，不允许静默自动升级。
   GOTOOLCHAIN: local
   API_BASE_VERSION: "v0.2.6"
-  API_RELEASE_VERSION: "v0.3.0"
+  # 目标发布版本。tag 触发时 Verify release tag 会校验 tag 名与之一致；
+  # v0.3.1 为发布流程修复版（v0.3.0 的 Go 代码不变，仅修正 tag 门禁）。
+  API_RELEASE_VERSION: "v0.3.1"
   API_BREAKING_BASELINE: ".github/workflows/api-breaking-v0.3.0.txt"
   API_BREAKING_CHECKER: ".github/workflows/check-api-breaking.py"
 
