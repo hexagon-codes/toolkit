@@ -79,7 +79,8 @@ jobs:
           # 报 Cannot suggest，两种受限模式都不适用于发布门禁。
           base_version="$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -vx "$GITHUB_REF_NAME" | head -1)"
           export API_BASE_TAG="$base_version"
-          export API_BASE_SHA="$(git rev-parse "$base_version^{commit}")"
+          API_BASE_SHA="$(git rev-parse "$base_version^{commit}")"
+          export API_BASE_SHA
           python3 scripts/verification-inputs.py "$RUNNER_TEMP/api-inputs.json"
           gorelease -base="$base_version" | tee "$report_path"
           python3 "$API_BREAKING_CHECKER" "$report_path" "$API_BREAKING_BASELINE" --allow-empty

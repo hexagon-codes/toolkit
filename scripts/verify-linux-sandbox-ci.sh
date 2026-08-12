@@ -62,6 +62,7 @@ for identity in root nonroot; do
   probe_log="$evidence_dir/linux-$identity-bwrap-probe.log"
   if "${launcher[@]}" env -i HOME="$home_dir" PATH="$trusted_path" \
     /usr/bin/bwrap "${bindings[@]}" --unshare-user --unshare-pid --unshare-ipc --unshare-uts \
+    --disable-userns --assert-userns-disabled --unshare-net --new-session --die-with-parent \
     --cap-drop ALL --uid 65534 --gid 65534 --proc /proc --dev /dev -- "$payload" >"$probe_log" 2>&1; then
     echo "$identity bubblewrap capability probe passed"
   else
