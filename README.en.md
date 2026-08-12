@@ -11,7 +11,7 @@ A production-grade Go general-purpose toolkit with domain-driven design principl
 ✅ **Domain-Driven Design** - Organized by functional domains, clear layered architecture
 ✅ **Production-Grade Code** - Battle-tested, high-quality implementations
 ✅ **Interface-Driven** - Easy to extend and test
-✅ **Zero-Copy Optimization** - High-performance string/byte operations
+✅ **Safe Conversions** - String and byte-slice conversions without mutable storage aliasing
 ✅ **Full Observability** - Prometheus metrics support
 ✅ **Generics Support** - Type-safe implementations using Go generics
 ✅ **Security-First** - SSRF protection (IPv6), HMAC constant-time comparison, AES-GCM recommended
