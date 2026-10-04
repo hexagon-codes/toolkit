@@ -3,7 +3,7 @@
 // 通过本地 replace 始终绑定当前源码树，不依赖尚未发布的 toolkit 版本。
 module github.com/hexagon-codes/toolkit/examples
 
-go 1.25.12
+go 1.25.13
 
 require (
 	github.com/hexagon-codes/toolkit v0.0.0

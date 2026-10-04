@@ -218,7 +218,7 @@ func auditLinuxWorkspaceContext(ctx context.Context, workspace string) error {
 		key := linuxInodeKey{device: stat.Dev, inode: stat.Ino}
 		value := links[key]
 		value.observed++
-		value.total = stat.Nlink
+		value.total = uint64(stat.Nlink) //nolint:unconvert // Linux 的 Nlink 字段在不同架构上使用 uint32 或 uint64。
 		links[key] = value
 		return nil
 	})

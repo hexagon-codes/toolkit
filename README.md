@@ -4,7 +4,7 @@
 
 一个生产级 Go 通用工具包，采用领域驱动设计理念。
 
-[![Go Version](https://img.shields.io/badge/Go-%3E%3D%201.25.12-blue)](https://go.dev/)
+[![Go Version](https://img.shields.io/badge/Go-%3E%3D%201.25.13-blue)](https://go.dev/)
 
 ## 特性
 

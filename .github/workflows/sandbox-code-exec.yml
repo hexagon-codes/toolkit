@@ -38,7 +38,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GO_VERSION: "1.25.12"
+  GO_VERSION: "1.25.13"
   # 确保原生沙箱门禁使用 setup-go 选定的工具链，不允许静默自动升级。
   GOTOOLCHAIN: local
   GOPRIVATE: github.com/hexagon-codes/*
@@ -278,7 +278,7 @@ jobs:
               required_tests+=(TestCodeExecSkill_Execute_ModuleGoFiles)
             fi
             if [[ "$HEXCLAW_CODE_EXEC_LIVE_NETWORK" == "1" ]]; then
-              required_tests+=(TestCodeExecSkill_Execute_PythonCrawlerNetworkPolicy)
+              required_tests+=(TestCodeExecSkill_Execute_PythonCrawlerHostNetworkRejected)
             fi
           fi
 

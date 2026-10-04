@@ -51,7 +51,7 @@ jobs:
           done
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.25.12'
+          go-version: '1.25.13'
           check-latest: false
       - name: Run actionlint
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
@@ -96,8 +96,8 @@ jobs:
           done
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          # 该矩阵专门验证 go.mod 声明的最低版本，必须精确固定为 1.25.12。
-          go-version: '1.25.12'
+          # 该矩阵专门验证 go.mod 声明的最低版本，必须精确固定为 1.25.13。
+          go-version: '1.25.13'
           check-latest: false
       - name: Normalize checkout line endings (Windows)
         if: runner.os == 'Windows'
@@ -150,8 +150,8 @@ jobs:
             echo "Expected a native macOS runner." >&2
             exit 1
           fi
-          if ! go version | grep -Fq 'go1.25.12'; then
-            echo "Expected Go 1.25.12 for the minimum-version security gate." >&2
+          if ! go version | grep -Fq 'go1.25.13'; then
+            echo "Expected Go 1.25.13 for the minimum-version security gate." >&2
             exit 1
           fi
 
@@ -281,7 +281,7 @@ jobs:
           git update-index --refresh >/dev/null 2>&1 || true
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.25.12'
+          go-version: '1.25.13'
           check-latest: false
           cache: false
       - name: Build and vet native Windows sandbox
@@ -390,7 +390,7 @@ jobs:
           done
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.25.12'
+          go-version: '1.25.13'
           cache: false
       - name: Install native Linux sandbox dependencies
         run: ./scripts/install-bubblewrap-ci.sh
@@ -418,8 +418,8 @@ jobs:
             echo "Expected a native Linux runner." >&2
             exit 1
           fi
-          if ! go version | grep -Fq 'go1.25.12'; then
-            echo "Expected Go 1.25.12 for the minimum-version security gate." >&2
+          if ! go version | grep -Fq 'go1.25.13'; then
+            echo "Expected Go 1.25.13 for the minimum-version security gate." >&2
             exit 1
           fi
 
@@ -649,7 +649,7 @@ jobs:
           done
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.25.12'
+          go-version: '1.25.13'
           check-latest: false
       - name: Normalize checkout line endings (Windows)
         if: runner.os == 'Windows'
@@ -719,7 +719,7 @@ jobs:
           done
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.25.12'
+          go-version: '1.25.13'
           check-latest: false
       - name: Normalize checkout line endings (Windows)
         if: runner.os == 'Windows'
@@ -766,7 +766,7 @@ jobs:
           done
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.25.12'
+          go-version: '1.25.13'
           check-latest: false
       - name: Run isolated integration tests
         run: ./scripts/verify-integrations.sh
@@ -799,7 +799,7 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           # 使用最低支持版本扫描；标准库漏洞必须通过显式提升基线修复，不能被浮动工具链掩盖。
-          go-version: '1.25.12'
+          go-version: '1.25.13'
           check-latest: false
       - name: govulncheck
         run: |

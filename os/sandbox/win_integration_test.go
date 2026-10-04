@@ -937,6 +937,10 @@ func waitForWindowsPayloadOutcome(path string, processDone <-chan error, timeout
 
 func queryCurrentWindowsJobLimits() (jobObjectExtendedLimitInformation, error) {
 	var limits jobObjectExtendedLimitInformation
+	// uintptr 包装调用不会随 Go 栈移动更新地址，查询期间固定输出缓冲区。
+	var pinner runtime.Pinner
+	pinner.Pin(&limits)
+	defer pinner.Unpin()
 	if err := windows.QueryInformationJobObject(
 		0,
 		windows.JobObjectExtendedLimitInformation,
