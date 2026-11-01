@@ -57,13 +57,20 @@ func run(ctx context.Context, spec Spec, result Result) (Result, error) {
 	if cmd.ProcessState != nil {
 		result.ExitCode = cmd.ProcessState.ExitCode()
 	}
-	if ctx.Err() == nil {
-		groupErr := syscall.Kill(-result.PID, 0)
-		if groupErr == nil || errors.Is(groupErr, syscall.EPERM) {
-			result.BackgroundProcessesRunning = true
-		} else if !errors.Is(groupErr, syscall.ESRCH) {
-			return result, errors.Join(waitErr, fmt.Errorf("inspect host process group: %w", groupErr))
+	// 根退出和取消可同时就绪；无论select选中哪一支，都核对本组后代状态。
+	groupErr := syscall.Kill(-result.PID, 0)
+	if groupErr == nil || errors.Is(groupErr, syscall.EPERM) {
+		if ctx.Err() != nil {
+			killErr := syscall.Kill(-result.PID, syscall.SIGKILL)
+			if !errors.Is(killErr, syscall.ESRCH) {
+				waitErr = errors.Join(waitErr, killErr)
+			}
+			groupErr = syscall.Kill(-result.PID, 0)
 		}
+		result.BackgroundProcessesRunning = groupErr == nil || errors.Is(groupErr, syscall.EPERM)
 	}
-	return result, waitErr
+	if groupErr != nil && !errors.Is(groupErr, syscall.ESRCH) && !errors.Is(groupErr, syscall.EPERM) {
+		return result, errors.Join(waitErr, fmt.Errorf("inspect host process group: %w", groupErr))
+	}
+	return result, errors.Join(waitErr, ctx.Err())
 }
