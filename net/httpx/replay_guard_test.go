@@ -318,3 +318,107 @@ func replayGuardGet(t *testing.T, client *http.Client, address string) (*http.Re
 	}
 	return client.Do(request)
 }
+
+func TestReplayGuardIdleExpiryReleasesRoute(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer server.Close()
+	transport, err := NewReplayGuardTransport(&http.Transport{IdleConnTimeout: 20 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: transport, Timeout: time.Second}
+	defer client.CloseIdleConnections()
+	response, err := replayGuardGet(t, client, server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, readErr := io.Copy(io.Discard, response.Body)
+	if err := errors.Join(readErr, response.Body.Close()); err != nil {
+		t.Fatal(err)
+	}
+	pool := transport.(*replayGuardTransport)
+	deadline := time.Now().Add(time.Second)
+	for {
+		pool.mu.Lock()
+		empty := len(pool.routes) == 0
+		pool.mu.Unlock()
+		if empty {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("idle route was not released")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestReplayGuardQueuedRequestSurvivesRouteCleanup(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer server.Close()
+	transport, err := NewReplayGuardTransport(&http.Transport{MaxConnsPerHost: 1, DisableKeepAlives: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: transport, Timeout: time.Second}
+	defer client.CloseIdleConnections()
+	first, err := replayGuardGet(t, client, server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Body.Close()
+	second := make(chan error, 1)
+	go func() {
+		request, requestErr := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL, nil)
+		if requestErr != nil {
+			second <- requestErr
+			return
+		}
+		response, err := client.Do(request)
+		if err == nil {
+			body, readErr := io.ReadAll(response.Body)
+			err = errors.Join(readErr, response.Body.Close())
+			if err == nil && string(body) != "ok" {
+				err = errors.New("unexpected response body")
+			}
+		}
+		second <- err
+	}()
+	pool := transport.(*replayGuardTransport)
+	deadline := time.Now().Add(time.Second)
+	for {
+		pool.mu.Lock()
+		waiting := false
+		for _, route := range pool.routes {
+			waiting = waiting || route.waiters == 1
+		}
+		pool.mu.Unlock()
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("second request did not enter the queue")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := first.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-second:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("queued request did not complete")
+	}
+	client.CloseIdleConnections()
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	if len(pool.routes) != 0 {
+		t.Fatal("completed routes were retained")
+	}
+}

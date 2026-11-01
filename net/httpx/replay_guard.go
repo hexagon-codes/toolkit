@@ -28,6 +28,7 @@ type replayGuardRoute struct {
 	key         string
 	connections []*replayGuardConn
 	dialing     int
+	waiters     int
 	changed     chan struct{}
 }
 
@@ -148,11 +149,20 @@ func (t *replayGuardTransport) acquire(req *http.Request, key, address string, p
 		}
 		limit := t.transport.MaxConnsPerHost
 		if limit > 0 && len(route.connections)+route.dialing >= limit {
+			route.waiters++
 			t.mu.Unlock()
 			select {
 			case <-req.Context().Done():
+				t.mu.Lock()
+				route.waiters--
+				t.pruneRoute(route)
+				t.mu.Unlock()
 				return nil, nil, req.Context().Err()
 			case <-route.changed:
+				t.mu.Lock()
+				route.waiters--
+				t.pruneRoute(route)
+				t.mu.Unlock()
 				continue
 			}
 		}
@@ -167,9 +177,7 @@ func (t *replayGuardTransport) acquire(req *http.Request, key, address string, p
 		t.mu.Lock()
 		route.dialing--
 		if err != nil {
-			if len(route.connections) == 0 && route.dialing == 0 {
-				delete(t.routes, route.key)
-			}
+			t.pruneRoute(route)
 			t.notify(route)
 			t.mu.Unlock()
 			return nil, nil, err
@@ -198,6 +206,13 @@ func (t *replayGuardTransport) notify(route *replayGuardRoute) {
 	}
 }
 
+// 调用方持有池锁；等待者退出前仍拥有路由引用，不能提前另建同目标连接池。
+func (t *replayGuardTransport) pruneRoute(route *replayGuardRoute) {
+	if len(route.connections) == 0 && route.dialing == 0 && route.waiters == 0 && t.routes[route.key] == route {
+		delete(t.routes, route.key)
+	}
+}
+
 // remove 的调用方持有池锁；连接关闭的通知不会反向获取该锁。
 func (t *replayGuardTransport) remove(route *replayGuardRoute, index int) {
 	connection := route.connections[index]
@@ -211,7 +226,10 @@ func (t *replayGuardTransport) remove(route *replayGuardRoute, index int) {
 
 func (t *replayGuardTransport) finished(route *replayGuardRoute, connection *replayGuardConn) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	defer func() {
+		t.pruneRoute(route)
+		t.mu.Unlock()
+	}()
 	t.notify(route)
 	if connection.conn.InFlight() != 0 {
 		return
@@ -232,7 +250,10 @@ func (t *replayGuardTransport) finished(route *replayGuardRoute, connection *rep
 		}
 		connection.timer = time.AfterFunc(t.transport.IdleConnTimeout, func() {
 			t.mu.Lock()
-			defer t.mu.Unlock()
+			defer func() {
+				t.pruneRoute(route)
+				t.mu.Unlock()
+			}()
 			if connection.conn.InFlight() != 0 || time.Since(connection.idleSince) < t.transport.IdleConnTimeout {
 				return
 			}
@@ -266,6 +287,7 @@ func (t *replayGuardTransport) trimIdle() {
 				total++
 			}
 		}
+		t.pruneRoute(route)
 	}
 	for t.transport.MaxIdleConns > 0 && total > t.transport.MaxIdleConns {
 		var oldest *replayGuardConn
@@ -282,6 +304,7 @@ func (t *replayGuardTransport) trimIdle() {
 			break
 		}
 		t.remove(oldestRoute, oldestIndex)
+		t.pruneRoute(oldestRoute)
 		total--
 	}
 }
@@ -289,15 +312,13 @@ func (t *replayGuardTransport) trimIdle() {
 func (t *replayGuardTransport) CloseIdleConnections() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	for key, route := range t.routes {
+	for _, route := range t.routes {
 		for i := len(route.connections) - 1; i >= 0; i-- {
 			if route.connections[i].conn.InFlight() == 0 {
 				t.remove(route, i)
 			}
 		}
-		if len(route.connections) == 0 && route.dialing == 0 {
-			delete(t.routes, key)
-		}
+		t.pruneRoute(route)
 	}
 }
 
