@@ -45,7 +45,8 @@ var _ Blobstore = (*Store)(nil)
 //
 // 与 SaveBytes 同样按 SHA-256 内容寻址 + 同内容去重 + 原子落盘，但不要求把整个
 // 内容读进内存：边读边写临时文件、同时计算哈希，读完后按哈希 rename 到最终路径。
-// 适合视频等大文件。ext 不带点；空内容返回错误；ctx 取消会中断读取。
+// 适合视频等大文件。ext 不带点；空内容返回错误；每次读取前检查ctx取消。
+// r由调用方持有，本方法不关闭它；正在阻塞的Read需要Reader自身支持取消或截止时间。
 func (s *Store) SaveStream(ctx context.Context, r io.Reader, ext string) (string, error) {
 	root, release, err := s.acquireRoot()
 	if err != nil {
@@ -90,7 +91,7 @@ func (s *Store) saveStreamWithEmpty(ctx context.Context, root *os.Root, r io.Rea
 	defer func() { err = errors.Join(err, tmp.cleanup()) }()
 
 	h := sha256.New()
-	// 边写临时文件边计算哈希；ctxReader 让取消能中断长时间拷贝。
+	// 边写临时文件边计算哈希；ctxReader在每次读取之间响应取消。
 	n, err := io.Copy(io.MultiWriter(tmp.file, h), &ctxReader{ctx: ctx, r: r})
 	if err != nil {
 		return "", fmt.Errorf("stream copy: %w", err)
@@ -162,7 +163,7 @@ func (s *Store) OpenReader(relPath string) (io.ReadCloser, error) {
 }
 
 // ctxReader 包装 io.Reader，使每次 Read 前先检查 ctx 取消，
-// 让大文件流式拷贝可被取消/超时中断。
+// 不强行关闭调用方持有的Reader，也不承诺打断已经开始的阻塞Read。
 type ctxReader struct {
 	ctx context.Context
 	r   io.Reader
