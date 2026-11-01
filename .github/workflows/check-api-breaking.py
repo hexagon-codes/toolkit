@@ -80,6 +80,10 @@ def main() -> None:
     report_path = args.report
     baseline_path = args.baseline
     report = read_text(report_path, "gorelease report")
+    # 显式版本合法时，gorelease 仍可能报告基线加载错误，必须先确认比较完整。
+    for line in report.splitlines():
+        if line in ("## errors in base version:", "## errors in release version:"):
+            raise SystemExit("API comparison is incomplete: " + line.removeprefix("## "))
     actual = extract_breaking_sections(report)
     compatible = has_compatible_changes(report)
     expected = read_text(baseline_path, "breaking API baseline").replace("\r\n", "\n")

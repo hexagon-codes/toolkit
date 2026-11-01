@@ -17,7 +17,13 @@ class ReleaseError(Exception):
 
 
 def command(*args, **kwargs):
-    return subprocess.check_output(args, text=True, **kwargs).strip()
+    try:
+        return subprocess.check_output(args, text=True, stderr=subprocess.PIPE, **kwargs).strip()
+    except subprocess.CalledProcessError as error:
+        detail = (error.stderr or "").strip() or (error.output or "").strip() or str(error)
+        raise ReleaseError(detail) from error
+    except OSError as error:
+        raise ReleaseError(f"Cannot execute {args[0]}: {error}") from error
 
 
 def api(path):
@@ -49,31 +55,58 @@ def local_tag_commit(version):
     return result.stdout.strip() if result.returncode == 0 else None
 
 
+def select_go_toolchain(go_mod):
+    # 用目标模块选择工具链，保持历史核验独立于当前工作区，并尊重 auto/local。
+    with tempfile.TemporaryDirectory(prefix="toolkit-toolchain-") as directory:
+        Path(directory, "go.mod").write_text(go_mod, encoding="utf-8")
+        env = dict(os.environ, GOWORK="off")
+        go_root = command("go", "env", "GOROOT", cwd=directory, env=env)
+        executable = Path(go_root) / "bin" / ("go.exe" if os.name == "nt" else "go")
+        # go env 不一定检查最低版本；只加载主模块即可验证工具链，无须下载依赖。
+        command(str(executable), "list", "-m", "-mod=readonly", cwd=directory,
+                env=dict(env, GOTOOLCHAIN="local"))
+        return executable
+
+
+def download_module(executable, module, version, directory, env):
+    result = subprocess.run([str(executable), "mod", "download", "-json", module + "@" + version],
+                            cwd=directory, env=env, text=True, capture_output=True)
+    try:
+        downloaded = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit status {result.returncode}"
+        raise ReleaseError("Go module download did not return valid JSON: " + detail) from error
+    if not isinstance(downloaded, dict):
+        raise ReleaseError("Go module download did not return a JSON object")
+    if downloaded.get("Error"):
+        raise ReleaseError("Go module download failed: " + str(downloaded["Error"]))
+    if result.returncode:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit status {result.returncode}"
+        raise ReleaseError("Go module download failed: " + detail)
+    return downloaded
+
+
 def verify_published(repo, version, candidate):
     # 历史发布核验不读取最新版本、候选 CI 产物或当前工作区的 go.mod。
     document = api(f"repos/{repo}/contents/go.mod?ref={candidate}")
     go_mod = base64.b64decode(document["content"]).decode()
-    match = re.search(r"(?m)^module\s+(\S+)", go_mod)
+    match = re.search(r'(?m)^module\s+"?([^"\s]+)', go_mod)
     if not match:
         raise ReleaseError("Published source has no module path")
     module = match[1]
+    go_executable = select_go_toolchain(go_mod)
     with tempfile.TemporaryDirectory(prefix="toolkit-module-") as directory:
-        # 在模块外解析工具链，历史核验不受当前 go.mod 的版本要求影响。
-        go_root = command("go", "env", "GOROOT", cwd=directory, env=dict(os.environ, GOWORK="off"))
-        go_executable = Path(go_root) / "bin" / ("go.exe" if os.name == "nt" else "go")
         # 直接读取不可变 Git tag，避免镜像收录延迟；Go 校验和数据库仍验证实际包。
         env = dict(os.environ, GOWORK="off", GOTOOLCHAIN="local", GOMODCACHE=directory + "/modules",
                    GOPROXY="direct", GOPRIVATE="", GONOPROXY="", GONOSUMDB="",
                    GOSUMDB="sum.golang.org")
-        raw = command(str(go_executable), "mod", "download", "-json", module + "@" + version,
-                      cwd=directory, env=env)
-        downloaded = json.loads(raw)
+        downloaded = download_module(go_executable, module, version, directory, env)
         if (downloaded.get("Error") or downloaded.get("Path") != module
                 or downloaded.get("Version") != version
                 or not downloaded.get("Sum") or not downloaded.get("GoModSum")
                 or downloaded.get("Origin", {}).get("Hash") != candidate):
             raise ReleaseError("Downloaded module does not match the published tag and commit")
-        if not Path(downloaded["Zip"]).is_file() or Path(downloaded["GoMod"]).read_text() != go_mod:
+        if not Path(downloaded["Zip"]).is_file() or Path(downloaded["GoMod"]).read_text(encoding="utf-8") != go_mod:
             raise ReleaseError("Published module archive or go.mod is inconsistent")
     return {"version": version, "candidate": candidate, "module": module,
             "sum": downloaded["Sum"], "go_mod_sum": downloaded["GoModSum"],
@@ -95,10 +128,13 @@ def validate_version(version, base, changes):
         raise ReleaseError("Compatible API additions require a minor or major version bump")
 
 
-def refresh(repo, filename, candidate, main_sha):
+def refresh(repo, filename, candidate, main_sha, release_version=""):
     if candidate != main_sha:
         return "Select the current main commit for fresh verification; historical evidence cannot be substituted"
-    command("gh", "workflow", "run", filename, "--ref", "main", "--repo", repo)
+    args = ["gh", "workflow", "run", filename, "--ref", "main", "--repo", repo]
+    if release_version:
+        args.extend(["-f", "release_version=" + release_version])
+    command(*args)
     return "Fresh exact-SHA verification dispatched; wait for completion and check again"
 
 
@@ -136,7 +172,8 @@ def qualify(repo, version, candidate, refs, prepare):
     if version_tuple(version) <= version_tuple(base):
         raise ReleaseError("Release version must be newer than the latest stable version")
     major = version_tuple(version)[0]
-    module = re.search(r"(?m)^module\s+(\S+)", source(candidate, "go.mod"))[1]
+    explicit_version = version if major > version_tuple(base)[0] else ""
+    module = re.search(r'(?m)^module\s+"?([^"\s]+)', source(candidate, "go.mod"))[1]
     suffix = re.search(r"/v([0-9]+)$", module)
     if (major >= 2 and (not suffix or int(suffix[1]) != major)
             or major < 2 and suffix is not None):
@@ -169,6 +206,9 @@ def qualify(repo, version, candidate, refs, prepare):
                 if filename == "api-compat.yml":
                     if any(record.get(key) != value for key, value in expected_api.items()):
                         raise ReleaseError("API comparison inputs changed")
+                    checked_version = record.get("release_version", "")
+                    if (explicit_version or checked_version) and checked_version != version:
+                        raise ReleaseError("API comparison release version does not match the candidate")
                     changes = record.get("api_changes", {})
                     if any(type(changes.get(key)) is not bool for key in ("has_breaking", "has_compatible")):
                         raise ReleaseError("API change classification is missing")
@@ -180,7 +220,8 @@ def qualify(repo, version, candidate, refs, prepare):
                 reason = str(error)
         if reason:
             if prepare:
-                reason += "; " + refresh(repo, filename, candidate, main_sha)
+                requested_version = explicit_version if filename == "api-compat.yml" else ""
+                reason += "; " + refresh(repo, filename, candidate, main_sha, requested_version)
             pending.append(filename + ": " + reason)
         else:
             receipts.append({"workflow": filename, "run_id": run["id"], "url": run["html_url"]})
@@ -220,6 +261,9 @@ def main():
     if args.verify_published:
         raise ReleaseError("Release tag is not published")
     result = qualify(repo, args.version, candidate, refs, args.prepare)
+    if args.publish:
+        # 工具链不可用时在创建或续推不可变 tag 之前失败。
+        select_go_toolchain(source(candidate, "go.mod"))
     print(json.dumps(result, indent=2))
     if args.publish:
         if not local_sha:

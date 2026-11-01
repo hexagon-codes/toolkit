@@ -7,6 +7,11 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      release_version:
+        description: "Unpublished candidate version for explicit API validation"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -57,6 +62,8 @@ jobs:
         run: go install golang.org/x/exp/cmd/gorelease@${{ env.GORELEASE_VERSION }}
       - name: Check API compatibility
         shell: bash
+        env:
+          REQUESTED_RELEASE_VERSION: ${{ inputs.release_version }}
         run: |
           set -euo pipefail
           report_path="$RUNNER_TEMP/gorelease-report.txt"
@@ -69,8 +76,41 @@ jobs:
           export API_BASE_TAG="$base_version"
           API_BASE_SHA="$(git rev-parse "$base_version^{commit}")"
           export API_BASE_SHA
+          module_path="$(awk '$1 == "module" {print $2; exit}' go.mod)"
+          module_path="${module_path//\"/}"
+          module_major=""
+          if [[ "$module_path" =~ /v([0-9]+)$ ]]; then
+            module_major="${BASH_REMATCH[1]}"
+            if [[ ! "$module_major" =~ ^[1-9][0-9]*$ || "$module_major" == 1 ]]; then
+              echo "Module major version suffix must be v2 or higher." >&2
+              exit 1
+            fi
+          fi
+          base_major="${base_version#v}"
+          base_major="${base_major%%.*}"
+          release_version="${REQUESTED_RELEASE_VERSION:-}"
+          # 跨模块主版本无法推导版本建议，自动比较先核验该主版本的首个稳定版本。
+          if [[ -z "$release_version" && -n "$module_major" && "$module_major" != "$base_major" ]]; then
+            release_version="v${module_major}.0.0"
+          fi
+          release_args=()
+          if [[ -n "$release_version" ]]; then
+            if [[ ! "$release_version" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+              echo "A stable candidate version is required." >&2
+              exit 1
+            fi
+            release_major="${release_version#v}"
+            release_major="${release_major%%.*}"
+            if [[ -n "$module_major" && "$release_major" != "$module_major" ]] ||
+              [[ -z "$module_major" && "$release_major" != 0 && "$release_major" != 1 ]]; then
+              echo "Candidate version does not match the module major version." >&2
+              exit 1
+            fi
+            release_args+=("-version=$release_version")
+          fi
+          export API_RELEASE_VERSION="$release_version"
           export API_CHANGES_FILE="$RUNNER_TEMP/api-changes.json"
-          gorelease -base="$base_version" | tee "$report_path"
+          gorelease -base="$base_version" "${release_args[@]}" | tee "$report_path"
           python3 "$API_BREAKING_CHECKER" "$report_path" "$API_BREAKING_BASELINE" --allow-empty --json-output "$API_CHANGES_FILE"
           python3 scripts/verification-inputs.py "$RUNNER_TEMP/api-inputs.json"
       - name: Preserve verification inputs

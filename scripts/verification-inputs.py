@@ -36,6 +36,7 @@ if os.environ.get("API_BASE_TAG"):
         raise SystemExit("API change classification is invalid")
     result.update(base_tag=os.environ["API_BASE_TAG"], base_sha=os.environ["API_BASE_SHA"],
                   baseline_sha256=hashlib.sha256(baseline.read_bytes()).hexdigest(),
-                  gorelease_version=os.environ["GORELEASE_VERSION"], api_changes=changes)
+                  gorelease_version=os.environ["GORELEASE_VERSION"], api_changes=changes,
+                  release_version=os.environ.get("API_RELEASE_VERSION", ""))
 Path(sys.argv[1]).write_text(json.dumps(result, indent=2) + "\n")
 print(json.dumps(result))
