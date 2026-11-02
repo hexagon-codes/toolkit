@@ -22,13 +22,13 @@ A production-grade Go general-purpose toolkit with domain-driven design principl
 
 ## Quick Start
 
-v0.3.6 requires Go 1.26.10 or later.
+The local delivery target v0.3.7 requires Go 1.26.10 or later.
 
 ```bash
-go get github.com/hexagon-codes/toolkit@v0.3.6
+go get github.com/hexagon-codes/toolkit@v0.3.7
 ```
 
-The installation command above requires the `v0.3.6` tag to be published first.
+This command is for the target release and requires a published `v0.3.7` tag and verified public module availability. This local delivery does not create or push a tag; validation through an isolated local module proxy does not prove public publication.
 
 ### Type Conversion
 
@@ -1375,7 +1375,7 @@ proof is unavailable, the backend must reject before any payload side effect.
 
 ## Recent Changes
 
-> The following APIs are present in the current working tree and planned for `v0.3.6`. Their availability depends on the final published source:
+> The following APIs are present in the current working tree, whose delivery target is `v0.3.7`. Their availability depends on the final published source:
 > - `blobstore.Store.SaveStreamAllowEmpty` permits an actual zero-byte file; `SaveStream` still rejects empty content. This method is not part of the `Blobstore` interface.
 > - `httpx.NewReplayGuardTransport` wraps standard HTTP/1.1 and TLS HTTP/2 transports to block internal replay. Redirects and application retries remain the caller's responsibility; custom HTTP/2 handlers and cleartext HTTP/2 are unsupported.
 > - `hostprocess.Run` manages a host process lifecycle; it does not provide sandbox isolation. Callers provide and manage the standard stream files; cancellation terminates the process group or Job.

@@ -2,6 +2,18 @@
 
 本文件记录 toolkit 的用户可见变更，遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## v0.3.7（2026-11-02）
+
+本节对应本地代码交付目标；版本说明不代表已经创建或推送 tag，也不证明 GitHub 或公共 Go module proxy 已可解析该版本。
+
+### Added
+
+- `util/reflectx.DeepCopyChecked`：新增可返回错误的保类型复制入口。无法按合同复制的值返回错误，调用方决定如何处理；既有 `DeepCopy` 签名保持不变。
+
+### Compatibility
+
+- 最低 Go 版本仍为 `1.26.10`。本版本为兼容性新增，采用 v0.x patch；不要求消费者同步升级，固定旧版本的应用继续使用原版本。
+
 ## [0.3.6] - 2026-11-01
 
 ### Added

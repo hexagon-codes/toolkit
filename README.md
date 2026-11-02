@@ -22,13 +22,13 @@
 
 ## 快速开始
 
-v0.3.6 要求 Go 1.26.10 或更高版本。
+本地交付目标 v0.3.7 要求 Go 1.26.10 或更高版本。
 
 ```bash
-go get github.com/hexagon-codes/toolkit@v0.3.6
+go get github.com/hexagon-codes/toolkit@v0.3.7
 ```
 
-上述安装命令需在 `v0.3.6` 标签发布后使用。
+上述命令是目标版本的配套安装命令，须在 `v0.3.7` tag 发布且公共代理解析核验完成后使用。本次本地交付没有创建或推送 tag；独立 module proxy 候选验证不等于公共版本已发布。
 
 ### 类型转换
 
@@ -1359,7 +1359,7 @@ filesystem、network、process-containment 和 output 隔离，不声称提供 M
 
 ## 近期更新
 
-> 以下接口位于当前工作区，计划随 `v0.3.6` 提供；实际可用性以最终发布的源码为准：
+> 以下接口位于当前工作区，交付目标为 `v0.3.7`；实际可用性以最终发布的源码为准：
 > - `blobstore.Store.SaveStreamAllowEmpty` 允许保存实际存在的零字节文件；`SaveStream` 仍拒绝空内容。该方法不属于 `Blobstore` 接口。
 > - `httpx.NewReplayGuardTransport` 包装标准 HTTP/1.1 和 TLS HTTP/2 传输以阻止内部重放；重定向和应用层重试仍由调用方控制，自定义 HTTP/2 和明文 HTTP/2 不受支持。
 > - `hostprocess.Run` 管理宿主进程生命周期，不提供沙箱隔离。调用方提供并管理标准流文件；取消时终止本次进程组或 Job。
