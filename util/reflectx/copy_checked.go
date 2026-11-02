@@ -2,6 +2,7 @@ package reflectx
 
 import (
 	"fmt"
+	"math/big"
 	"reflect"
 	"time"
 )
@@ -9,6 +10,7 @@ import (
 // DeepCopyChecked 保类型复制数据，并拒绝无法隔离的非空函数、通道、裸指针及私有引用字段。
 // 不支持的值返回错误和 T 的零值；源数据保持不变。循环引用沿用 DeepCopy 的处理。
 // time.Time 按其不可变时区的值语义复制；其他私有字段包含引用的对象应通过所属类型的复制契约处理。
+// 可访问的 big.Int 使用自身的 Set 复制合同，私有字段内不可访问的可变值仍不放行。
 func DeepCopyChecked[T any](src T) (T, error) {
 	if err := validateCopy(reflect.ValueOf(src), "$", make(map[copyIdentity]bool)); err != nil {
 		var zero T
@@ -35,6 +37,9 @@ func validateCopy(v reflect.Value, path string, seen map[copyIdentity]bool) erro
 	}
 	// time.Time 的时区由 time 包按不可变值使用，复制时间值不需要隔离内部缓存。
 	if v.Type() == reflect.TypeFor[time.Time]() {
+		return nil
+	}
+	if v.Type() == reflect.TypeFor[big.Int]() && v.CanInterface() {
 		return nil
 	}
 	switch v.Kind() {

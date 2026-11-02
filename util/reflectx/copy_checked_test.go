@@ -1,6 +1,41 @@
 package reflectx
 
-import "testing"
+import (
+	"math/big"
+	"testing"
+)
+
+func TestDeepCopyBigIntIsolation(t *testing.T) {
+	original, ok := new(big.Int).SetString("123456789012345678901234567890", 10)
+	if !ok {
+		t.Fatal("invalid fixture")
+	}
+	want := original.String()
+	input := map[string]any{"number": original, "alias": original}
+	for name, clone := range map[string]func(map[string]any) (map[string]any, error){
+		"checked":  DeepCopyChecked[map[string]any],
+		"ordinary": func(value map[string]any) (map[string]any, error) { return DeepCopy(value), nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			copied, err := clone(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			number := copied["number"].(*big.Int)
+			if number == original || number != copied["alias"].(*big.Int) || number.String() != want {
+				t.Fatal("integer value or alias identity was not preserved")
+			}
+			number.SetInt64(7)
+			if original.String() != want {
+				t.Fatal("copied integer changed original digits")
+			}
+		})
+	}
+	private := struct{ hidden big.Int }{hidden: *original}
+	if _, err := DeepCopyChecked(private); err == nil {
+		t.Fatal("private mutable integer must not be accepted as an immutable value")
+	}
+}
 
 type checkedPointerNode struct {
 	Value int

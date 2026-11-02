@@ -1,6 +1,7 @@
 package reflectx
 
 import (
+	"math/big"
 	"reflect"
 )
 
@@ -15,6 +16,7 @@ import (
 // 注意: 支持基本类型、结构体、切片、map、指针，并自动保留循环引用关系。
 // 未导出字段按值保留，其内部引用不会通过 unsafe 强行递归复制；chan、func 等
 // 无法安全复制的引用类型保持原值。
+// 可访问的 big.Int 使用 Set 复制底层数位，不与源值共享可变存储。
 //
 // 示例:
 //
@@ -110,6 +112,12 @@ func deepCopyInterface(src reflect.Value, visited map[copyIdentity]reflect.Value
 
 // deepCopyStruct 深拷贝结构体
 func deepCopyStruct(src reflect.Value, visited map[copyIdentity]reflect.Value) reflect.Value {
+	if src.Type() == reflect.TypeFor[big.Int]() && src.CanInterface() {
+		original := src.Interface().(big.Int)
+		var copied big.Int
+		copied.Set(&original)
+		return reflect.ValueOf(copied)
+	}
 	dst := reflect.New(src.Type()).Elem()
 	// 先保留完整值，再递归替换可安全访问的导出字段。
 	dst.Set(src)
