@@ -13,7 +13,19 @@ func DeepCopyChecked[T any](src T) (T, error) {
 		var zero T
 		return zero, err
 	}
-	return DeepCopy(src), nil
+	value := reflect.ValueOf(&src).Elem()
+	if value.Kind() == reflect.Interface && value.IsNil() {
+		var zero T
+		return zero, nil
+	}
+	result := deepCopyValue(value, make(map[copyIdentity]reflect.Value))
+	if result.IsValid() {
+		if copied, ok := result.Interface().(T); ok {
+			return copied, nil
+		}
+	}
+	var zero T
+	return zero, fmt.Errorf("cannot preserve copied value type %s", value.Type())
 }
 
 func validateCopy(v reflect.Value, path string, seen map[copyIdentity]bool) error {

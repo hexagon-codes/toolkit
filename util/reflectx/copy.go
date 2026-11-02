@@ -89,6 +89,10 @@ func deepCopyPtr(src reflect.Value, visited map[copyIdentity]reflect.Value) refl
 
 	// 先创建目标指针并记录，防止循环引用时无限递归
 	dst := reflect.New(src.Type().Elem())
+	// reflect.New 产生未命名指针；定义过的指针类型仍须保留原类型。
+	if dst.Type() != src.Type() {
+		dst = dst.Convert(src.Type())
+	}
 	visited[identity] = dst
 
 	// 递归拷贝指针指向的值
