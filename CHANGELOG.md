@@ -16,6 +16,8 @@
 
 ### Fixed
 
+- `reflectx.DeepCopyChecked` 按 `time.Time` 的值语义保留时区，带时区的合法时间不再被误判为无法隔离的私有引用；其他可变私有引用仍显式返回错误。
+
 - `reflectx`：保留 defined pointer 的实际类型及循环引用；checked 复制不能在类型不匹配时返回成功的零值。
 
 ## [0.3.6] - 2026-11-01

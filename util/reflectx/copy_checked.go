@@ -3,11 +3,12 @@ package reflectx
 import (
 	"fmt"
 	"reflect"
+	"time"
 )
 
 // DeepCopyChecked 保类型复制数据，并拒绝无法隔离的非空函数、通道、裸指针及私有引用字段。
 // 不支持的值返回错误和 T 的零值；源数据保持不变。循环引用沿用 DeepCopy 的处理。
-// 私有字段包含引用的自定义对象应通过所属类型的复制契约处理。
+// time.Time 按其不可变时区的值语义复制；其他私有字段包含引用的对象应通过所属类型的复制契约处理。
 func DeepCopyChecked[T any](src T) (T, error) {
 	if err := validateCopy(reflect.ValueOf(src), "$", make(map[copyIdentity]bool)); err != nil {
 		var zero T
@@ -30,6 +31,10 @@ func DeepCopyChecked[T any](src T) (T, error) {
 
 func validateCopy(v reflect.Value, path string, seen map[copyIdentity]bool) error {
 	if !v.IsValid() {
+		return nil
+	}
+	// time.Time 的时区由 time 包按不可变值使用，复制时间值不需要隔离内部缓存。
+	if v.Type() == reflect.TypeFor[time.Time]() {
 		return nil
 	}
 	switch v.Kind() {
@@ -94,6 +99,9 @@ func validateCopy(v reflect.Value, path string, seen map[copyIdentity]bool) erro
 }
 
 func copyHasReference(v reflect.Value) bool {
+	if v.Type() == reflect.TypeFor[time.Time]() {
+		return false
+	}
 	switch v.Kind() {
 	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Chan, reflect.Func, reflect.UnsafePointer:
 		return !v.IsZero()
