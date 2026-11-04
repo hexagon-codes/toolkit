@@ -2,7 +2,11 @@ package reflectx
 
 import (
 	"math/big"
+	"reflect"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestDeepCopyBigIntIsolation(t *testing.T) {
@@ -93,6 +97,121 @@ func TestDeepCopyCheckedPreservesTypesAndCycles(t *testing.T) {
 	got["self"].(map[string]any)["cycle"] = true
 	if got["cycle"] != true || input["cycle"] != nil {
 		t.Fatal("cycle was not copied into the new object graph")
+	}
+}
+
+type noopLocker struct{}
+
+func (noopLocker) Lock()   {}
+func (noopLocker) Unlock() {}
+
+func TestDeepCopyCheckedRejectsNonZeroSynchronizationState(t *testing.T) {
+	type locked struct {
+		mu    sync.Mutex
+		Value int
+	}
+	src := locked{Value: 7}
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	if _, err := DeepCopyChecked(&src); err == nil {
+		t.Fatal("copied a locked sync.Mutex without an error")
+	}
+
+	var counter atomic.Int64
+	counter.Store(1)
+	if _, err := DeepCopyChecked(&counter); err == nil {
+		t.Fatal("copied non-zero sync/atomic state without an error")
+	}
+
+	var mutex sync.Mutex
+	mutex.Lock()
+	defer mutex.Unlock()
+	type withLocker struct{ Locker sync.Locker }
+	if _, err := DeepCopyChecked(withLocker{Locker: &mutex}); err == nil {
+		t.Fatal("sync.Locker backed by a locked mutex should be rejected")
+	}
+	value := reflect.ValueOf(&mutex).Elem().Interface()
+	if _, err := DeepCopyChecked(value); err == nil {
+		t.Fatal("copied top-level locked sync.Mutex value without an error")
+	}
+}
+
+func TestDeepCopyCheckedAllowsZeroSynchronizationState(t *testing.T) {
+	var zero sync.Mutex
+	if _, err := DeepCopyChecked(&zero); err != nil {
+		t.Fatalf("zero sync.Mutex should be copyable: %v", err)
+	}
+	value := reflect.ValueOf(&zero).Elem().Interface()
+	if _, err := DeepCopyChecked(value); err != nil {
+		t.Fatalf("top-level zero sync.Mutex value should be copyable: %v", err)
+	}
+
+	var zeroAtomic atomic.Int64
+	if _, err := DeepCopyChecked(&zeroAtomic); err != nil {
+		t.Fatalf("zero sync/atomic state should be copyable: %v", err)
+	}
+
+	type withLocker struct{ Locker sync.Locker }
+	if _, err := DeepCopyChecked(withLocker{}); err != nil {
+		t.Fatalf("nil sync.Locker should be copyable: %v", err)
+	}
+	if _, err := DeepCopyChecked(withLocker{Locker: noopLocker{}}); err != nil {
+		t.Fatalf("custom safe sync.Locker should be copyable: %v", err)
+	}
+}
+
+func TestDeepCopyCheckedRejectsNamedSynchronizationState(t *testing.T) {
+	type namedAtomic atomic.Int64
+	var counter namedAtomic
+	(*atomic.Int64)(&counter).Store(1)
+	if _, err := DeepCopyChecked(&counter); err == nil {
+		t.Fatal("copied non-zero named atomic state without an error")
+	}
+
+	type namedMutex sync.Mutex
+	var mutex namedMutex
+	(*sync.Mutex)(&mutex).Lock()
+	defer (*sync.Mutex)(&mutex).Unlock()
+	if _, err := DeepCopyChecked(&mutex); err == nil {
+		t.Fatal("copied locked named mutex without an error")
+	}
+}
+
+func TestDeepCopyCheckedAllowsZeroNamedSynchronizationState(t *testing.T) {
+	type namedAtomic atomic.Int64
+	var counter namedAtomic
+	if _, err := DeepCopyChecked(&counter); err != nil {
+		t.Fatalf("zero named atomic should be copyable: %v", err)
+	}
+
+	type namedMutex sync.Mutex
+	var mutex namedMutex
+	if _, err := DeepCopyChecked(&mutex); err != nil {
+		t.Fatalf("zero named mutex should be copyable: %v", err)
+	}
+}
+
+func TestDeepCopyCheckedPreservesTimeZoneValue(t *testing.T) {
+	when := time.Date(2026, time.August, 11, 12, 34, 56, 789, time.FixedZone("audit", 8*60*60))
+	type record struct {
+		When   time.Time
+		hidden time.Time
+	}
+	input := record{When: when, hidden: when}
+	got, err := DeepCopyChecked(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.When.Equal(when) || got.When.Location().String() != "audit" {
+		t.Fatalf("exported time = %v (%s), want %v (audit)", got.When, got.When.Location(), when)
+	}
+	if !got.hidden.Equal(when) || got.hidden.Location().String() != "audit" {
+		t.Fatalf("private time = %v (%s), want %v (audit)", got.hidden, got.hidden.Location(), when)
+	}
+
+	top, err := DeepCopyChecked(when)
+	if err != nil || !top.Equal(when) || top.Location().String() != "audit" {
+		t.Fatalf("top-level time = %v (%s), error = %v", top, top.Location(), err)
 	}
 }
 

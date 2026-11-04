@@ -113,7 +113,7 @@ func deepCopyInterface(src reflect.Value, visited map[copyIdentity]reflect.Value
 // deepCopyStruct 深拷贝结构体
 func deepCopyStruct(src reflect.Value, visited map[copyIdentity]reflect.Value) reflect.Value {
 	if src.Type() == reflect.TypeFor[big.Int]() && src.CanInterface() {
-		original := src.Interface().(big.Int)
+		original := src.Interface().(big.Int) //nolint:errcheck // src.Type() 已精确判断为 big.Int。
 		var copied big.Int
 		copied.Set(&original)
 		return reflect.ValueOf(copied)
