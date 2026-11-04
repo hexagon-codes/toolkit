@@ -531,57 +531,72 @@ func (e *JaegerExporter) ExportSpans(ctx context.Context, spans []*SpanData) (er
 	return nil
 }
 
-// toJaegerPayload 转换为 Jaeger 格式
+// toJaegerPayload 转换为 Jaeger 格式。
+// 一个批次可能包含多个 trace，必须按 TraceID 分组后再构造 data 条目；
+// 否则所有 span 都会被错误归属到第一个 trace。
 func (e *JaegerExporter) toJaegerPayload(spans []*SpanData) map[string]any {
-	jaegerSpans := make([]map[string]any, len(spans))
-
-	for i, span := range spans {
-		tags := make([]map[string]any, 0)
-		for k, v := range span.Attributes {
-			tags = append(tags, map[string]any{
-				"key":   k,
-				"type":  e.getJaegerType(v),
-				"value": v,
-			})
+	traceOrder := make([]string, 0)
+	byTrace := make(map[string][]*SpanData)
+	for _, span := range spans {
+		if span == nil {
+			continue
 		}
+		if _, exists := byTrace[span.TraceID]; !exists {
+			traceOrder = append(traceOrder, span.TraceID)
+		}
+		byTrace[span.TraceID] = append(byTrace[span.TraceID], span)
+	}
 
-		logs := make([]map[string]any, len(span.Events))
-		for j, event := range span.Events {
-			fields := make([]map[string]any, 0)
-			for k, v := range event.Attributes {
-				fields = append(fields, map[string]any{
+	data := make([]map[string]any, 0, len(traceOrder))
+	for _, traceID := range traceOrder {
+		traceSpans := byTrace[traceID]
+		jaegerSpans := make([]map[string]any, len(traceSpans))
+		for i, span := range traceSpans {
+			tags := make([]map[string]any, 0)
+			for k, v := range span.Attributes {
+				tags = append(tags, map[string]any{
 					"key":   k,
 					"type":  e.getJaegerType(v),
 					"value": v,
 				})
 			}
-			logs[j] = map[string]any{
-				"timestamp": event.Timestamp.UnixMicro(),
-				"fields":    fields,
+
+			logs := make([]map[string]any, len(span.Events))
+			for j, event := range span.Events {
+				fields := make([]map[string]any, 0)
+				for k, v := range event.Attributes {
+					fields = append(fields, map[string]any{
+						"key":   k,
+						"type":  e.getJaegerType(v),
+						"value": v,
+					})
+				}
+				logs[j] = map[string]any{
+					"timestamp": event.Timestamp.UnixMicro(),
+					"fields":    fields,
+				}
+			}
+
+			jaegerSpans[i] = map[string]any{
+				"traceID":       span.TraceID,
+				"spanID":        span.SpanID,
+				"parentSpanID":  span.ParentSpanID,
+				"operationName": span.Name,
+				"startTime":     span.StartTime.UnixMicro(),
+				"duration":      span.EndTime.Sub(span.StartTime).Microseconds(),
+				"tags":          tags,
+				"logs":          logs,
 			}
 		}
 
-		jaegerSpans[i] = map[string]any{
-			"traceID":       span.TraceID,
-			"spanID":        span.SpanID,
-			"parentSpanID":  span.ParentSpanID,
-			"operationName": span.Name,
-			"startTime":     span.StartTime.UnixMicro(),
-			"duration":      span.EndTime.Sub(span.StartTime).Microseconds(),
-			"tags":          tags,
-			"logs":          logs,
-		}
+		data = append(data, map[string]any{
+			"traceID":   traceID,
+			"spans":     jaegerSpans,
+			"processes": map[string]any{},
+		})
 	}
 
-	return map[string]any{
-		"data": []map[string]any{
-			{
-				"traceID":   spans[0].TraceID,
-				"spans":     jaegerSpans,
-				"processes": map[string]any{},
-			},
-		},
-	}
+	return map[string]any{"data": data}
 }
 
 // getJaegerType 获取 Jaeger 类型
