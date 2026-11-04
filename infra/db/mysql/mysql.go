@@ -229,10 +229,16 @@ func (db *DB) Close() error {
 }
 
 // maskDSN 隐藏 DSN 中的敏感信息
-// 解析 DSN 中 @ 前的 user:password 部分，仅遮蔽 password
+// 解析 DSN 中最后一个 @ 前的 user:password 部分，仅遮蔽 password。
+// go-sql-driver/mysql 也按最后一个 / 和最后一个 @ 解析 DSN；密码允许包含 @，
+// 因此不能用第一个 @ 判断凭据边界。
 func maskDSN(dsn string) string {
-	// MySQL DSN 格式: user:password@tcp(host:port)/dbname?params
-	atIdx := strings.Index(dsn, "@")
+	slashIdx := strings.LastIndex(dsn, "/")
+	if slashIdx < 0 {
+		// 无法区分凭据与数据库部分，安全起见全部遮蔽。
+		return "***"
+	}
+	atIdx := strings.LastIndex(dsn[:slashIdx], "@")
 	if atIdx < 0 {
 		// 没有 @ 符号，无法解析，安全起见全部遮蔽
 		return "***"

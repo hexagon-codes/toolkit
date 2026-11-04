@@ -168,6 +168,11 @@ func TestMaskDSN(t *testing.T) {
 			dsn:      "user:@tcp(localhost:3306)/db",
 			expected: "user:***@tcp(localhost:3306)/db",
 		},
+		{
+			name:     "密码包含 @",
+			dsn:      "user:p@ss@tcp(localhost:3306)/db",
+			expected: "user:***@tcp(localhost:3306)/db",
+		},
 	}
 
 	for _, tt := range tests {
