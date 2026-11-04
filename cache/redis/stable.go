@@ -54,6 +54,7 @@ func (c *StableCache) GetOrLoad(
 	fullKey := joinPrefix(c.opts.Prefix, key)
 	generation := c.generation.Load()
 	forceReload := false
+	redisFallback := false
 
 	readCtx, cancel := withTimeout(ctx, c.opts.ReadTimeout)
 	data, err := c.client.Get(readCtx, fullKey).Bytes()
@@ -79,14 +80,16 @@ func (c *StableCache) GetOrLoad(
 			return contextErr
 		}
 		c.onError(ctx, "stable_get", fullKey, err)
-		return c.loadAndFill(ctx, loader, dest)
+		// Redis 错误仍降级到 loader，但必须与未命中路径共享 singleflight，
+		// 否则 Redis 故障时每个请求都会直接击打数据源。
+		redisFallback = true
 	}
 
 	resultChannel := c.sf.DoChan(fullKey, func() (any, error) {
 		sharedCtx, sharedCancel := context.WithTimeout(context.WithoutCancel(ctx), defaultLoaderTimeout)
 		defer sharedCancel()
 
-		if !forceReload {
+		if !forceReload && !redisFallback {
 			checkCtx, checkCancel := withTimeout(sharedCtx, c.opts.ReadTimeout)
 			secondData, secondErr := c.client.Get(checkCtx, fullKey).Bytes()
 			checkCancel()
@@ -100,7 +103,7 @@ func (c *StableCache) GetOrLoad(
 
 		value, loadErr := loader(sharedCtx)
 		if loadErr != nil {
-			if c.isNotFound(loadErr) {
+			if !redisFallback && c.isNotFound(loadErr) {
 				if writeErr := c.setIfCurrent(sharedCtx, fullKey, packNotFound(), c.opts.NegativeTTL, generation); writeErr != nil {
 					c.onError(sharedCtx, "stable_set_negative", fullKey, writeErr)
 				}
@@ -116,9 +119,11 @@ func (c *StableCache) GetOrLoad(
 			return nil, marshalErr
 		}
 		packed := packFound(raw)
-		if writeErr := c.setIfCurrent(sharedCtx, fullKey, packed, jitterTTL(ttl, c.opts.Jitter), generation); writeErr != nil {
-			// 缓存写失败不应覆盖已经成功的数据源读取。
-			c.onError(sharedCtx, "stable_set", fullKey, writeErr)
+		if !redisFallback {
+			if writeErr := c.setIfCurrent(sharedCtx, fullKey, packed, jitterTTL(ttl, c.opts.Jitter), generation); writeErr != nil {
+				// 缓存写失败不应覆盖已经成功的数据源读取。
+				c.onError(sharedCtx, "stable_set", fullKey, writeErr)
+			}
 		}
 		return packed, nil
 	})
@@ -229,10 +234,6 @@ func (c *StableCache) validateCall(ctx context.Context) error {
 		return ErrInvalidContext
 	}
 	return ctx.Err()
-}
-
-func (c *StableCache) loadAndFill(ctx context.Context, loader func(ctx context.Context) (any, error), dest any) error {
-	return loadAndFillCommon(ctx, c.opts.Codec, loader, dest)
 }
 
 func (c *StableCache) isNotFound(err error) bool {

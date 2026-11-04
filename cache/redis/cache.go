@@ -305,26 +305,6 @@ func JitterTTL(ttl time.Duration, jitter float64) time.Duration {
 	return jitterTTL(ttl, jitter)
 }
 
-// loadAndFillCommon 降级加载并填充 dest 的公共逻辑（StableCache 和 UnstableCache 共用）
-// 修复：检查 Marshal 错误，不再静默忽略
-func loadAndFillCommon(ctx context.Context, codec Codec, loader func(ctx context.Context) (any, error), dest any) error {
-	val, err := loader(ctx)
-	if err != nil {
-		return err
-	}
-	if isNilInterface(val) {
-		return ErrInvalidValue
-	}
-	if dest != nil {
-		raw, merr := codec.Marshal(val)
-		if merr != nil {
-			return merr
-		}
-		return codec.Unmarshal(raw, dest)
-	}
-	return nil
-}
-
 // isNotFoundCommon 判断错误是否为"未找到"的公共逻辑（StableCache 和 UnstableCache 共用）
 func isNotFoundCommon(err error, isNotFound func(error) bool) bool {
 	if err == nil {
