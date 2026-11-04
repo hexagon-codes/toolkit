@@ -422,3 +422,147 @@ func TestReplayGuardQueuedRequestSurvivesRouteCleanup(t *testing.T) {
 		t.Fatal("completed routes were retained")
 	}
 }
+
+func TestReplayGuardRejectsCustomHTTP2Handler(t *testing.T) {
+	base := &http.Transport{TLSNextProto: map[string]func(string, *tls.Conn) http.RoundTripper{
+		"h2": func(string, *tls.Conn) http.RoundTripper { return http.DefaultTransport },
+	}}
+	if _, err := NewReplayGuardTransport(base); !errors.Is(err, ErrInvalidRawClientConfig) {
+		t.Fatalf("NewReplayGuardTransport() error = %v, want ErrInvalidRawClientConfig", err)
+	}
+}
+
+func TestReplayGuardHandlesHTTP2ConfigureTransport(t *testing.T) {
+	base := &http.Transport{}
+	if err := http2.ConfigureTransport(base); err != nil { //nolint:staticcheck // 需要验证 deprecated 配置在该路径下的行为。
+		t.Fatalf("http2.ConfigureTransport() error = %v", err)
+	}
+	if len(base.TLSNextProto) == 0 {
+		// Go 1.27 的 x/net wrapper 通过 Protocols 配置 HTTP/2，不再安装
+		// TLSNextProto handler；这种标准 TLS HTTP/2 配置应由 guard 接受。
+		if _, err := NewReplayGuardTransport(base); err != nil {
+			t.Fatalf("NewReplayGuardTransport() error = %v, want nil", err)
+		}
+		return
+	}
+	if _, err := NewReplayGuardTransport(base); !errors.Is(err, ErrInvalidRawClientConfig) {
+		t.Fatalf("NewReplayGuardTransport() error = %v, want ErrInvalidRawClientConfig", err)
+	}
+}
+
+func TestReplayGuardAllowsEmptyTLSNextProto(t *testing.T) {
+	base := &http.Transport{TLSNextProto: map[string]func(string, *tls.Conn) http.RoundTripper{}}
+	if _, err := NewReplayGuardTransport(base); err != nil {
+		t.Fatalf("NewReplayGuardTransport() with empty TLSNextProto error = %v", err)
+	}
+}
+
+func TestReplayGuardAllowsStandardTLSNextProtoSubset(t *testing.T) {
+	standard := standardLibraryNextProtoHandlers()
+	h2, ok := standard["h2"]
+	if !ok {
+		t.Skip("bundled h2 handler is not installed in this environment")
+	}
+	base := &http.Transport{TLSNextProto: map[string]func(string, *tls.Conn) http.RoundTripper{"h2": h2}}
+	if _, err := NewReplayGuardTransport(base); err != nil {
+		t.Fatalf("NewReplayGuardTransport() with standard h2-only subset error = %v", err)
+	}
+
+	cloned := &http.Transport{}
+	_ = cloned.Clone()
+	if _, ok := cloned.TLSNextProto["unencrypted_http2"]; !ok {
+		t.Skip("bundled unencrypted_http2 handler is not installed in this environment")
+	}
+	delete(cloned.TLSNextProto, "unencrypted_http2")
+	if _, err := NewReplayGuardTransport(cloned); err != nil {
+		t.Fatalf("NewReplayGuardTransport() after removing unencrypted_http2 error = %v", err)
+	}
+}
+
+func TestReplayGuardDoesNotMutateBaseTransport(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if _, err := io.WriteString(w, "ok"); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer server.Close()
+
+	used := &http.Transport{}
+	usedClient := &http.Client{Transport: used, Timeout: 3 * time.Second}
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, server.URL, http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := usedClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(io.Discard, response.Body); err != nil {
+		t.Fatal(err)
+	}
+	if err := response.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	usedClient.CloseIdleConnections()
+
+	preCloned := &http.Transport{}
+	_ = preCloned.Clone()
+
+	empty := &http.Transport{TLSNextProto: map[string]func(string, *tls.Conn) http.RoundTripper{}}
+
+	tests := []struct {
+		name string
+		base *http.Transport
+	}{
+		{name: "fresh", base: &http.Transport{}},
+		{name: "pre-cloned", base: preCloned},
+		{name: "used", base: used},
+		{name: "empty", base: empty},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			beforeNil := test.base.TLSNextProto == nil
+			beforeLen := len(test.base.TLSNextProto)
+			beforeKeys := make([]string, 0, beforeLen)
+			for key := range test.base.TLSNextProto {
+				beforeKeys = append(beforeKeys, key)
+			}
+
+			for attempt := 1; attempt <= 2; attempt++ {
+				transport, err := NewReplayGuardTransport(test.base)
+				if err != nil {
+					t.Fatalf("construction %d error = %v", attempt, err)
+				}
+				if gotNil := test.base.TLSNextProto == nil; gotNil != beforeNil {
+					t.Fatalf("construction %d: base TLSNextProto nil = %v, want %v", attempt, gotNil, beforeNil)
+				}
+				if got := len(test.base.TLSNextProto); got != beforeLen {
+					t.Fatalf("construction %d: base TLSNextProto len = %d, want %d", attempt, got, beforeLen)
+				}
+				for _, key := range beforeKeys {
+					if _, ok := test.base.TLSNextProto[key]; !ok {
+						t.Fatalf("construction %d removed %q from base TLSNextProto", attempt, key)
+					}
+				}
+
+				client := &http.Client{Transport: transport, Timeout: 3 * time.Second}
+				request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, server.URL, http.NoBody)
+				if err != nil {
+					client.CloseIdleConnections()
+					t.Fatalf("construction %d request build error = %v", attempt, err)
+				}
+				response, err := client.Do(request)
+				if err != nil {
+					client.CloseIdleConnections()
+					t.Fatalf("construction %d request error = %v", attempt, err)
+				}
+				body, readErr := io.ReadAll(response.Body)
+				closeErr := response.Body.Close()
+				client.CloseIdleConnections()
+				if readErr != nil || closeErr != nil || string(body) != "ok" {
+					t.Fatalf("construction %d body=%q read=%v close=%v", attempt, body, readErr, closeErr)
+				}
+			}
+		})
+	}
+}

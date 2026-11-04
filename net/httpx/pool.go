@@ -64,7 +64,8 @@ type PoolConfig struct {
 	// TLSConfig TLS 配置
 	TLSConfig *tls.Config
 
-	// Proxy 代理设置
+	// Proxy 代理设置；nil 表示使用 http.ProxyFromEnvironment（遵循 HTTP(S)_PROXY/NO_PROXY）。
+	// 如需完全禁用代理，请显式传入返回 nil 的函数。
 	Proxy func(*http.Request) (*neturl.URL, error)
 
 	// DialContext 自定义拨号函数
@@ -131,6 +132,11 @@ func NewPool(config PoolConfig) (*Pool, error) {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidPoolConfig, err)
 	}
 	cfg := clonePoolConfig(config)
+	// 与 NewClient/NewRawClient 保持一致：默认遵循 HTTP(S)_PROXY/NO_PROXY。
+	// 需要完全禁用代理时，调用方可显式传入返回 nil 的 Proxy 函数。
+	if cfg.Proxy == nil {
+		cfg.Proxy = http.ProxyFromEnvironment
+	}
 
 	dialer := &net.Dialer{
 		Timeout:   cfg.ConnectTimeout,

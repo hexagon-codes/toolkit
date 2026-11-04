@@ -570,7 +570,7 @@ func (r *Request) execute() (*Response, error) {
 		}
 
 		resp, err = r.doRequest(fullURL)
-		if err == nil && resp.StatusCode < 500 {
+		if err == nil && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
 			break
 		}
 		lastAttemptErr = err

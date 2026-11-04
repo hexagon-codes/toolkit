@@ -1,12 +1,14 @@
 package httpx
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"reflect"
 	"sync"
 	"time"
 )
@@ -44,15 +46,118 @@ type replayGuardTransport struct {
 	routes    map[string]*replayGuardRoute
 }
 
+// standardLibraryTLSNextProto 返回标准库在默认 HTTP/2 配置下自动安装的
+// TLSNextProto handler。不同 Go 版本安装的 key 集合可能不同，因此运行时
+// 用一个未使用的 Transport 取得基准，而不是在代码中硬编码 handler 数量。
+var (
+	standardLibraryTLSNextProtoOnce sync.Once
+	standardLibraryTLSNextProto     map[string]func(string, *tls.Conn) http.RoundTripper
+)
+
+func standardLibraryNextProtoHandlers() map[string]func(string, *tls.Conn) http.RoundTripper {
+	standardLibraryTLSNextProtoOnce.Do(func() {
+		probe := &http.Transport{}
+		// Clone 会触发标准库的 onceSetNextProtoDefaults，但不会发起网络请求。
+		_ = probe.Clone()
+		if len(probe.TLSNextProto) == 0 {
+			return
+		}
+		standardLibraryTLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper, len(probe.TLSNextProto))
+		for key, handler := range probe.TLSNextProto {
+			standardLibraryTLSNextProto[key] = handler
+		}
+	})
+	return standardLibraryTLSNextProto
+}
+
+// hasCustomTLSNextProto 只把真正的自定义处理器视为不支持。标准库会在
+// Clone/RoundTrip 时自动写入 bundled h2（某些版本还包含 unencrypted_http2），
+// 不能仅凭 TLSNextProto 非空就拒绝；否则使用过或预克隆过的 Transport 都会被误拒。
+// 标准 handler 的子集（例如显式删除 unencrypted_http2 以关闭 h2c）同样合法，
+// 只要每个 key 和函数指针都来自标准库即可。
+func hasCustomTLSNextProto(handlers map[string]func(string, *tls.Conn) http.RoundTripper) bool {
+	if len(handlers) == 0 {
+		return false
+	}
+	standard := standardLibraryNextProtoHandlers()
+	if len(standard) == 0 {
+		return true
+	}
+	for key, handler := range handlers {
+		standardHandler, ok := standard[key]
+		if !ok || funcPointer(handler) != funcPointer(standardHandler) {
+			return true
+		}
+	}
+	return false
+}
+
+func funcPointer(handler func(string, *tls.Conn) http.RoundTripper) uintptr {
+	if handler == nil {
+		return 0
+	}
+	return reflect.ValueOf(handler).Pointer()
+}
+
+// cloneTransportConfig 复制 base 的导出配置，但不触发 base 的 nextProtoOnce，
+// 也不修改 base。直接调用 base.Clone() 会初始化 base 的 HTTP/2 状态并写入
+// TLSNextProto，导致构造器对同一 base 非幂等，也不满足“不修改调用方配置”的合同。
+func cloneTransportConfig(base *http.Transport) *http.Transport {
+	clone := new(http.Transport)
+	source := reflect.ValueOf(base).Elem()
+	target := reflect.ValueOf(clone).Elem()
+	for index := 0; index < source.NumField(); index++ {
+		field := source.Type().Field(index)
+		if !field.IsExported() {
+			continue
+		}
+		target.Field(index).Set(source.Field(index))
+	}
+
+	if base.TLSClientConfig != nil {
+		clone.TLSClientConfig = base.TLSClientConfig.Clone()
+	}
+	if base.HTTP2 != nil {
+		clone.HTTP2 = new(http.HTTP2Config)
+		*clone.HTTP2 = *base.HTTP2
+	}
+	if base.Protocols != nil {
+		clone.Protocols = new(http.Protocols)
+		*clone.Protocols = *base.Protocols
+	}
+	if base.ProxyConnectHeader != nil {
+		clone.ProxyConnectHeader = base.ProxyConnectHeader.Clone()
+	}
+	if base.TLSNextProto != nil {
+		clone.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper, len(base.TLSNextProto))
+		for key, handler := range base.TLSNextProto {
+			clone.TLSNextProto[key] = handler
+		}
+	}
+	return clone
+}
+
 // NewReplayGuardTransport 使用单次连接发送阻止 HTTP/1.1 和 TLS HTTP/2 内部重放。
-// 它克隆 base 的拨号、代理、TLS 等配置，并独立管理连接复用、空闲期限及连接数量。
-// 重定向与应用重试仍由调用方控制；不支持自定义 HTTP/2 处理器和明文 HTTP/2。
+// 它克隆 base 的拨号、代理、TLS 等配置，并独立管理连接复用、空闲期限及连接数量；
+// 构造过程不会修改调用方的 base Transport。
+// 重定向与应用重试仍由调用方控制；自定义 HTTP/2 处理器和明文 HTTP/2 不受支持。
+// 标准库自动安装的 bundled HTTP/2 以及通过 ForceAttemptHTTP2/Protocols 配置的
+// 标准 TLS HTTP/2 可用；旧版 x/net http2.ConfigureTransport 若安装
+// TLSNextProto handler 会被拒绝，Go 1.27 的 wrapper 使用 Protocols，可正常使用。
 // 调用方通过 http.Client.CloseIdleConnections 关闭空闲连接。
 func NewReplayGuardTransport(base *http.Transport) (http.RoundTripper, error) {
 	if base == nil {
 		return nil, fmt.Errorf("%w: transport is required", ErrInvalidRawClientConfig)
 	}
-	transport := base.Clone()
+	if hasCustomTLSNextProto(base.TLSNextProto) {
+		return nil, fmt.Errorf("%w: replay observation does not support TLS next-protocol handlers; use ForceAttemptHTTP2 or Protocols", ErrInvalidRawClientConfig)
+	}
+	transport := cloneTransportConfig(base)
+	// 标准库自动安装的 unencrypted_http2 handler 会让 http:// 连接有机会
+	// 协商明文 HTTP/2；公开合同不支持它，从克隆副本中移除，保持调用方 base 不变。
+	if transport.TLSNextProto != nil {
+		delete(transport.TLSNextProto, "unencrypted_http2")
+	}
 	if transport.Protocols != nil && transport.Protocols.UnencryptedHTTP2() {
 		return nil, fmt.Errorf("%w: replay observation does not support unencrypted HTTP/2", ErrInvalidRawClientConfig)
 	}
