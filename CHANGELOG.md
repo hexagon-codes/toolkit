@@ -20,6 +20,20 @@
 
 - `reflectx.DeepCopyChecked` 按 `time.Time` 的值语义保留时区，带时区的合法时间不再被误判为无法隔离的私有引用；其他可变私有引用仍显式返回错误。
 
+- `reflectx.DeepCopyChecked` 显式拒绝非零的 `sync` / `sync/atomic` 状态类型（如已锁定 `Mutex`、`RWMutex`、已使用 `Once`/`WaitGroup`、非零 `atomic` 值）及基于这些类型的命名类型，避免复制已使用的同步状态；零值同步状态可复制为独立零值，`sync.Locker` 接口按动态值校验，nil 或自定义无同步状态实现可复制。
+
+- `net/httpx.NewReplayGuardTransport` 仅拒绝显式自定义 `TLSNextProto`；标准库自动安装的 bundled HTTP/2 及 `ForceAttemptHTTP2`/`Protocols` 配置可用。构造过程不再修改调用方 `base`，预克隆或已使用过的 Transport 可重复构造。
+
+- `util/poolx`：非正 `WorkerExpiry` 归一化为默认值，避免后台 cleaner 的 `NewTicker` panic；`PoolWithFunc.InvokeWithContext` 统一校验 nil/已取消 context；`Submit`/`SubmitBatch`/`TrySubmit` 拒绝 nil 任务；`Future.GetWithTimeout` 使用可停止计时器；`StealBatchSize` 实际生效并新增 `WithStealBatchSize`，无空闲 Worker 时任务进入本地队列，空闲 Worker 按批量窃取，提交方等待任务开始执行；`Map`/`ForEach` 对已取消 context 在入口返回 `ctx.Err()`。
+
+- `infra/db/mysql`：`maskDSN` 按驱动的最后一个 `@` 解析凭据，密码包含 `@` 时不再泄露片段。
+
+- `cache/redis`：Redis 读取错误降级到 loader 时仍使用 singleflight，避免 Redis 故障时每个请求直接击打数据源。
+
+- `net/httpx`：`Client` 将 `429` 纳入可重试状态；`Pool` 默认遵循 `HTTP(S)_PROXY`/`NO_PROXY` 环境代理。
+
+- `infra/otel`：Jaeger 导出按 `TraceID` 分组，多个 trace 的批次不再错误归属到第一个 trace。
+
 - `reflectx`：保留 defined pointer 的实际类型及循环引用；checked 复制不能在类型不匹配时返回成功的零值。
 
 ## [0.3.6] - 2026-11-01

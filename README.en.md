@@ -1022,7 +1022,7 @@ names := reflectx.FieldNames(user)                 // ["Name", "Age"]
 
 // Deep copy (supports cycle detection, nil-safe)
 copied := reflectx.DeepCopy(original)              // recursive deep copy; historical behavior for non-isolatable values
-checked, err := reflectx.DeepCopyChecked(original) // checked copy; returns an error for private mutable references
+checked, err := reflectx.DeepCopyChecked(original) // checked copy; returns an error for private mutable references or non-zero sync state
 shallow := reflectx.Clone(original)                // shallow copy
 
 // Type checks
@@ -1378,7 +1378,7 @@ proof is unavailable, the backend must reject before any payload side effect.
 
 > The following APIs are present in the current working tree, whose delivery target is `v0.3.7`. Their availability depends on the final published source:
 > - `blobstore.Store.SaveStreamAllowEmpty` permits an actual zero-byte file; `SaveStream` still rejects empty content. This method is not part of the `Blobstore` interface.
-> - `httpx.NewReplayGuardTransport` wraps standard HTTP/1.1 and TLS HTTP/2 transports to block internal replay. Redirects and application retries remain the caller's responsibility; custom HTTP/2 handlers and cleartext HTTP/2 are unsupported.
+> - `httpx.NewReplayGuardTransport` wraps standard HTTP/1.1 and TLS HTTP/2 transports to block internal replay. Redirects and application retries remain the caller's responsibility; custom HTTP/2 handlers and cleartext HTTP/2 are unsupported. The standard library's bundled HTTP/2 and `ForceAttemptHTTP2`/`Protocols` configurations are supported; older `http2.ConfigureTransport` versions that install `TLSNextProto` handlers are rejected.
 > - `hostprocess.Run` manages a host process lifecycle; it does not provide sandbox isolation. Callers provide and manage the standard stream files; cancellation terminates the process group or Job.
 
 - **infra/redisconn**: Added one Redis connection factory for Single, Cluster, and Sentinel with ACL username/password, separate Sentinel credentials, TLS, dynamic credentials, and startup probing; project policy intentionally rejects password-only configuration

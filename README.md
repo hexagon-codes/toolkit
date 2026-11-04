@@ -1022,7 +1022,7 @@ names := reflectx.FieldNames(user)                 // ["Name", "Age"]
 
 // 深拷贝（支持循环引用检测，nil 安全）
 copied := reflectx.DeepCopy(original)              // 递归深拷贝；不能隔离的值沿用历史行为
-checked, err := reflectx.DeepCopyChecked(original) // 可失败深拷贝；私有可变引用返回错误
+checked, err := reflectx.DeepCopyChecked(original) // 可失败深拷贝；私有可变引用或非零 sync 状态类型返回错误
 shallow := reflectx.Clone(original)                // 浅拷贝
 
 // 类型检查
@@ -1362,7 +1362,7 @@ filesystem、network、process-containment 和 output 隔离，不声称提供 M
 
 > 以下接口位于当前工作区，交付目标为 `v0.3.7`；实际可用性以最终发布的源码为准：
 > - `blobstore.Store.SaveStreamAllowEmpty` 允许保存实际存在的零字节文件；`SaveStream` 仍拒绝空内容。该方法不属于 `Blobstore` 接口。
-> - `httpx.NewReplayGuardTransport` 包装标准 HTTP/1.1 和 TLS HTTP/2 传输以阻止内部重放；重定向和应用层重试仍由调用方控制，自定义 HTTP/2 和明文 HTTP/2 不受支持。
+> - `httpx.NewReplayGuardTransport` 包装标准 HTTP/1.1 和 TLS HTTP/2 传输以阻止内部重放；重定向和应用层重试仍由调用方控制，自定义 HTTP/2 和明文 HTTP/2 不受支持；标准库自动安装的 bundled HTTP/2 及 `ForceAttemptHTTP2`/`Protocols` 配置可用，旧版 `http2.ConfigureTransport` 若安装 `TLSNextProto` handler 会被拒绝。
 > - `hostprocess.Run` 管理宿主进程生命周期，不提供沙箱隔离。调用方提供并管理标准流文件；取消时终止本次进程组或 Job。
 
 - **infra/redisconn**: 新增 Single / Cluster / Sentinel 统一 Redis 连接工厂，支持 ACL 账号密码、Sentinel 双凭据、TLS、动态凭据与启动探活；项目级策略主动拒绝 password-only
