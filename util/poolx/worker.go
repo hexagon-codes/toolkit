@@ -40,24 +40,36 @@ func WithTaskID(id uint64) TaskOption {
 // StealingScheduler manages work stealing between workers
 type StealingScheduler struct {
 	mu      sync.RWMutex
-	workers map[int32]*WorkStealingDeque[task]
+	workers map[int32]stealingWorker
 	ids     []int32 // Cached list of worker IDs for random selection
+}
+
+type stealingWorker struct {
+	queue *WorkStealingDeque[task]
+	lock  *sync.Mutex
+	wake  func()
 }
 
 // NewStealingScheduler creates a new work stealing scheduler
 func NewStealingScheduler() *StealingScheduler {
 	return &StealingScheduler{
-		workers: make(map[int32]*WorkStealingDeque[task]),
+		workers: make(map[int32]stealingWorker),
 	}
 }
 
 // Register adds a worker's queue to the scheduler
 func (s *StealingScheduler) Register(id int32, queue *WorkStealingDeque[task]) {
+	s.register(id, queue, nil, nil)
+}
+
+func (s *StealingScheduler) register(id int32, queue *WorkStealingDeque[task], lock *sync.Mutex, wake func()) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.workers[id] = queue
-	s.ids = append(s.ids, id)
+	if _, exists := s.workers[id]; !exists {
+		s.ids = append(s.ids, id)
+	}
+	s.workers[id] = stealingWorker{queue: queue, lock: lock, wake: wake}
 }
 
 // Unregister removes a worker from the scheduler
@@ -74,6 +86,54 @@ func (s *StealingScheduler) Unregister(id int32) {
 			break
 		}
 	}
+}
+
+// enqueue 把任务放入负载最低的本地队列，并唤醒对应 Worker。
+// limit 为所有本地队列的待处理任务总数上限，<=0 表示不限制。
+func (s *StealingScheduler) enqueue(item *task, limit int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.ids) == 0 {
+		return false
+	}
+	if limit > 0 {
+		total := 0
+		for _, worker := range s.workers {
+			total += worker.queue.Len()
+		}
+		if total >= limit {
+			return false
+		}
+	}
+
+	var target stealingWorker
+	best := -1
+	for _, id := range s.ids {
+		worker, ok := s.workers[id]
+		if !ok {
+			continue
+		}
+		pending := worker.queue.Len()
+		if best < 0 || pending < best {
+			best = pending
+			target = worker
+		}
+	}
+	if best < 0 {
+		return false
+	}
+	if target.lock != nil {
+		target.lock.Lock()
+	}
+	target.queue.PushBottom(item)
+	if target.lock != nil {
+		target.lock.Unlock()
+	}
+	if target.wake != nil {
+		target.wake()
+	}
+	return true
 }
 
 // steal 尝试从其他工作协程窃取任务。
@@ -95,8 +155,15 @@ func (s *StealingScheduler) steal(thiefID int32) *task {
 			continue
 		}
 
-		if queue, ok := s.workers[victimID]; ok {
-			if t := queue.Steal(); t != nil {
+		if worker, ok := s.workers[victimID]; ok {
+			if worker.lock != nil {
+				worker.lock.Lock()
+			}
+			t := worker.queue.Steal()
+			if worker.lock != nil {
+				worker.lock.Unlock()
+			}
+			if t != nil {
 				return t
 			}
 		}
@@ -111,8 +178,8 @@ func (s *StealingScheduler) TotalTasks() int {
 	defer s.mu.RUnlock()
 
 	total := 0
-	for _, queue := range s.workers {
-		total += queue.Len()
+	for _, worker := range s.workers {
+		total += worker.queue.Len()
 	}
 	return total
 }

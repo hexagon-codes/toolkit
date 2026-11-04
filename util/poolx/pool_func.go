@@ -70,6 +70,10 @@ func NewPoolWithFunc(name string, poolFunc func(any), opts ...Option) *PoolWithF
 	if config.QueueSize <= 0 {
 		config.QueueSize = config.MaxWorkers * 2
 	}
+	// 与 Pool.New 保持一致：非正 WorkerExpiry 不能传给 time.NewTicker。
+	if config.WorkerExpiry <= 0 {
+		config.WorkerExpiry = DefaultConfig().WorkerExpiry
+	}
 
 	p := &PoolWithFunc{
 		config:      config,
@@ -363,6 +367,12 @@ func (p *PoolWithFunc) InvokeWithTimeout(arg any, timeout time.Duration) error {
 
 // InvokeWithContext submits an argument with context cancellation support.
 func (p *PoolWithFunc) InvokeWithContext(ctx context.Context, arg any) error {
+	if ctx == nil {
+		return invalidArgumentError("context must not be nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	generation := p.loadRunningGeneration()
 	if generation == nil {
 		return ErrPoolClosed

@@ -112,12 +112,14 @@ func (f *Future[T]) Get() (T, error) {
 // GetWithTimeout blocks until the future completes or times out.
 // Returns ErrFutureTimeout if the timeout expires.
 func (f *Future[T]) GetWithTimeout(timeout time.Duration) (T, error) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case <-f.done:
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		return f.result, f.err
-	case <-time.After(timeout):
+	case <-timer.C:
 		var zero T
 		return zero, ErrFutureTimeout
 	}

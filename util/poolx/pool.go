@@ -158,6 +158,14 @@ func WithWorkStealing(enable bool) Option {
 	}
 }
 
+// WithStealBatchSize sets the maximum number of tasks a worker steals per round.
+// Values less than 1 are treated as 1.
+func WithStealBatchSize(n int32) Option {
+	return func(c *Config) {
+		c.StealBatchSize = n
+	}
+}
+
 // WithMaxBlockingTasks sets the maximum blocking tasks
 func WithMaxBlockingTasks(n int32) Option {
 	return func(c *Config) {
@@ -354,6 +362,29 @@ func (s *workerStack) pop() *worker {
 	return w
 }
 
+// remove 从空闲栈中移除指定 Worker；用于被本地队列唤醒的 Worker 重新变为忙碌。
+func (s *workerStack) remove(target *worker) bool {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	for offset := 0; offset < s.len; offset++ {
+		index := (s.head - s.len + offset + s.cap) % s.cap
+		if s.items[index] != target {
+			continue
+		}
+		for next := offset; next < s.len-1; next++ {
+			from := (s.head - s.len + next + 1 + s.cap) % s.cap
+			to := (s.head - s.len + next + s.cap) % s.cap
+			s.items[to] = s.items[from]
+		}
+		s.head = (s.head - 1 + s.cap) % s.cap
+		s.items[s.head] = nil
+		s.len--
+		return true
+	}
+	return false
+}
+
 func (s *workerStack) size() int {
 	s.lock.Lock()
 	defer s.lock.Unlock()
@@ -423,6 +454,7 @@ type task struct {
 	submitted int64 // UnixNano timestamp (lazy init, 0 = not set)
 	priority  int
 	id        uint64
+	started   chan struct{} // 本地队列任务被 Worker 开始执行时关闭；普通通道任务为 nil
 }
 
 var taskPool = sync.Pool{
@@ -446,6 +478,7 @@ func acquireTaskFast(fn func()) *task {
 	t.submitted = 0 // Lazy init - only set when needed
 	t.priority = 0
 	t.id = 0
+	t.started = nil
 	return t
 }
 
@@ -453,6 +486,7 @@ func acquireTaskWithOptions(fn func(), opts *TaskOptions) *task {
 	t := mustPoolValue[*task](taskPool.Get())
 	t.fn = fn
 	t.submitted = time.Now().UnixNano()
+	t.started = nil
 	if opts != nil {
 		t.priority = opts.Priority
 		t.id = opts.ID
@@ -475,6 +509,7 @@ func releaseTask(t *task) {
 	t.fn = nil
 	t.priority = 0
 	t.id = 0
+	t.started = nil
 	taskPool.Put(t)
 }
 
@@ -487,13 +522,28 @@ type worker struct {
 	pool       *Pool
 	generation *poolGeneration
 	taskCh     chan *task
+	wakeCh     chan struct{}            // 本地队列有新任务时唤醒空闲 Worker
+	localMu    sync.Mutex               // 串行化本地队列的生产、消费与窃取
 	localQueue *WorkStealingDeque[task] // Local queue for work stealing
 	lastActive atomic.Int64
+	idle       atomic.Bool
+	stopping   atomic.Bool
 	id         int32
 }
 
 func (w *worker) run() {
 	go w.loop()
+}
+
+// wake 通知空闲 Worker 处理本地队列；重复唤醒会被合并。
+func (w *worker) wake() {
+	if w.wakeCh == nil {
+		return
+	}
+	select {
+	case w.wakeCh <- struct{}{}:
+	default:
+	}
 }
 
 func (w *worker) loop() {
@@ -504,6 +554,8 @@ func (w *worker) loop() {
 		if pool.config.EnableWorkStealing && generation.stealingScheduler != nil && w.localQueue != nil {
 			generation.stealingScheduler.Unregister(w.id)
 		}
+		// Worker 退出前执行已接受的剩余任务，避免提交方永久等待或任务丢失。
+		w.drain()
 
 		generation.workerCount.Add(-1)
 		generation.metrics.RunningWorkers.Add(-1)
@@ -529,7 +581,7 @@ func (w *worker) loop() {
 
 	// Register with work stealing scheduler if enabled
 	if pool.config.EnableWorkStealing && generation.stealingScheduler != nil && w.localQueue != nil {
-		generation.stealingScheduler.Register(w.id, w.localQueue)
+		generation.stealingScheduler.register(w.id, w.localQueue, &w.localMu, w.wake)
 	}
 
 	// Trigger worker start hook
@@ -541,12 +593,28 @@ func (w *worker) loop() {
 		})
 	}
 
-	for t := range w.taskCh {
-		if t == nil {
-			return
+	for {
+		select {
+		case t := <-w.taskCh:
+			if t == nil {
+				return
+			}
+			if w.stopping.Load() {
+				w.execute(t)
+				return
+			}
+			if pool.config.EnableWorkStealing {
+				pool.leaveIdle(w)
+			}
+			w.execute(t)
+		case <-w.wakeCh:
+			if w.stopping.Load() {
+				return
+			}
+			if pool.config.EnableWorkStealing {
+				pool.leaveIdle(w)
+			}
 		}
-
-		w.execute(t)
 
 		// Try to process tasks from local queue (work stealing)
 		if pool.config.EnableWorkStealing && w.localQueue != nil {
@@ -562,11 +630,38 @@ func (w *worker) loop() {
 	}
 }
 
+// drain 执行 Worker 退出前已进入 taskCh 或本地队列的任务。
+// 退出并发期间的新提交由 generation 状态负责拒绝，不再保证进入此处。
+func (w *worker) drain() {
+	for {
+		select {
+		case t := <-w.taskCh:
+			if t == nil {
+				continue
+			}
+			w.execute(t)
+		default:
+			if w.localQueue == nil {
+				return
+			}
+			w.localMu.Lock()
+			t := w.localQueue.PopBottom()
+			w.localMu.Unlock()
+			if t == nil {
+				return
+			}
+			w.execute(t)
+		}
+	}
+}
+
 // processLocalQueue processes tasks from local queue and tries stealing
 func (w *worker) processLocalQueue() {
 	// Process all tasks in local queue
 	for {
+		w.localMu.Lock()
 		t := w.localQueue.PopBottom()
+		w.localMu.Unlock()
 		if t == nil {
 			break
 		}
@@ -575,8 +670,15 @@ func (w *worker) processLocalQueue() {
 
 	// Try to steal from other workers if enabled
 	if w.generation.stealingScheduler != nil {
-		stolen := w.generation.stealingScheduler.steal(w.id)
-		if stolen != nil {
+		batchSize := w.pool.config.StealBatchSize
+		if batchSize <= 0 {
+			batchSize = 1
+		}
+		for range batchSize {
+			stolen := w.generation.stealingScheduler.steal(w.id)
+			if stolen == nil {
+				break
+			}
 			w.generation.metrics.StolenTasks.Add(1)
 			w.execute(stolen)
 		}
@@ -584,6 +686,10 @@ func (w *worker) processLocalQueue() {
 }
 
 func (w *worker) execute(t *task) {
+	if t.started != nil {
+		close(t.started)
+		t.started = nil
+	}
 	generation := w.generation
 	startTime := time.Now()
 	submittedTime := t.getSubmittedTime()
@@ -667,6 +773,7 @@ func (w *worker) executeDirect(t *task) (panicked bool, panicVal any) {
 }
 
 func (w *worker) finish() {
+	w.stopping.Store(true)
 	w.taskCh <- nil
 }
 
@@ -779,6 +886,11 @@ func New(name string, opts ...Option) *Pool {
 	if config.QueueSize <= 0 {
 		config.QueueSize = config.MaxWorkers * 2
 	}
+	// time.NewTicker 不接受非正 interval；WorkerExpiry 是公开可配置项，
+	// 必须在启动后台 cleaner 前归一化，否则会在 goroutine 中 panic。
+	if config.WorkerExpiry <= 0 {
+		config.WorkerExpiry = DefaultConfig().WorkerExpiry
+	}
 
 	p := &Pool{
 		config:    config,
@@ -855,8 +967,13 @@ func (p *Pool) preheatLocked(generation *poolGeneration) {
 			break
 		}
 		w.run()
-		generation.workers.push(w)
-		generation.metrics.IdleWorkers.Add(1)
+		if w.idle.CompareAndSwap(false, true) {
+			if generation.workers.push(w) {
+				generation.metrics.IdleWorkers.Add(1)
+			} else {
+				w.idle.Store(false)
+			}
+		}
 	}
 }
 
@@ -878,7 +995,10 @@ func (p *Pool) createWorkerLocked(generation *poolGeneration) *worker {
 	w.generation = generation
 	w.id = id
 	w.lastActive.Store(time.Now().UnixNano())
+	w.idle.Store(false)
+	w.stopping.Store(false)
 	w.taskCh = make(chan *task, 4)
+	w.wakeCh = make(chan struct{}, 1)
 
 	if p.config.EnableWorkStealing {
 		w.localQueue = NewWorkStealingDeque[task](64)
@@ -908,6 +1028,7 @@ func (p *Pool) retrieveWorkerLocked(generation *poolGeneration) *worker {
 		return nil
 	}
 	if w := generation.workers.pop(); w != nil {
+		w.idle.Store(false)
 		generation.metrics.IdleWorkers.Add(-1)
 		return w
 	}
@@ -920,18 +1041,49 @@ func (p *Pool) retrieveWorkerLocked(generation *poolGeneration) *worker {
 	return nil
 }
 
+// leaveIdle 将 Worker 从空闲栈移除，使其从“空闲”状态转为处理本地队列或窃取任务。
+func (p *Pool) leaveIdle(w *worker) {
+	generation := w.generation
+	if generation == nil || generation.workers == nil {
+		return
+	}
+	if !w.idle.CompareAndSwap(true, false) {
+		return
+	}
+	p.lock.Lock()
+	if generation.workers.remove(w) {
+		generation.metrics.IdleWorkers.Add(-1)
+	}
+	p.lock.Unlock()
+}
+
 // revertWorker returns a worker to idle
 func (p *Pool) revertWorker(w *worker) bool {
 	w.lastActive.Store(time.Now().UnixNano())
 	generation := w.generation
 
+	if w.stopping.Load() {
+		w.idle.Store(false)
+		return false
+	}
+	// 同一个 Worker 只能进入空闲栈一次；启动阶段本地队列任务可能先触发回收。
+	if !w.idle.CompareAndSwap(false, true) {
+		return true
+	}
+
 	p.lock.Lock()
 	defer p.lock.Unlock()
 
+	if w.stopping.Load() {
+		w.idle.Store(false)
+		return false
+	}
 	if generation.state.Load() == stateClosed {
+		w.idle.Store(false)
 		return false
 	}
 	if generation.workerCount.Load() > p.maxWorkers.Load() {
+		w.idle.Store(false)
 		return false
 	}
 
@@ -940,7 +1092,7 @@ func (p *Pool) revertWorker(w *worker) bool {
 		p.waiters.signalLocked()
 		return true
 	}
-
+	w.idle.Store(false)
 	return false
 }
 
@@ -977,11 +1129,15 @@ func (p *Pool) cleanupExpiredWorkers(generation *poolGeneration) {
 	currentRunning := generation.workerCount.Load()
 
 	for _, w := range expired {
+		w.idle.Store(false)
 		if currentRunning <= minToKeep {
-			if generation.workers.push(w) {
-				generation.metrics.IdleWorkers.Add(1)
-			} else {
-				w.finish()
+			if w.idle.CompareAndSwap(false, true) {
+				if generation.workers.push(w) {
+					generation.metrics.IdleWorkers.Add(1)
+				} else {
+					w.idle.Store(false)
+					w.finish()
+				}
 			}
 		} else {
 			w.finish()
@@ -992,6 +1148,9 @@ func (p *Pool) cleanupExpiredWorkers(generation *poolGeneration) {
 
 // Submit submits a task (blocks until accepted or pool closed)
 func (p *Pool) Submit(fn func()) error {
+	if fn == nil {
+		return invalidArgumentError("task function must not be nil")
+	}
 	// Fast path: no hooks, no options
 	if p.hooks == nil && !p.config.NonBlocking && p.config.MaxBlockingTasks == 0 {
 		return p.submitFast(fn)
@@ -1009,6 +1168,36 @@ func (p *Pool) loadRunningGeneration() *poolGeneration {
 
 func (p *Pool) generationRunningLocked(generation *poolGeneration) bool {
 	return generation != nil && p.generation.Load() == generation && generation.state.Load() == stateRunning
+}
+
+// enqueueLocalTaskLocked 将任务放入负载最低的 Worker 本地队列。
+// 返回 started 通道供提交方等待任务真正开始执行；队列不可用时返回 false，
+// 调用方应回退到原有阻塞等待路径。
+func (p *Pool) enqueueLocalTaskLocked(generation *poolGeneration, t *task) (<-chan struct{}, bool) {
+	if !p.config.EnableWorkStealing || generation == nil || generation.stealingScheduler == nil {
+		return nil, false
+	}
+	started := make(chan struct{})
+	t.started = started
+	if !generation.stealingScheduler.enqueue(t, int(p.config.QueueSize)) {
+		t.started = nil
+		return nil, false
+	}
+	return started, true
+}
+
+// waitForTaskStart 等待本地队列任务被某个 Worker 开始执行；池关闭时返回 ErrPoolClosed。
+func waitForTaskStart(started <-chan struct{}, generation *poolGeneration) error {
+	if generation == nil || generation.done == nil {
+		<-started
+		return nil
+	}
+	select {
+	case <-started:
+		return nil
+	case <-generation.done:
+		return ErrPoolClosed
+	}
 }
 
 // submitFast is the optimized submit path for common case (no hooks, no special options)
@@ -1056,6 +1245,12 @@ func (p *Pool) submitFast(fn func()) error {
 			return nil
 		}
 
+		// Work stealing: 队列积压时投递到负载最低的本地队列，等待某个 Worker 开始执行。
+		if started, ok := p.enqueueLocalTaskLocked(generation, t); ok {
+			p.lock.Unlock()
+			return waitForTaskStart(started, generation)
+		}
+
 		// Wait
 		p.waiters.waitLocked(&p.lock, nil)
 	}
@@ -1063,6 +1258,9 @@ func (p *Pool) submitFast(fn func()) error {
 
 // SubmitWithOptions submits a task with optional settings
 func (p *Pool) SubmitWithOptions(fn func(), opts ...TaskOption) error {
+	if fn == nil {
+		return invalidArgumentError("task function must not be nil")
+	}
 	generation := p.loadRunningGeneration()
 	if generation == nil {
 		return ErrPoolClosed
@@ -1176,6 +1374,15 @@ func (p *Pool) SubmitWithOptions(fn func(), opts ...TaskOption) error {
 			return nil
 		}
 
+		// Work stealing: 队列积压时投递到负载最低的本地队列。
+		if started, ok := p.enqueueLocalTaskLocked(generation, t); ok {
+			p.lock.Unlock()
+			if taskInfo != nil {
+				p.hooks.Trigger(HookAfterSubmit, taskInfo)
+			}
+			return waitForTaskStart(started, generation)
+		}
+
 		// Wait
 		p.waiters.waitLocked(&p.lock, nil)
 	}
@@ -1183,6 +1390,9 @@ func (p *Pool) SubmitWithOptions(fn func(), opts ...TaskOption) error {
 
 // TrySubmit attempts to submit a task (non-blocking)
 func (p *Pool) TrySubmit(fn func()) bool {
+	if fn == nil {
+		return false
+	}
 	generation := p.loadRunningGeneration()
 	if generation == nil {
 		return false
@@ -1212,6 +1422,11 @@ func (p *Pool) SubmitBatch(fns []func()) (int, error) {
 	n := len(fns)
 	if n == 0 {
 		return 0, nil
+	}
+	for index, fn := range fns {
+		if fn == nil {
+			return 0, invalidArgumentError(fmt.Sprintf("task function at index %d must not be nil", index))
+		}
 	}
 
 	generation := p.loadRunningGeneration()
@@ -1282,6 +1497,12 @@ func (p *Pool) submitBlockingFast(generation *poolGeneration, fn func()) error {
 			return nil
 		}
 
+		// Work stealing: 队列积压时投递到负载最低的本地队列。
+		if started, ok := p.enqueueLocalTaskLocked(generation, t); ok {
+			p.lock.Unlock()
+			return waitForTaskStart(started, generation)
+		}
+
 		// Wait
 		p.waiters.waitLocked(&p.lock, nil)
 	}
@@ -1291,8 +1512,16 @@ func (p *Pool) submitBlockingFast(generation *poolGeneration, fn func()) error {
 // Returns the number of successfully submitted tasks.
 func (p *Pool) TrySubmitBatch(fns []func()) int {
 	n := len(fns)
+	if n == 0 {
+		return 0
+	}
+	for _, fn := range fns {
+		if fn == nil {
+			return 0
+		}
+	}
 	generation := p.loadRunningGeneration()
-	if n == 0 || generation == nil {
+	if generation == nil {
 		return 0
 	}
 
@@ -1508,6 +1737,7 @@ func (p *Pool) Tune(newCap int32) {
 	excess := generation.workerCount.Load() - newCap
 	for excess > 0 {
 		if w := generation.workers.pop(); w != nil {
+			w.idle.Store(false)
 			generation.metrics.IdleWorkers.Add(-1)
 			w.finish()
 			excess--
@@ -1536,6 +1766,7 @@ func (p *Pool) closeCurrentGeneration() (generation *poolGeneration, done <-chan
 		if worker == nil {
 			break
 		}
+		worker.idle.Store(false)
 		generation.metrics.IdleWorkers.Add(-1)
 		worker.finish()
 	}
@@ -2185,6 +2416,9 @@ func (e *ParallelExecutor) ExecuteAll(ctx context.Context, tasks ...func() error
 
 // Map applies a function to each item in parallel
 func Map[T, R any](ctx context.Context, items []T, maxConcurrency int, fn func(T) (R, error)) ([]R, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if maxConcurrency <= 0 {
 		maxConcurrency = 1
 	}
@@ -2224,6 +2458,9 @@ func Map[T, R any](ctx context.Context, items []T, maxConcurrency int, fn func(T
 
 // ForEach applies a function to each item in parallel
 func ForEach[T any](ctx context.Context, items []T, maxConcurrency int, fn func(T) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if maxConcurrency <= 0 {
 		maxConcurrency = 1
 	}

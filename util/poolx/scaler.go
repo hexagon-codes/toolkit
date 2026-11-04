@@ -232,7 +232,12 @@ func (s *AutoScaler) scaleUp(generation *poolGeneration, currentWorkers int32) {
 			break
 		}
 		w.run()
+		if !w.idle.CompareAndSwap(false, true) {
+			added++
+			continue
+		}
 		if !generation.workers.push(w) {
+			w.idle.Store(false)
 			w.finish()
 			break
 		}
@@ -286,6 +291,7 @@ func (s *AutoScaler) scaleDown(generation *poolGeneration, currentWorkers int32)
 		if w == nil {
 			break
 		}
+		w.idle.Store(false)
 		generation.metrics.IdleWorkers.Add(-1)
 		// Signal worker to stop
 		w.finish()
